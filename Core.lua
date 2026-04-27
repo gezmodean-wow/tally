@@ -174,12 +174,29 @@ if LDB then
     Cogworks.RegisterCallback(addonName, Cogworks.Events.InventoryChanged, refreshText)
   end
 
-  -- Cogworks wraps LibDBIcon registration with the suite's gear-ring border
-  -- so every cog's minimap button shares the Chronoforge silhouette. Falls
-  -- back to a plain LDBIcon registration if Cogworks isn't loaded.
-  if Cogworks and Cogworks.RegisterCogMinimapButton then
-    Cogworks:RegisterCogMinimapButton(addonName, dataobject, TallyDB.minimap)
-  elseif LDBIcon then
+  -- Suite minimap-button chrome: gear-shaped border around the per-cog inner
+  -- glyph. Cogworks 1.0.6 ships a `RegisterCogMinimapButton` helper but it
+  -- (a) calls a non-existent LDBIcon:SetButtonBorder method and (b) hardcodes
+  -- a texture path that only resolves when Cogworks is installed as a
+  -- standalone addon. Filed upstream — workaround here is a direct overlay
+  -- swap on the LibDBIcon button using a local copy of CogBorder.tga.
+  if LDBIcon then
     LDBIcon:Register(addonName, dataobject, TallyDB.minimap)
+    local button = LDBIcon:GetMinimapButton and LDBIcon:GetMinimapButton(addonName)
+      or (LDBIcon.objects and LDBIcon.objects[addonName])
+    if button then
+      -- Find and hide LibDBIcon's default tracking-border overlay (texture id
+      -- 136430, "Interface\\Minimap\\MiniMap-TrackingBorder") and replace it
+      -- with the Cogworks gear-ring at the same size/anchor.
+      for _, region in ipairs({ button:GetRegions() }) do
+        if region:GetObjectType() == "Texture" and region:GetTexture() == 136430 then
+          region:Hide()
+        end
+      end
+      local gear = button:CreateTexture(nil, "OVERLAY")
+      gear:SetTexture("Interface\\AddOns\\Tally\\Art\\CogBorder")
+      gear:SetSize(53, 53)
+      gear:SetPoint("TOPLEFT")
+    end
   end
 end
