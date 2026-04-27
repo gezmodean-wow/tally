@@ -1,0 +1,27 @@
+package-as: tally
+
+enable-nolib-creation: no
+
+# Libraries are vendored directly in Libs/ (LibStub, CallbackHandler-1.0,
+# LibDataBroker-1.1, LibDBIcon-1.0) — we stopped relying on wowace SVN
+# externals after 502/503 flakiness broke builds. Cogworks-1.0 is fetched
+# from our own GitHub repo via a pinned-tag git external so upgrades are
+# explicit (bump the tag when you want the newer library). The `path`
+# directive copies only the Cogworks-1.0 subdirectory of the source repo
+# into Libs/Cogworks-1.0.
+externals:
+  Libs/Cogworks-1.0:
+    url: https://github.com/gezmodean-wow/cogworks.git
+    tag: v0.1.0
+    path: Cogworks-1.0
+
+wowi-archive-previous: no
+
+ignore:
+  - "*.md"
+  - .gitignore
+  - .claude
+  - .vscode
+  - .git
+  - .github
+  - feedback

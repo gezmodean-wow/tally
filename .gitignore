@@ -1,0 +1,13 @@
+.claude/
+.vscode/
+.DS_Store
+Thumbs.db
+*.swp
+*.bak
+*.zip
+.release/
+
+# Cogworks-1.0 is fetched at package time via .pkgmeta externals
+# (from github.com/gezmodean-wow/cogworks). A local copy may exist
+# for dev/testing but is not tracked.
+Libs/Cogworks-1.0/
