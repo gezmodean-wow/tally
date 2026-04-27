@@ -182,7 +182,7 @@ if LDB then
   -- swap on the LibDBIcon button using a local copy of CogBorder.tga.
   if LDBIcon then
     LDBIcon:Register(addonName, dataobject, TallyDB.minimap)
-    local button = LDBIcon:GetMinimapButton and LDBIcon:GetMinimapButton(addonName)
+    local button = (LDBIcon.GetMinimapButton and LDBIcon:GetMinimapButton(addonName))
       or (LDBIcon.objects and LDBIcon.objects[addonName])
     if button then
       -- Find and hide LibDBIcon's default tracking-border overlay (texture id
