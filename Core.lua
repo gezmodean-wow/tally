@@ -185,18 +185,26 @@ if LDB then
     local button = (LDBIcon.GetMinimapButton and LDBIcon:GetMinimapButton(addonName))
       or (LDBIcon.objects and LDBIcon.objects[addonName])
     if button then
-      -- Find and hide LibDBIcon's default tracking-border overlay (texture id
-      -- 136430, "Interface\\Minimap\\MiniMap-TrackingBorder") and replace it
-      -- with the Cogworks gear-ring at the same size/anchor.
+      -- Hide LibDBIcon's default tracking-border overlay so the gold ring
+      -- doesn't render under our gear. GetTexture() returns the file ID for
+      -- some bindings and the path string for others — match both.
       for _, region in ipairs({ button:GetRegions() }) do
-        if region:GetObjectType() == "Texture" and region:GetTexture() == 136430 then
-          region:Hide()
+        if region:GetObjectType() == "Texture" then
+          local tex = region:GetTexture()
+          if tex == 136430 or tex == "Interface\\Minimap\\MiniMap-TrackingBorder" then
+            region:Hide()
+          end
         end
       end
-      local gear = button:CreateTexture(nil, "OVERLAY")
+      -- Mount the gear centered on the button with explicit size. The button
+      -- is 31×31; the gear extends ~11px past each side at 53×53 (matching
+      -- LDBIcon's default 53×53 overlay extent). Sublevel 7 keeps it above
+      -- any future overlay textures other addons add.
+      local gear = button:CreateTexture("$parentTallyGearBorder", "OVERLAY", nil, 7)
       gear:SetTexture("Interface\\AddOns\\Tally\\Art\\CogBorder")
+      gear:ClearAllPoints()
       gear:SetSize(53, 53)
-      gear:SetPoint("TOPLEFT")
+      gear:SetPoint("CENTER", button, "CENTER", 0, 0)
     end
   end
 end
