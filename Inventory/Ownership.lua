@@ -8,17 +8,30 @@
 -- actual data shapes (which differ between bags, bank tabs, and warband).
 --
 -- Rollup shape (in TallyDB.inventoryRollup):
---   characters[charKey] = { gold, items = { [itemKey] = { itemID, count, locations } } }
---   warband             = { gold, items = { [itemKey] = { itemID, count } } }
+--   characters[charKey] = { gold, items = { [itemKey] = { itemID, total, saleable, locations } } }
+--   warband             = { gold, items = { [itemKey] = { itemID, total, saleable } } }
 --   lastFullScan        = epoch seconds
+--
+-- `total` is every instance owned. `saleable` is the subset that isn't bound
+-- (Syndicator's per-slot isBound flag is false). Net worth uses `saleable`;
+-- a future "owned worth" view uses `total`.
 
 local addonName, ns = ...
 
 local Ownership = {}
 ns.Inventory = Ownership
 
+local WOW_TOKEN_ITEM_ID = 122270
+
 local function syndicator()
   return Syndicator and Syndicator.API or nil
+end
+
+-- WoW Tokens are technically bind-on-pickup but are convertible to gold or
+-- game time, so we count them as saleable regardless of isBound.
+local function isSlotSaleable(slot, itemID)
+  if itemID == WOW_TOKEN_ITEM_ID then return true end
+  return not slot.isBound
 end
 
 -- Fold a Syndicator slot list into the caller's items table. Each slot
@@ -34,16 +47,14 @@ local function foldSlots(items, slots, location)
         local entry = items[key]
         if not entry then
           local itemID = ns.Items.GetNumericID(key)
-          if not itemID and key:find("^pet:") then
-            -- Pets don't have a WoW item ID; we store the canonical key as ID
-            -- so callers that need a numeric ID just see nil for pets.
-            itemID = nil
-          end
-          entry = { itemID = itemID, count = 0, locations = {} }
+          entry = { itemID = itemID, total = 0, saleable = 0, locations = {} }
           items[key] = entry
         end
         local count = slot.itemCount or 1
-        entry.count = entry.count + count
+        entry.total = entry.total + count
+        if isSlotSaleable(slot, entry.itemID) then
+          entry.saleable = entry.saleable + count
+        end
         if location then
           entry.locations[location] = (entry.locations[location] or 0) + count
         end
@@ -158,43 +169,50 @@ end
 -- Aggregate a single itemKey across the entire rollup.
 -- Returns (totalCount, perCharacterTable) where perCharacterTable is
 -- { [charKey] = count } including a synthetic "Warband" entry.
+-- Aggregate a single itemKey across the rollup.
+-- Returns ({ total, saleable }, perChar) where perChar[charKey] = { total, saleable }.
 function Ownership:GetItemOwnership(itemKey)
   local rollup = self:Get() or {}
-  local total = 0
+  local agg = { total = 0, saleable = 0 }
   local byKey = {}
   for charKey, char in pairs(rollup.characters or {}) do
     local entry = char.items and char.items[itemKey]
-    if entry and entry.count > 0 then
-      byKey[charKey] = entry.count
-      total = total + entry.count
+    if entry and entry.total > 0 then
+      byKey[charKey] = { total = entry.total, saleable = entry.saleable or 0 }
+      agg.total = agg.total + entry.total
+      agg.saleable = agg.saleable + (entry.saleable or 0)
     end
   end
   if rollup.warband then
     local entry = rollup.warband.items and rollup.warband.items[itemKey]
-    if entry and entry.count > 0 then
-      byKey["Warband"] = entry.count
-      total = total + entry.count
+    if entry and entry.total > 0 then
+      byKey["Warband"] = { total = entry.total, saleable = entry.saleable or 0 }
+      agg.total = agg.total + entry.total
+      agg.saleable = agg.saleable + (entry.saleable or 0)
     end
   end
-  return total, byKey
+  return agg, byKey
 end
 
 -- Aggregate ownership for all keys sharing a numeric itemID. Useful when the
 -- user passes a bare item ID and we want to roll up across bonus-ID variants.
 function Ownership:GetItemOwnershipByID(itemID)
-  if not itemID then return 0, {}, {} end
+  if not itemID then return { total = 0, saleable = 0 }, {}, {} end
   local rollup = self:Get() or {}
-  local total = 0
-  local byKey = {} -- [charKey] = total across all variants
-  local matchedKeys = {} -- set of canonical keys we summed
+  local agg = { total = 0, saleable = 0 }
+  local byKey = {}
+  local matchedKeys = {}
   local function fold(charKey, items)
     if type(items) ~= "table" then return end
     for key, entry in pairs(items) do
       local id = ns.Items.GetNumericID(key)
-      if id == itemID and entry.count > 0 then
-        byKey[charKey] = (byKey[charKey] or 0) + entry.count
+      if id == itemID and entry.total > 0 then
+        byKey[charKey] = byKey[charKey] or { total = 0, saleable = 0 }
+        byKey[charKey].total = byKey[charKey].total + entry.total
+        byKey[charKey].saleable = byKey[charKey].saleable + (entry.saleable or 0)
         matchedKeys[key] = true
-        total = total + entry.count
+        agg.total = agg.total + entry.total
+        agg.saleable = agg.saleable + (entry.saleable or 0)
       end
     end
   end
@@ -202,5 +220,5 @@ function Ownership:GetItemOwnershipByID(itemID)
     fold(charKey, char.items)
   end
   if rollup.warband then fold("Warband", rollup.warband.items) end
-  return total, byKey, matchedKeys
+  return agg, byKey, matchedKeys
 end

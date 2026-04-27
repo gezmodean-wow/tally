@@ -90,16 +90,22 @@ function Pricing:GetUnitValue(itemID, itemKey, strategy)
   return 0, "none"
 end
 
--- Aggregate value: itemMap is { [itemKey] = { itemID = N, count = N } }.
+-- Aggregate value: itemMap is { [itemKey] = { itemID, total, saleable } }.
+-- `countField` selects which count to value — defaults to "saleable" so net
+-- worth excludes bound items. Pass `countField = "total"` for owned-worth.
 -- Returns (totalCopper, breakdown) where breakdown[source] = copper subtotal.
-function Pricing:ValueItemMap(itemMap, strategy)
+function Pricing:ValueItemMap(itemMap, strategy, opts)
+  local field = (opts and opts.countField) or "saleable"
   local total = 0
   local breakdown = { tsm = 0, token = 0, vendor = 0, none = 0 }
   for itemKey, entry in pairs(itemMap) do
-    local unit, source = self:GetUnitValue(entry.itemID, itemKey, strategy)
-    local subtotal = unit * (entry.count or 0)
-    total = total + subtotal
-    breakdown[source] = (breakdown[source] or 0) + subtotal
+    local count = entry[field] or 0
+    if count > 0 then
+      local unit, source = self:GetUnitValue(entry.itemID, itemKey, strategy)
+      local subtotal = unit * count
+      total = total + subtotal
+      breakdown[source] = (breakdown[source] or 0) + subtotal
+    end
   end
   return total, breakdown
 end

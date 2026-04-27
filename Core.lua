@@ -79,7 +79,8 @@ _G.TallyAPI = {
 local function printHelp()
   local prefix = "|cff7fbfffTally|r"
   print(prefix .. " — Personal Capital for WoW.")
-  print("  /tally networth (or /tly nw) — print current net worth")
+  print("  /tally networth (or /tly nw) — print current net worth (saleable items only)")
+  print("  /tally ownedworth (or /tly ow) — print owned worth (includes bound items)")
   print("  /tally research <itemlink-or-id> — print research record for an item")
   print("  /tally rescan — force inventory rescan via Syndicator")
   print("  /tally strategy — print current price strategy")
@@ -96,6 +97,8 @@ local function handleSlash(msg)
   cmd = cmd:lower()
   if cmd == "networth" or cmd == "nw" then
     ns.NetWorth:Print()
+  elseif cmd == "ownedworth" or cmd == "ow" then
+    ns.NetWorth:Print({ includeBound = true })
   elseif cmd == "research" or cmd == "r" then
     if rest == "" then
       print("|cff7fbfffTally:|r usage — /tally research <itemlink-or-id>")
@@ -141,7 +144,8 @@ if LDB then
     end,
     OnTooltipShow = function(tooltip)
       local snap = ns.NetWorth:Snapshot()
-      tooltip:SetText("|cff7fbfffTally|r — net worth")
+      local owned = ns.NetWorth:Snapshot({ includeBound = true })
+      tooltip:SetText("|cff7fbfffTally|r — net worth (saleable items only)")
       tooltip:AddLine(" ")
       tooltip:AddDoubleLine("Total", ns.NetWorth.FormatGold(snap.total), 1, 1, 1, 1, 1, 1)
       tooltip:AddDoubleLine("  Gold", ns.NetWorth.FormatGold(snap.gold), 0.7, 0.7, 0.7, 1, 1, 1)
@@ -149,6 +153,9 @@ if LDB then
       if snap.warband.total > 0 then
         tooltip:AddDoubleLine("Warband", ns.NetWorth.FormatGold(snap.warband.total), 0.7, 0.85, 1, 1, 1, 1)
       end
+      tooltip:AddLine(" ")
+      tooltip:AddDoubleLine("Owned worth (incl. bound)", ns.NetWorth.FormatGold(owned.total),
+        0.6, 0.6, 0.6, 0.85, 0.85, 0.85)
       tooltip:AddLine(" ")
       tooltip:AddLine("Strategy: " .. snap.strategy, 0.6, 0.6, 0.6)
       tooltip:AddLine("Left-click: print details", 0.6, 0.6, 0.6)

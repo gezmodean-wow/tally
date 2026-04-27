@@ -32,14 +32,16 @@ function NetWorth:SetStrategy(expression)
   return true
 end
 
--- Returns a structured snapshot:
---   { total, gold, items, tokens, breakdown = { tsm, token, vendor, none },
---     byCharacter = { [charKey] = { gold, items, total } },
---     warband = { gold, items, total }, strategy = "..." }
-function NetWorth:Snapshot()
+-- Returns a structured snapshot.
+--   opts.includeBound = true → owned-worth view (counts bound items too).
+--                       false (default) → net-worth view (saleable only).
+function NetWorth:Snapshot(opts)
+  local includeBound = opts and opts.includeBound or false
+  local valueOpts = { countField = includeBound and "total" or "saleable" }
   local rollup = ns.Inventory:Get()
   local s = strategy()
   local snapshot = {
+    view = includeBound and "owned" or "net",
     total = 0, gold = 0, items = 0,
     breakdown = { tsm = 0, token = 0, vendor = 0, none = 0 },
     byCharacter = {},
@@ -49,7 +51,7 @@ function NetWorth:Snapshot()
   if not rollup then return snapshot end
 
   for charKey, char in pairs(rollup.characters or {}) do
-    local itemValue, breakdown = ns.Pricing:ValueItemMap(char.items or {}, s)
+    local itemValue, breakdown = ns.Pricing:ValueItemMap(char.items or {}, s, valueOpts)
     snapshot.byCharacter[charKey] = {
       gold = char.gold or 0,
       items = itemValue,
@@ -61,7 +63,7 @@ function NetWorth:Snapshot()
   end
 
   if rollup.warband then
-    local itemValue, breakdown = ns.Pricing:ValueItemMap(rollup.warband.items or {}, s)
+    local itemValue, breakdown = ns.Pricing:ValueItemMap(rollup.warband.items or {}, s, valueOpts)
     snapshot.warband.gold = rollup.warband.gold or 0
     snapshot.warband.items = itemValue
     snapshot.warband.total = snapshot.warband.gold + itemValue
@@ -91,10 +93,11 @@ end
 
 NetWorth.FormatGold = formatGold
 
-function NetWorth:Print()
-  local snap = self:Snapshot()
+function NetWorth:Print(opts)
+  local snap = self:Snapshot(opts)
   local prefix = "|cff7fbfffTally|r"
-  print(prefix .. " net worth (" .. snap.strategy .. "):")
+  local label = snap.view == "owned" and "owned worth (incl. bound)" or "net worth (saleable only)"
+  print(prefix .. " " .. label .. " — " .. snap.strategy .. ":")
   print("  Total: " .. formatGold(snap.total))
   print("    Gold: " .. formatGold(snap.gold))
   print("    Items: " .. formatGold(snap.items))

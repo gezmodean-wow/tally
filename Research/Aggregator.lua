@@ -80,53 +80,42 @@ local function copperFromPrice(value)
   return g * 10000 + s * 100 + c
 end
 
+-- Returns (inventory[], totalCount, saleableCount). Each inventory entry has
+-- both `quantity` (total) and `saleable` so FlipQueue's existing UI keeps
+-- working unchanged while Tally can render the saleable distinction.
 local function buildOwnership(itemKey, itemID, isBareID)
   local rollup = ns.Inventory:Get() or {}
   local inventory = {}
-  local total = 0
 
-  -- Bare numeric ID input: aggregate across all bonus-ID variants. Hand-built
-  -- links (the common case) use exact-key match so we preserve variant detail.
   if isBareID and itemID then
     local agg, byKey = ns.Inventory:GetItemOwnershipByID(itemID)
-    for charKey, count in pairs(byKey) do
+    for charKey, counts in pairs(byKey) do
       table.insert(inventory, {
         charKey = charKey,
-        quantity = count,
-        locations = charKey == "Warband" and { warbank = count } or {},
+        quantity = counts.total,
+        saleable = counts.saleable,
+        locations = charKey == "Warband" and { warbank = counts.total } or {},
         lastScan = rollup.lastFullScan,
       })
     end
-    return inventory, agg
+    return inventory, agg.total, agg.saleable
   end
 
-  for charKey, char in pairs(rollup.characters or {}) do
-    local entry = char.items and char.items[itemKey]
-    if entry and entry.count > 0 then
-      table.insert(inventory, {
-        charKey = charKey,
-        quantity = entry.count,
-        locations = entry.locations or {},
-        lastScan = rollup.lastFullScan,
-      })
-      total = total + entry.count
-    end
+  local agg, byKey = ns.Inventory:GetItemOwnership(itemKey)
+  for charKey, counts in pairs(byKey) do
+    local entry = (rollup.characters and rollup.characters[charKey] and rollup.characters[charKey].items
+      and rollup.characters[charKey].items[itemKey])
+      or (charKey == "Warband" and rollup.warband and rollup.warband.items and rollup.warband.items[itemKey])
+      or nil
+    table.insert(inventory, {
+      charKey = charKey,
+      quantity = counts.total,
+      saleable = counts.saleable,
+      locations = (entry and entry.locations) or (charKey == "Warband" and { warbank = counts.total } or {}),
+      lastScan = rollup.lastFullScan,
+    })
   end
-
-  if rollup.warband then
-    local entry = rollup.warband.items and rollup.warband.items[itemKey]
-    if entry and entry.count > 0 then
-      table.insert(inventory, {
-        charKey = "Warband",
-        quantity = entry.count,
-        locations = { warbank = entry.count },
-        lastScan = rollup.lastFullScan,
-      })
-      total = total + entry.count
-    end
-  end
-
-  return inventory, total
+  return inventory, agg.total, agg.saleable
 end
 
 local function buildPricing(itemID, itemKey)
@@ -279,6 +268,7 @@ function Research:GetRecord(input, itemName, skipCache)
 
     inventory = {},
     totalInventory = 0,
+    saleableInventory = 0,
 
     sales = {},
     salesSummary = { count = 0, totalRevenue = 0, avgPrice = 0, byRealm = {} },
@@ -289,20 +279,21 @@ function Research:GetRecord(input, itemName, skipCache)
     purchases = {},
 
     pricing = nil,
-    valuation = { netWorthContribution = 0 },
+    valuation = { netWorthContribution = 0, ownedWorthContribution = 0 },
     tsm = nil,           -- preserved for FlipQueue compatibility; populated below
     history = nil,       -- Phase 2
     categories = {},     -- Phase 4
   }
 
-  record.inventory, record.totalInventory = buildOwnership(itemKey, itemID, isBareID)
+  record.inventory, record.totalInventory, record.saleableInventory = buildOwnership(itemKey, itemID, isBareID)
 
   -- Pets aren't priced via TSM by item-ID. Skip pricing for pets; future
   -- enhancement could integrate pet-cage market data.
   if not isPet and itemID then
     record.pricing = buildPricing(itemID, itemKey)
     record.tsm = record.pricing.sources
-    record.valuation.netWorthContribution = (record.pricing.unitValue or 0) * record.totalInventory
+    record.valuation.netWorthContribution = (record.pricing.unitValue or 0) * record.saleableInventory
+    record.valuation.ownedWorthContribution = (record.pricing.unitValue or 0) * record.totalInventory
   else
     record.pricing = { strategy = ns.NetWorth:GetStrategy(), unitValue = 0, sources = {} }
     record.tsm = {}
@@ -338,14 +329,25 @@ function Research:Print(input)
     print(string.format("  Owned: %d (pets aren't priced — net-worth contribution skipped)",
       record.totalInventory))
   else
-    print(string.format("  Owned: %d (worth %s @ %s)",
-      record.totalInventory, fmt(record.valuation.netWorthContribution), record.pricing.strategy))
+    local boundCount = record.totalInventory - record.saleableInventory
+    if boundCount > 0 then
+      print(string.format("  Owned: %d total, %d saleable (%d bound) — saleable worth %s @ %s",
+        record.totalInventory, record.saleableInventory, boundCount,
+        fmt(record.valuation.netWorthContribution), record.pricing.strategy))
+    else
+      print(string.format("  Owned: %d (worth %s @ %s)",
+        record.totalInventory, fmt(record.valuation.netWorthContribution), record.pricing.strategy))
+    end
   end
   -- Per-character/warband breakdown — useful for confirming warband visibility.
   if #record.inventory > 0 then
     local parts = {}
     for _, inv in ipairs(record.inventory) do
-      parts[#parts + 1] = inv.charKey .. " ×" .. inv.quantity
+      if inv.saleable and inv.saleable < inv.quantity then
+        parts[#parts + 1] = string.format("%s ×%d (%d saleable)", inv.charKey, inv.quantity, inv.saleable)
+      else
+        parts[#parts + 1] = inv.charKey .. " ×" .. inv.quantity
+      end
     end
     print("  Locations: " .. table.concat(parts, ", "))
   end
