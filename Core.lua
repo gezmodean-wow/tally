@@ -196,14 +196,15 @@ if LDB then
           end
         end
       end
-      -- Mount the gear centered on the button with explicit size. The button
-      -- is 31×31; the gear extends ~11px past each side at 53×53 (matching
-      -- LDBIcon's default 53×53 overlay extent). Sublevel 7 keeps it above
-      -- any future overlay textures other addons add.
+      -- Mount the gear centered on the button. CogBorder.tga's silhouette
+      -- fills nearly the full 128×128 texture rectangle, so we render at
+      -- 32×32 (just slightly larger than the 31-px button) to keep the
+      -- visible gear footprint proportional to the button. Sublevel 7
+      -- stays above future overlays.
       local gear = button:CreateTexture("$parentTallyGearBorder", "OVERLAY", nil, 7)
       gear:SetTexture("Interface\\AddOns\\Tally\\Art\\CogBorder")
       gear:ClearAllPoints()
-      gear:SetSize(53, 53)
+      gear:SetSize(32, 32)
       gear:SetPoint("CENTER", button, "CENTER", 0, 0)
     end
   end
