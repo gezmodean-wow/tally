@@ -46,6 +46,8 @@ Post-init manual steps before the first release:
 tally/
 ├── tally.toc                   # addon manifest
 ├── Core.lua                    # entry point — Cogworks registration, events, slash, LDB launcher
+├── Util/
+│   └── Items.lua               # canonical item-key parsing/matching (lifted from FlipQueue; replace once cogworks#6 lands)
 ├── Pricing/
 │   └── Sources.lua             # TSM adapter + WoW Token special-case + vendor fallback
 ├── Inventory/

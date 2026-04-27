@@ -16,3 +16,7 @@ All notable changes to Tally will be documented in this file.
   - `Research/Aggregator.lua` — per-item record (strict superset of FlipQueue's `ItemResearch` shape) covering ownership, multi-source pricing snapshot, valuation, and (when FlipQueue is present) sales/failures/active-auctions/purchases pulled read-only from `FlipQueueDB.log`.
   - `_G.TallyAPI` (v1.0) exposes `GetItemResearch`, `InvalidateItemResearch`, `GetNetWorthSnapshot`, `GetInventoryRollup`. Versioned stopgap until Cogworks issue #6 lands a native API registry.
   - Slash command: `/tally research <itemlink-or-id>`.
+- Fixes (post initial smoke-test):
+  - `Util/Items.lua` — lifted FlipQueue's canonical `ParseItemLink` + `MakeItemKey` so Tally's rollup and research lookups produce identical keys, and battle-pet links resolve correctly. Deletable once cogworks#6 lands and Cogworks owns these helpers.
+  - `Inventory/Ownership.lua` — rewrote container walker to match FlipQueue's `Scanner.lua` patterns: bags `[1..5]` flat slot arrays, bank tabs with `tab.slots or tab` heuristic, warband bank with the same heuristic. Warband items now actually appear in the rollup.
+  - `Research/Aggregator.lua` — link normalization uses `Util/Items` so links match rollup keys; bare item IDs aggregate across bonus-ID variants; pet records skip TSM pricing; chat output now lists per-character/warband locations so warband visibility is verifiable.

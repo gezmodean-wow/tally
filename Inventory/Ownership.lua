@@ -1,13 +1,15 @@
 -- Tally — Inventory/Ownership.lua
 --
 -- Wraps Syndicator into a per-character + warband ownership rollup. Each
--- character contributes its bags + bank + mail; the warband is tracked
--- separately. The rollup is rebuilt lazily on demand and refreshed when
--- Syndicator broadcasts cache updates.
+-- character contributes its bags + reagent + bank; the warband bank is
+-- tracked separately. Refreshed lazily and on Syndicator cache updates.
+--
+-- Walker pattern lifted from FlipQueue's Scanner.lua to match Syndicator's
+-- actual data shapes (which differ between bags, bank tabs, and warband).
 --
 -- Rollup shape (in TallyDB.inventoryRollup):
---   characters[charKey] = { gold = N, items = { [itemKey] = { itemID, count } } }
---   warband             = { gold = N, items = { [itemKey] = { itemID, count } } }
+--   characters[charKey] = { gold, items = { [itemKey] = { itemID, count, locations } } }
+--   warband             = { gold, items = { [itemKey] = { itemID, count } } }
 --   lastFullScan        = epoch seconds
 
 local addonName, ns = ...
@@ -15,80 +17,37 @@ local addonName, ns = ...
 local Ownership = {}
 ns.Inventory = Ownership
 
--- Local item-key construction. Will be replaced once Cogworks issue #5 lands
--- and lifts ParseItemLink/MakeItemKey into the shared library; until then we
--- match FlipQueue's canonical "itemID;bonusIDs;modifiers" format on a best-
--- effort basis from Syndicator's itemLink data.
-local function parseLink(itemLink)
-  if not itemLink then return nil, "", "" end
-  local itemString = itemLink:match("|H(item:[^|]+)|h") or itemLink:match("(item:[^|]+)")
-  if not itemString then return nil, "", "" end
-  local parts = { strsplit(":", itemString) }
-  -- parts: { "item", id, enchant, gem1..gem4, suffix, unique, linkLevel, specID, modifiersMask, bonusCount, [bonusIDs..., modifiers...] }
-  local itemID = tonumber(parts[2])
-  local bonusCount = tonumber(parts[14]) or 0
-  local bonusIDs = {}
-  for i = 1, bonusCount do
-    local v = parts[14 + i]
-    if v and v ~= "" then bonusIDs[#bonusIDs + 1] = v end
-  end
-  table.sort(bonusIDs, function(a, b) return tonumber(a) < tonumber(b) end)
-  local modifierStart = 15 + bonusCount
-  local modifiers = {}
-  for i = modifierStart, #parts do
-    if parts[i] and parts[i] ~= "" then modifiers[#modifiers + 1] = parts[i] end
-  end
-  return itemID, table.concat(bonusIDs, ":"), table.concat(modifiers, ":")
-end
-
-local function makeItemKey(itemID, bonusIDs, modifiers)
-  if not itemID then return nil end
-  return tostring(itemID) .. ";" .. (bonusIDs or "") .. ";" .. (modifiers or "")
-end
-
 local function syndicator()
   return Syndicator and Syndicator.API or nil
 end
 
-local function foldSlots(target, slots)
+-- Fold a Syndicator slot list into the caller's items table. Each slot
+-- carries the full hyperlink (preserves bonus IDs / modifiers), so we feed
+-- it through the canonical key helper rather than reading itemID directly.
+local function foldSlots(items, slots, location)
   if type(slots) ~= "table" then return end
   for _, slot in ipairs(slots) do
-    if type(slot) == "table" then
-      if slot.bags or slot.slots then
-        -- nested container shape — recurse
-        foldSlots(target, slot.bags or slot.slots)
-      elseif slot.itemID and slot.itemCount and slot.itemCount > 0 then
-        local itemID, bonus, mods = slot.itemID, "", ""
-        if slot.itemLink then
-          local pid, pbonus, pmods = parseLink(slot.itemLink)
-          if pid then itemID, bonus, mods = pid, pbonus, pmods end
-        end
-        local key = makeItemKey(itemID, bonus, mods)
-        if key then
-          local entry = target[key]
-          if not entry then
-            entry = { itemID = itemID, count = 0 }
-            target[key] = entry
+    local link = slot and slot.itemLink
+    if link and link ~= "" then
+      local key = ns.Items.GetItemKey(link)
+      if key then
+        local entry = items[key]
+        if not entry then
+          local itemID = ns.Items.GetNumericID(key)
+          if not itemID and key:find("^pet:") then
+            -- Pets don't have a WoW item ID; we store the canonical key as ID
+            -- so callers that need a numeric ID just see nil for pets.
+            itemID = nil
           end
-          entry.count = entry.count + slot.itemCount
+          entry = { itemID = itemID, count = 0, locations = {} }
+          items[key] = entry
+        end
+        local count = slot.itemCount or 1
+        entry.count = entry.count + count
+        if location then
+          entry.locations[location] = (entry.locations[location] or 0) + count
         end
       end
-    end
-  end
-end
-
-local function foldContainers(target, container)
-  if type(container) ~= "table" then return end
-  -- container is typically an array of bags; each bag is an array of slots.
-  -- Some shapes are flat slot arrays. Detect by checking the first child.
-  for _, group in ipairs(container) do
-    if type(group) == "table" then
-      if group.itemID then
-        -- flat array of slots
-        foldSlots(target, container)
-        return
-      end
-      foldSlots(target, group)
     end
   end
 end
@@ -98,11 +57,36 @@ local function projectCharacter(charKey)
   if not api or not api.GetByCharacterFullName then return nil end
   local data = api.GetByCharacterFullName(charKey)
   if type(data) ~= "table" then return nil end
+
   local items = {}
-  foldContainers(items, data.bags)
-  foldContainers(items, data.bank)
-  -- Mail: bag-shaped slots; included so inflight items count toward net worth
-  if type(data.mail) == "table" then foldSlots(items, data.mail) end
+
+  -- Bags: charData.bags is keyed by bag index; index 5 is the reagent bag.
+  if type(data.bags) == "table" then
+    for bagIndex, slots in pairs(data.bags) do
+      local loc = (bagIndex == 5) and "reagent" or "bags"
+      foldSlots(items, slots, loc)
+    end
+  end
+
+  -- Bank: list of tabs. Each tab may be a flat slot array OR a wrapper with
+  -- `.slots`. Heuristic mirrors FlipQueue's Scanner: peek the first entry.
+  if type(data.bank) == "table" then
+    for _, tab in pairs(data.bank) do
+      if type(tab) == "table" then
+        if tab.itemLink or tab.itemCount or #tab == 0 then
+          foldSlots(items, { tab }, "bank")
+        else
+          foldSlots(items, tab.slots or tab, "bank")
+        end
+      end
+    end
+  end
+
+  -- Mail: bag-shaped slot array; in-flight items count toward net worth.
+  if type(data.mail) == "table" then
+    foldSlots(items, data.mail, "mail")
+  end
+
   return { gold = data.money or 0, items = items }
 end
 
@@ -111,16 +95,20 @@ local function projectWarband()
   if not api or not api.GetWarband then return nil end
   local data = api.GetWarband(1)
   if type(data) ~= "table" then return nil end
+
   local items = {}
-  -- Warband bank uses bankTabs in newer builds; fall back to bank otherwise.
-  if type(data.bankTabs) == "table" then
-    for _, tab in ipairs(data.bankTabs) do
-      if type(tab) == "table" and type(tab.slots) == "table" then
-        foldSlots(items, tab.slots)
+
+  -- warbandData.bank is a list of tabs; each tab is { slots, name, ... } or
+  -- a flat slot array directly. Same pattern as character bank.
+  if type(data.bank) == "table" then
+    for _, tab in pairs(data.bank) do
+      if type(tab) == "table" then
+        local slots = tab.slots or tab
+        foldSlots(items, slots, "warbank")
       end
     end
   end
-  if type(data.bank) == "table" then foldContainers(items, data.bank) end
+
   return { gold = data.money or 0, items = items }
 end
 
@@ -142,7 +130,6 @@ function Ownership:Rebuild()
   rollup.warband = projectWarband()
 
   TallyDB.inventoryRollup = rollup
-  ns.cw = ns.cw or ns.Cogworks
   if ns.cw and ns.cw.Fire then
     pcall(ns.cw.Fire, ns.cw, ns.cw.Events and ns.cw.Events.InventoryChanged or "InventoryChanged")
   end
@@ -161,11 +148,59 @@ function Ownership:RegisterSyndicatorCallbacks()
   local owner = "Tally-Inventory"
   local registry = Syndicator.CallbackRegistry
   local function onChange()
-    -- Coarse-grained refresh for now; per-character delta optimization is a
-    -- follow-up once we know the cost of full rebuilds in practice.
     Ownership:Rebuild()
   end
   pcall(registry.RegisterCallback, registry, "BagCacheUpdate", onChange, owner)
   pcall(registry.RegisterCallback, registry, "WarbandBankCacheUpdate", onChange, owner)
   pcall(registry.RegisterCallback, registry, "Ready", function() Ownership:Rebuild() end, owner)
+end
+
+-- Aggregate a single itemKey across the entire rollup.
+-- Returns (totalCount, perCharacterTable) where perCharacterTable is
+-- { [charKey] = count } including a synthetic "Warband" entry.
+function Ownership:GetItemOwnership(itemKey)
+  local rollup = self:Get() or {}
+  local total = 0
+  local byKey = {}
+  for charKey, char in pairs(rollup.characters or {}) do
+    local entry = char.items and char.items[itemKey]
+    if entry and entry.count > 0 then
+      byKey[charKey] = entry.count
+      total = total + entry.count
+    end
+  end
+  if rollup.warband then
+    local entry = rollup.warband.items and rollup.warband.items[itemKey]
+    if entry and entry.count > 0 then
+      byKey["Warband"] = entry.count
+      total = total + entry.count
+    end
+  end
+  return total, byKey
+end
+
+-- Aggregate ownership for all keys sharing a numeric itemID. Useful when the
+-- user passes a bare item ID and we want to roll up across bonus-ID variants.
+function Ownership:GetItemOwnershipByID(itemID)
+  if not itemID then return 0, {}, {} end
+  local rollup = self:Get() or {}
+  local total = 0
+  local byKey = {} -- [charKey] = total across all variants
+  local matchedKeys = {} -- set of canonical keys we summed
+  local function fold(charKey, items)
+    if type(items) ~= "table" then return end
+    for key, entry in pairs(items) do
+      local id = ns.Items.GetNumericID(key)
+      if id == itemID and entry.count > 0 then
+        byKey[charKey] = (byKey[charKey] or 0) + entry.count
+        matchedKeys[key] = true
+        total = total + entry.count
+      end
+    end
+  end
+  for charKey, char in pairs(rollup.characters or {}) do
+    fold(charKey, char.items)
+  end
+  if rollup.warband then fold("Warband", rollup.warband.items) end
+  return total, byKey, matchedKeys
 end

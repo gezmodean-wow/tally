@@ -17,6 +17,7 @@ Libs\LibDataBroker-1.1\LibDataBroker-1.1.lua
 Libs\LibDBIcon-1.0\LibDBIcon-1.0.lua
 Libs\Cogworks-1.0\Cogworks-1.0.lua
 
+Util\Items.lua
 Pricing\Sources.lua
 Inventory\Ownership.lua
 NetWorth\Calculator.lua

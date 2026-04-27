@@ -29,29 +29,43 @@ local PRICE_SOURCES = {
   "DBMinBuyout",
 }
 
-local function normalizeKey(input)
+-- Resolve user input into (itemKey, itemID, itemLink, isPet, isBareID).
+-- Bare numeric IDs collapse to a synthetic "<id>;;" key but the caller will
+-- prefer the GetItemOwnershipByID rollup so all bonus-ID variants are
+-- aggregated. Links use the canonical key helper so they match the rollup
+-- exactly. Pet links produce a "pet:<speciesID>" key.
+local function normalizeInput(input)
   if type(input) == "number" then
-    return tostring(input) .. ";;", input, nil
+    return tostring(input) .. ";;", input, nil, false, true
   end
-  if type(input) == "string" then
-    -- itemLink shape
-    local linkID = input:match("|Hitem:(%d+)")
-    if linkID then
-      local id = tonumber(linkID)
-      return tostring(id) .. ";;", id, input
+  if type(input) ~= "string" or input == "" then return nil end
+
+  -- Hyperlinked input (item or battlepet). Use canonical key helper so the
+  -- key matches what the rollup stored.
+  if input:find("|H") then
+    local key = ns.Items.GetItemKey(input)
+    if not key then return nil end
+    if ns.Items.IsPetKey(key) then
+      return key, nil, input, true, false
     end
-    -- bare numeric string
-    if input:match("^%d+$") then
-      local id = tonumber(input)
-      return tostring(id) .. ";;", id, nil
-    end
-    -- already canonical "id;bonus;mods"
-    if input:match("^%d+;") then
-      local id = tonumber(input:match("^(%d+);"))
-      return input, id, nil
-    end
+    return key, ns.Items.GetNumericID(key), input, false, false
   end
-  return nil, nil, nil
+
+  -- Bare numeric ID — caller aggregates across bonus-ID variants.
+  if input:match("^%d+$") then
+    local id = tonumber(input)
+    return tostring(id) .. ";;", id, nil, false, true
+  end
+
+  -- Already canonical "id;bonus;mods" or "pet:N;..."
+  if input:match("^%d+;") then
+    return input, ns.Items.GetNumericID(input), nil, false, false
+  end
+  if input:find("^pet:") then
+    return input, nil, nil, true, false
+  end
+
+  return nil
 end
 
 local function copperFromPrice(value)
@@ -66,10 +80,25 @@ local function copperFromPrice(value)
   return g * 10000 + s * 100 + c
 end
 
-local function buildOwnership(itemKey, itemID)
+local function buildOwnership(itemKey, itemID, isBareID)
   local rollup = ns.Inventory:Get() or {}
   local inventory = {}
   local total = 0
+
+  -- Bare numeric ID input: aggregate across all bonus-ID variants. Hand-built
+  -- links (the common case) use exact-key match so we preserve variant detail.
+  if isBareID and itemID then
+    local agg, byKey = ns.Inventory:GetItemOwnershipByID(itemID)
+    for charKey, count in pairs(byKey) do
+      table.insert(inventory, {
+        charKey = charKey,
+        quantity = count,
+        locations = charKey == "Warband" and { warbank = count } or {},
+        lastScan = rollup.lastFullScan,
+      })
+    end
+    return inventory, agg
+  end
 
   for charKey, char in pairs(rollup.characters or {}) do
     local entry = char.items and char.items[itemKey]
@@ -77,7 +106,7 @@ local function buildOwnership(itemKey, itemID)
       table.insert(inventory, {
         charKey = charKey,
         quantity = entry.count,
-        locations = {},      -- Phase 1 doesn't split bag/bank/etc.; future enhancement
+        locations = entry.locations or {},
         lastScan = rollup.lastFullScan,
       })
       total = total + entry.count
@@ -220,8 +249,8 @@ local function augmentFromFlipQueue(record, itemID, itemName)
 end
 
 function Research:GetRecord(input, itemName, skipCache)
-  local itemKey, itemID, itemLink = normalizeKey(input)
-  if not itemKey or not itemID then return nil end
+  local itemKey, itemID, itemLink, isPet, isBareID = normalizeInput(input)
+  if not itemKey then return nil end
 
   if not skipCache then
     local cached = cache[itemKey]
@@ -230,11 +259,20 @@ function Research:GetRecord(input, itemName, skipCache)
     end
   end
 
-  local name, _, quality, _, _, _, _, _, _, icon = GetItemInfo(itemID)
+  -- Item info (for items only; pets get name from the link).
+  local name, quality, icon
+  if itemID then
+    local n, _, q, _, _, _, _, _, _, ic = GetItemInfo(itemID)
+    name, quality, icon = n, q, ic
+  elseif isPet and type(input) == "string" then
+    name = input:match("|h%[(.-)%]|h")
+  end
+
   local record = {
     itemKey = itemKey,
     itemID = itemID,
     itemLink = itemLink,
+    isPet = isPet or false,
     name = itemName or name or "",
     icon = icon,
     quality = quality,
@@ -257,12 +295,22 @@ function Research:GetRecord(input, itemName, skipCache)
     categories = {},     -- Phase 4
   }
 
-  record.inventory, record.totalInventory = buildOwnership(itemKey, itemID)
-  record.pricing = buildPricing(itemID, itemKey)
-  record.tsm = record.pricing.sources -- alias for FlipQueue back-compat
-  record.valuation.netWorthContribution = (record.pricing.unitValue or 0) * record.totalInventory
+  record.inventory, record.totalInventory = buildOwnership(itemKey, itemID, isBareID)
 
-  augmentFromFlipQueue(record, itemID, record.name ~= "" and record.name or nil)
+  -- Pets aren't priced via TSM by item-ID. Skip pricing for pets; future
+  -- enhancement could integrate pet-cage market data.
+  if not isPet and itemID then
+    record.pricing = buildPricing(itemID, itemKey)
+    record.tsm = record.pricing.sources
+    record.valuation.netWorthContribution = (record.pricing.unitValue or 0) * record.totalInventory
+  else
+    record.pricing = { strategy = ns.NetWorth:GetStrategy(), unitValue = 0, sources = {} }
+    record.tsm = {}
+  end
+
+  if itemID then
+    augmentFromFlipQueue(record, itemID, record.name ~= "" and record.name or nil)
+  end
 
   cache[itemKey] = { ts = time(), record = record }
   return record
@@ -282,10 +330,25 @@ function Research:Print(input)
   end
   local fmt = ns.NetWorth.FormatGold
   local prefix = "|cff7fbfffTally|r research:"
-  local linkOrName = record.itemLink or record.name or ("item:" .. record.itemID)
+  local linkOrName = record.itemLink or record.name
+    or (record.itemID and ("item:" .. record.itemID))
+    or record.itemKey
   print(prefix .. " " .. linkOrName)
-  print(string.format("  Owned: %d (worth %s @ %s)",
-    record.totalInventory, fmt(record.valuation.netWorthContribution), record.pricing.strategy))
+  if record.isPet then
+    print(string.format("  Owned: %d (pets aren't priced — net-worth contribution skipped)",
+      record.totalInventory))
+  else
+    print(string.format("  Owned: %d (worth %s @ %s)",
+      record.totalInventory, fmt(record.valuation.netWorthContribution), record.pricing.strategy))
+  end
+  -- Per-character/warband breakdown — useful for confirming warband visibility.
+  if #record.inventory > 0 then
+    local parts = {}
+    for _, inv in ipairs(record.inventory) do
+      parts[#parts + 1] = inv.charKey .. " ×" .. inv.quantity
+    end
+    print("  Locations: " .. table.concat(parts, ", "))
+  end
   if record.pricing.sources then
     local parts = {}
     for _, src in ipairs(PRICE_SOURCES) do
