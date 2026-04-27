@@ -136,7 +136,7 @@ if LDB then
   local dataobject = LDB:NewDataObject(addonName, {
     type = "data source",
     text = addonName,
-    icon = "Interface\\Icons\\INV_Misc_Coin_01",
+    icon = "Interface\\AddOns\\Tally\\Art\\tl-inner",
     OnClick = function(_, button)
       if button == "LeftButton" then
         ns.NetWorth:Print()
@@ -174,7 +174,12 @@ if LDB then
     Cogworks.RegisterCallback(addonName, Cogworks.Events.InventoryChanged, refreshText)
   end
 
-  if LDBIcon then
+  -- Cogworks wraps LibDBIcon registration with the suite's gear-ring border
+  -- so every cog's minimap button shares the Chronoforge silhouette. Falls
+  -- back to a plain LDBIcon registration if Cogworks isn't loaded.
+  if Cogworks and Cogworks.RegisterCogMinimapButton then
+    Cogworks:RegisterCogMinimapButton(addonName, dataobject, TallyDB.minimap)
+  elseif LDBIcon then
     LDBIcon:Register(addonName, dataobject, TallyDB.minimap)
   end
 end
