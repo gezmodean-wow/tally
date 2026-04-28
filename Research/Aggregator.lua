@@ -281,7 +281,7 @@ function Research:GetRecord(input, itemName, skipCache)
     pricing = nil,
     valuation = { netWorthContribution = 0, ownedWorthContribution = 0 },
     tsm = nil,           -- preserved for FlipQueue compatibility; populated below
-    history = nil,       -- Phase 2
+    history = nil,       -- Tally pricing-history snapshots (populated below for items)
     categories = {},     -- Phase 4
   }
 
@@ -301,6 +301,31 @@ function Research:GetRecord(input, itemName, skipCache)
 
   if itemID then
     augmentFromFlipQueue(record, itemID, record.name ~= "" and record.name or nil)
+  end
+
+  -- Tally pricing history: time-series snapshots under the active strategy.
+  if not isPet and itemID and ns.History then
+    local points = ns.History:GetItemHistory(itemID)
+    local trend7d  = ns.History:GetItemTrend(itemID, 7  * 86400)
+    local trend30d = ns.History:GetItemTrend(itemID, 30 * 86400)
+    record.history = {
+      strategy = ns.NetWorth:GetStrategy(),
+      points = points,
+      trend7d = trend7d,
+      trend30d = trend30d,
+    }
+  end
+
+  -- Inventory history: per-character total + delta over rolling windows.
+  if itemID and ns.History then
+    local invPoints = ns.History:GetItemInventoryHistory(itemID)
+    local invTrend7d  = ns.History:GetItemInventoryTrend(itemID, 7  * 86400)
+    local invTrend30d = ns.History:GetItemInventoryTrend(itemID, 30 * 86400)
+    record.inventoryHistory = {
+      points = invPoints,
+      trend7d = invTrend7d,
+      trend30d = invTrend30d,
+    }
   end
 
   cache[itemKey] = { ts = time(), record = record }
@@ -390,5 +415,52 @@ function Research:Print(input)
   end
   if #record.activeAuctions > 0 then
     print("  Active auctions: " .. #record.activeAuctions)
+  end
+  local function spanLabel(span)
+    if span >= 86400 then return math.floor(span / 86400) .. "d"
+    elseif span >= 3600 then return math.floor(span / 3600) .. "h"
+    else return math.floor(span / 60) .. "m" end
+  end
+  if record.history and record.history.points and #record.history.points > 0 then
+    local h = record.history
+    local span = h.points[#h.points].atTime - h.points[1].atTime
+    local parts = { string.format("%d snapshots over %s", #h.points, spanLabel(span)) }
+    if h.trend7d then
+      parts[#parts + 1] = string.format("7d %s%.1f%%", h.trend7d.deltaPct >= 0 and "+" or "", h.trend7d.deltaPct)
+    end
+    if h.trend30d then
+      parts[#parts + 1] = string.format("30d %s%.1f%%", h.trend30d.deltaPct >= 0 and "+" or "", h.trend30d.deltaPct)
+    end
+    print("  Price history: " .. table.concat(parts, ", "))
+  end
+  if record.inventoryHistory and #record.inventoryHistory.points > 0 then
+    local ih = record.inventoryHistory
+    local span = ih.points[#ih.points].atTime - ih.points[1].atTime
+    local parts = { string.format("%d snapshots over %s", #ih.points, spanLabel(span)) }
+    local function formatDelta(t)
+      if not t then return nil end
+      local sign = t.delta >= 0 and "+" or ""
+      local label = string.format("%s%d", sign, t.delta)
+      -- Surface per-char detail when more than one character contributed.
+      local nonZero = {}
+      for ck, d in pairs(t.byCharDelta) do
+        if d ~= 0 then nonZero[#nonZero + 1] = { ck = ck, d = d } end
+      end
+      if #nonZero >= 2 then
+        table.sort(nonZero, function(a, b) return math.abs(a.d) > math.abs(b.d) end)
+        local detail = {}
+        for i = 1, math.min(3, #nonZero) do
+          detail[i] = string.format("%s %s%d",
+            nonZero[i].ck, nonZero[i].d >= 0 and "+" or "", nonZero[i].d)
+        end
+        label = label .. " (" .. table.concat(detail, ", ") .. ")"
+      end
+      return label
+    end
+    local d7  = formatDelta(ih.trend7d)
+    local d30 = formatDelta(ih.trend30d)
+    if d7  then parts[#parts + 1] = "7d Δ "  .. d7  end
+    if d30 then parts[#parts + 1] = "30d Δ " .. d30 end
+    print("  Inventory history: " .. table.concat(parts, ", "))
   end
 end

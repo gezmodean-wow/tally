@@ -21,5 +21,6 @@ Util\Items.lua
 Pricing\Sources.lua
 Inventory\Ownership.lua
 NetWorth\Calculator.lua
+History.lua
 Research\Aggregator.lua
 Core.lua

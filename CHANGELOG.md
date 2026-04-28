@@ -4,6 +4,14 @@ All notable changes to Tally will be documented in this file.
 
 ## [Unreleased]
 
+- History substrate — pricing + inventory time series (foundation for TLY-002):
+  - New root `History.lua` records two parallel time series at the same cadence: per-itemID prices under the active strategy (strategy-keyed) and per-itemID per-character per-location inventory counts. Snapshots fire on first `InventoryChanged` per session (debounced) and on demand via `/tally history snapshot`.
+  - Inventory history captures per-character resolution: each snapshot's items map records `{ [itemID] = { [charKey] = { bags=N, reagent=N, bank=N, mail=N, equipped=N, void=N, auctions=N, warbank=N } } }` with only non-zero locations stored. The synthetic `Warband` charKey carries warbank counts.
+  - Pricing history records TSM and WoW Token unit values; vendor and unpriced lookups are excluded. Recorded values follow the active strategy and are kept under separate strategy keys so switching strategies preserves prior history.
+  - Shared two-stage retention: configurable max-age window plus a daily-rollup threshold that collapses older snapshots to one-per-day. Defaults: 6h interval, 365d retention, daily rollup past 30d.
+  - User-configurable from chat: `/tally history` (summary + config), `/tally history interval <hours>` (0 disables auto-snapshot), `/tally history retention <days>`, `/tally history rollup <days>`, `/tally history clear [strategy]`. Config is shared across both series — one knob controls both.
+  - `/tally research <item>` now surfaces a Price-history line (snapshot count, span, 7d/30d Δ%) and an Inventory-history line (snapshot count, 7d/30d delta total with top-3 per-character breakdown when multiple characters moved).
+  - `_G.TallyAPI` bumped to v1.2: adds `GetItemPriceHistory`, `GetItemPriceTrend`, `GetItemInventoryHistory`, `GetItemInventoryTrend` for sibling cogs.
 - Owned-worth completeness (TLY-001):
   - `Inventory/Ownership.lua` now folds Syndicator's `equipped`, `void`, and `auctions` slot lists into the per-character rollup, with new `location` enum values for each.
   - Active AH auctions count as saleable regardless of `isBound` — they're being sold by definition — via an `isSlotSaleable(slot, itemID, location)` override. They contribute to both net worth and owned worth.
