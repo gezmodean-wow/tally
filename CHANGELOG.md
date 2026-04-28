@@ -4,6 +4,12 @@ All notable changes to Tally will be documented in this file.
 
 ## [Unreleased]
 
+- Owned-worth completeness (TLY-001):
+  - `Inventory/Ownership.lua` now folds Syndicator's `equipped`, `void`, and `auctions` slot lists into the per-character rollup, with new `location` enum values for each.
+  - Active AH auctions count as saleable regardless of `isBound` — they're being sold by definition — via an `isSlotSaleable(slot, itemID, location)` override. They contribute to both net worth and owned worth.
+  - Equipped gear and void storage default to bound, so they only contribute to owned worth (matches existing saleable/bound split).
+  - Added `AuctionsCacheUpdate` callback so AH posts/cancels trigger a rescan.
+  - `/tally research` Locations line now surfaces a per-location breakdown (e.g. `Hugemane-Stormrage ×1 [equipped ×1]`) so equipped/void/auction visibility is verifiable.
 - Initial scaffold via `/cog-init tally --ldb`.
 - Filled in addon description (TOC, README, CLAUDE.md): Personal Capital for WoW.
 - Phase 3 — net worth + inventory rollup:

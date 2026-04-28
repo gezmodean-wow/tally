@@ -1,8 +1,9 @@
 -- Tally — Inventory/Ownership.lua
 --
 -- Wraps Syndicator into a per-character + warband ownership rollup. Each
--- character contributes its bags + reagent + bank; the warband bank is
--- tracked separately. Refreshed lazily and on Syndicator cache updates.
+-- character contributes bags + reagent + bank + mail + equipped + void +
+-- active auctions; the warband bank is tracked separately. Refreshed
+-- lazily and on Syndicator cache updates.
 --
 -- Walker pattern lifted from FlipQueue's Scanner.lua to match Syndicator's
 -- actual data shapes (which differ between bags, bank tabs, and warband).
@@ -28,8 +29,11 @@ local function syndicator()
 end
 
 -- WoW Tokens are technically bind-on-pickup but are convertible to gold or
--- game time, so we count them as saleable regardless of isBound.
-local function isSlotSaleable(slot, itemID)
+-- game time, so we count them as saleable regardless of isBound. Items
+-- currently listed on the AH are saleable by definition — they're literally
+-- being sold — even though Syndicator may report them with isBound.
+local function isSlotSaleable(slot, itemID, location)
+  if location == "auctions" then return true end
   if itemID == WOW_TOKEN_ITEM_ID then return true end
   return not slot.isBound
 end
@@ -52,7 +56,7 @@ local function foldSlots(items, slots, location)
         end
         local count = slot.itemCount or 1
         entry.total = entry.total + count
-        if isSlotSaleable(slot, entry.itemID) then
+        if isSlotSaleable(slot, entry.itemID, location) then
           entry.saleable = entry.saleable + count
         end
         if location then
@@ -96,6 +100,23 @@ local function projectCharacter(charKey)
   -- Mail: bag-shaped slot array; in-flight items count toward net worth.
   if type(data.mail) == "table" then
     foldSlots(items, data.mail, "mail")
+  end
+
+  -- Equipped gear: typically isBound=true, falls into the bound bucket
+  -- and only counts toward owned-worth.
+  if type(data.equipped) == "table" then
+    foldSlots(items, data.equipped, "equipped")
+  end
+
+  -- Void storage: bound transmog stash, owned-worth only.
+  if type(data.void) == "table" then
+    foldSlots(items, data.void, "void")
+  end
+
+  -- Active AH auctions: counted as saleable regardless of isBound (override
+  -- in isSlotSaleable). Contributes to net worth.
+  if type(data.auctions) == "table" then
+    foldSlots(items, data.auctions, "auctions")
   end
 
   return { gold = data.money or 0, items = items }
@@ -163,6 +184,7 @@ function Ownership:RegisterSyndicatorCallbacks()
   end
   pcall(registry.RegisterCallback, registry, "BagCacheUpdate", onChange, owner)
   pcall(registry.RegisterCallback, registry, "WarbandBankCacheUpdate", onChange, owner)
+  pcall(registry.RegisterCallback, registry, "AuctionsCacheUpdate", onChange, owner)
   pcall(registry.RegisterCallback, registry, "Ready", function() Ownership:Rebuild() end, owner)
 end
 

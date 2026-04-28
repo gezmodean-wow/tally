@@ -339,14 +339,30 @@ function Research:Print(input)
         record.totalInventory, fmt(record.valuation.netWorthContribution), record.pricing.strategy))
     end
   end
-  -- Per-character/warband breakdown — useful for confirming warband visibility.
+  -- Per-character/warband breakdown with per-location detail. Useful for
+  -- confirming warband visibility and seeing where equipped/void/auction
+  -- copies live.
   if #record.inventory > 0 then
+    local LOC_ORDER = { "bags", "reagent", "bank", "mail", "equipped", "void", "auctions", "warbank" }
     local parts = {}
     for _, inv in ipairs(record.inventory) do
+      local locParts = {}
+      for _, loc in ipairs(LOC_ORDER) do
+        local n = inv.locations and inv.locations[loc]
+        if n and n > 0 then
+          locParts[#locParts + 1] = loc .. " ×" .. n
+        end
+      end
+      local label
       if inv.saleable and inv.saleable < inv.quantity then
-        parts[#parts + 1] = string.format("%s ×%d (%d saleable)", inv.charKey, inv.quantity, inv.saleable)
+        label = string.format("%s ×%d (%d saleable)", inv.charKey, inv.quantity, inv.saleable)
       else
-        parts[#parts + 1] = inv.charKey .. " ×" .. inv.quantity
+        label = inv.charKey .. " ×" .. inv.quantity
+      end
+      if #locParts > 0 then
+        parts[#parts + 1] = label .. " [" .. table.concat(locParts, ", ") .. "]"
+      else
+        parts[#parts + 1] = label
       end
     end
     print("  Locations: " .. table.concat(parts, ", "))
