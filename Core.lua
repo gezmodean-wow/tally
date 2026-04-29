@@ -295,38 +295,9 @@ if LDB then
     Cogworks.RegisterCallback(addonName, Cogworks.Events.InventoryChanged, refreshText)
   end
 
-  -- Suite minimap-button chrome: gear-shaped border around the per-cog inner
-  -- glyph. Cogworks 1.0.6 ships a `RegisterCogMinimapButton` helper but it
-  -- (a) calls a non-existent LDBIcon:SetButtonBorder method and (b) hardcodes
-  -- a texture path that only resolves when Cogworks is installed as a
-  -- standalone addon. Filed upstream — workaround here is a direct overlay
-  -- swap on the LibDBIcon button using a local copy of CogBorder.tga.
-  if LDBIcon then
+  if Cogworks and Cogworks.RegisterCogMinimapButton then
+    Cogworks:RegisterCogMinimapButton(addonName, dataobject, TallyDB.minimap)
+  elseif LDBIcon then
     LDBIcon:Register(addonName, dataobject, TallyDB.minimap)
-    local button = (LDBIcon.GetMinimapButton and LDBIcon:GetMinimapButton(addonName))
-      or (LDBIcon.objects and LDBIcon.objects[addonName])
-    if button then
-      -- Hide LibDBIcon's default tracking-border overlay so the gold ring
-      -- doesn't render under our gear. GetTexture() returns the file ID for
-      -- some bindings and the path string for others — match both.
-      for _, region in ipairs({ button:GetRegions() }) do
-        if region:GetObjectType() == "Texture" then
-          local tex = region:GetTexture()
-          if tex == 136430 or tex == "Interface\\Minimap\\MiniMap-TrackingBorder" then
-            region:Hide()
-          end
-        end
-      end
-      -- Mount the gear centered on the button. CogBorder.tga's silhouette
-      -- fills nearly the full 128×128 texture rectangle, so we render at
-      -- 32×32 (just slightly larger than the 31-px button) to keep the
-      -- visible gear footprint proportional to the button. Sublevel 7
-      -- stays above future overlays.
-      local gear = button:CreateTexture("$parentTallyGearBorder", "OVERLAY", nil, 7)
-      gear:SetTexture("Interface\\AddOns\\Tally\\Art\\CogBorder")
-      gear:ClearAllPoints()
-      gear:SetSize(32, 32)
-      gear:SetPoint("CENTER", button, "CENTER", 0, 0)
-    end
   end
 end

@@ -4,6 +4,10 @@ All notable changes to Tally will be documented in this file.
 
 ## [Unreleased]
 
+- Adopted Cogworks v0.10.0 (TLY-003):
+  - `.pkgmeta` external bumped to `v0.10.0`; TOC now loads `Libs\Cogworks-1.0\Cogworks-1.0.xml` to pick up the multi-file manifest (Items / Realms / API / Icons / Sections).
+  - Minimap registration goes through `Cogworks:RegisterCogMinimapButton`, which hides LDBIcon's default tracking border and mounts the suite-shared brass gear ring around our inner glyph. Soft-degrades to a plain `LDBIcon:Register` on older Cogworks.
+  - Removed local `Art/CogBorder.tga`; the gear texture now ships with the Cogworks lib at `Libs/Cogworks-1.0/Art/CogBorder` and is resolved by the helper.
 - History substrate — pricing + inventory time series (foundation for TLY-002):
   - New root `History.lua` records two parallel time series at the same cadence: per-itemID prices under the active strategy (strategy-keyed) and per-itemID per-character per-location inventory counts. Snapshots fire on first `InventoryChanged` per session (debounced) and on demand via `/tally history snapshot`.
   - Inventory history captures per-character resolution: each snapshot's items map records `{ [itemID] = { [charKey] = { bags=N, reagent=N, bank=N, mail=N, equipped=N, void=N, auctions=N, warbank=N } } }` with only non-zero locations stored. The synthetic `Warband` charKey carries warbank counts.
