@@ -82,9 +82,14 @@ local function makeRangeButton(parent, label, onClick)
   return btn
 end
 
+local VIEWS = {
+  { label = "Saleable", includeBound = false },
+  { label = "Owned",    includeBound = true  },
+}
+
 function ns.UI.CreateNetWorthPage(parent)
   local page = CreateFrame("Frame", nil, parent)
-  local state = { rangeIdx = 2 } -- default: 30d
+  local state = { rangeIdx = 2, viewIdx = 1 } -- default: 30d, saleable
 
   -- Top control row.
   local controlRow = CreateFrame("Frame", nil, page)
@@ -108,19 +113,43 @@ function ns.UI.CreateNetWorthPage(parent)
     prev = btn
   end
 
+  -- View toggle (Saleable / Owned). Sits to the right of the time range.
+  local viewButtons = {}
+  local viewPrev
+  for i, v in ipairs(VIEWS) do
+    local btn = makeRangeButton(controlRow, v.label, function()
+      state.viewIdx = i
+      page:Refresh()
+    end)
+    btn:SetWidth(72)
+    if viewPrev then
+      btn:SetPoint("LEFT", viewPrev, "RIGHT", 4, 0)
+    else
+      btn:SetPoint("LEFT", prev, "RIGHT", 24, 0)
+    end
+    viewButtons[i] = btn
+    viewPrev = btn
+  end
+
   local strategyText = controlRow:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
   strategyText:SetPoint("RIGHT", controlRow, "RIGHT", -2, 0)
   strategyText:SetJustifyH("RIGHT")
 
-  -- Chart.
-  local chart = ns.UI.CreateLineChart(page, {
+  -- Chart + per-character table sit side by side. Chart on the left ~65%
+  -- of the row width; table on the right ~35%.
+  local middle = CreateFrame("Frame", nil, page)
+  middle:SetPoint("TOPLEFT", controlRow, "BOTTOMLEFT", 0, -8)
+  middle:SetPoint("BOTTOMRIGHT", page, "BOTTOMRIGHT", 0, 60)
+
+  local chart = ns.UI.CreateLineChart(middle, {
     yLabelWidth = 72,
     xLabelHeight = 16,
     yTicks = 4,
     xTicks = 5,
   })
-  chart:SetPoint("TOPLEFT", controlRow, "BOTTOMLEFT", 0, -8)
-  chart:SetPoint("BOTTOMRIGHT", page, "BOTTOMRIGHT", 0, 60)
+  chart:SetPoint("TOPLEFT", middle, "TOPLEFT", 0, 0)
+  chart:SetPoint("BOTTOMLEFT", middle, "BOTTOMLEFT", 0, 0)
+  chart:SetWidth(440)
 
   chart:SetYFormatter(function(copper)
     return formatGoldShort(copper)
@@ -129,9 +158,53 @@ function ns.UI.CreateNetWorthPage(parent)
     return date("%m/%d", epoch)
   end)
 
+  -- Per-character table (right column).
+  local charPanel = CreateFrame("Frame", nil, middle, "BackdropTemplate")
+  charPanel:SetPoint("TOPLEFT", chart, "TOPRIGHT", 12, 0)
+  charPanel:SetPoint("BOTTOMRIGHT", middle, "BOTTOMRIGHT", 0, 0)
+  charPanel:SetBackdrop({
+    bgFile = "Interface\\Buttons\\WHITE8x8",
+    edgeFile = "Interface\\Buttons\\WHITE8x8",
+    edgeSize = 1,
+  })
+  charPanel:SetBackdropColor(themeColor("bgDark", { 0.04, 0.04, 0.07, 0.6 }))
+  charPanel:SetBackdropBorderColor(themeColor("border", { 0.30, 0.30, 0.40, 1 }))
+
+  local charHdr = charPanel:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+  charHdr:SetPoint("TOPLEFT", charPanel, "TOPLEFT", 8, -6)
+  charHdr:SetText("PER CHARACTER")
+  charHdr:SetTextColor(themeColor("brass", { 0.83, 0.63, 0.09, 1 }))
+
+  local charScroll = CreateFrame("ScrollFrame", nil, charPanel, "UIPanelScrollFrameTemplate")
+  charScroll:SetPoint("TOPLEFT", charHdr, "BOTTOMLEFT", 0, -4)
+  charScroll:SetPoint("BOTTOMRIGHT", charPanel, "BOTTOMRIGHT", -22, 6)
+  local charContent = CreateFrame("Frame", nil, charScroll)
+  charContent:SetSize(220, 1)
+  charScroll:SetScrollChild(charContent)
+
+  local charRows = {}
+  local function getCharRow(i)
+    local row = charRows[i]
+    if not row then
+      row = CreateFrame("Frame", nil, charContent)
+      row:SetHeight(16)
+      row:SetPoint("LEFT", charContent, "LEFT", 4, 0)
+      row:SetPoint("RIGHT", charContent, "RIGHT", -4, 0)
+      row.name = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+      row.name:SetPoint("LEFT", row, "LEFT", 0, 0)
+      row.name:SetWidth(120)
+      row.name:SetJustifyH("LEFT")
+      row.value = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+      row.value:SetPoint("RIGHT", row, "RIGHT", 0, 0)
+      row.value:SetJustifyH("RIGHT")
+      charRows[i] = row
+    end
+    return row
+  end
+
   -- Stats footer.
   local footer = CreateFrame("Frame", nil, page)
-  footer:SetPoint("TOPLEFT", chart, "BOTTOMLEFT", 0, -8)
+  footer:SetPoint("TOPLEFT", middle, "BOTTOMLEFT", 0, -8)
   footer:SetPoint("BOTTOMRIGHT", page, "BOTTOMRIGHT", 0, 0)
 
   local function makeStatLabel(parent, anchorRel, anchorOffset)
@@ -156,11 +229,13 @@ function ns.UI.CreateNetWorthPage(parent)
   function page:Refresh()
     if not (ns.History and ns.History.GetNetWorthSeries) then return end
     local range = RANGES[state.rangeIdx]
+    local view = VIEWS[state.viewIdx]
     for i, btn in ipairs(rangeButtons) do btn:SetSelected(i == state.rangeIdx) end
+    for i, btn in ipairs(viewButtons)  do btn:SetSelected(i == state.viewIdx)  end
 
     local now = time()
     local startTime = range.seconds and (now - range.seconds) or nil
-    local series = ns.History:GetNetWorthSeries(startTime, nil, { includeBound = false })
+    local series = ns.History:GetNetWorthSeries(startTime, nil, { includeBound = view.includeBound })
 
     local points = {}
     for _, p in ipairs(series) do
@@ -168,8 +243,8 @@ function ns.UI.CreateNetWorthPage(parent)
     end
     chart:SetData(points)
 
-    -- Stats footer.
-    local current = ns.NetWorth:Snapshot()
+    -- Stats footer + per-character table both read from the live snapshot.
+    local current = ns.NetWorth:Snapshot({ includeBound = view.includeBound })
     valCurrent:SetText(ns.NetWorth.FormatGold(current.total))
     strategyText:SetText("Strategy: " .. (current.strategy or "—"))
 
@@ -200,6 +275,27 @@ function ns.UI.CreateNetWorthPage(parent)
     end
 
     valSnaps:SetText(tostring(#series))
+
+    -- Per-character table (sorted by total descending). Warband row appears
+    -- as a synthetic entry when its total is non-zero.
+    local rows = {}
+    for charKey, data in pairs(current.byCharacter or {}) do
+      rows[#rows + 1] = { key = charKey, total = data.total }
+    end
+    if current.warband and current.warband.total and current.warband.total > 0 then
+      rows[#rows + 1] = { key = "Warband", total = current.warband.total }
+    end
+    table.sort(rows, function(a, b) return a.total > b.total end)
+
+    for i, r in ipairs(rows) do
+      local row = getCharRow(i)
+      row:SetPoint("TOP", charContent, "TOP", 0, -(i - 1) * 16)
+      row.name:SetText(r.key)
+      row.value:SetText(formatGoldShort(r.total))
+      row:Show()
+    end
+    for i = #rows + 1, #charRows do charRows[i]:Hide() end
+    charContent:SetHeight(math.max(1, #rows * 16))
   end
 
   return page

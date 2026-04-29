@@ -4,6 +4,11 @@ All notable changes to Tally will be documented in this file.
 
 ## [Unreleased]
 
+- UI polish round:
+  - `NetWorthPage` switches to a two-column layout: line chart on the left, scrollable per-character total table on the right (synthetic `Warband` row when warband holdings are non-zero, sorted by total descending).
+  - Saleable / Owned toggle on the control row — switches both the chart series and the per-character totals between net-worth and owned-worth views without leaving the panel.
+  - `MainFrame` persists its position across sessions to `TallyDB.ui.mainFrame` (saved on drag-stop, restored on first build) and remembers the last active tab in `TallyDB.ui.lastTab` (restored when re-opening with no explicit page).
+  - LDB tooltip hint now reads `Left-click: open Tally  •  Right-click: print summary` (was the stale "Left-click: print details" left over from before the UI existed).
 - Settings panel UI:
   - New `UI/SettingsPage.lua` registered as the third tab in the main frame. Three sections: history cadence (interval / retention / daily-rollup numeric inputs), pricing strategy (TSM expression text input), and snapshots + maintenance (per-strategy snapshot stats, "Take snapshot now" button, "Clear all history" button gated by a confirmation popup).
   - Numeric and strategy inputs apply on Enter or focus-loss. Invalid values flash the input border red and revert to the previous value; if the underlying setter returns an error message, that's printed to chat too.

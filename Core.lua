@@ -419,7 +419,7 @@ if LDB then
         0.6, 0.6, 0.6, 0.85, 0.85, 0.85)
       tooltip:AddLine(" ")
       tooltip:AddLine("Strategy: " .. snap.strategy, 0.6, 0.6, 0.6)
-      tooltip:AddLine("Left-click: print details", 0.6, 0.6, 0.6)
+      tooltip:AddLine("Left-click: open Tally  •  Right-click: print summary", 0.6, 0.6, 0.6)
     end,
   })
 

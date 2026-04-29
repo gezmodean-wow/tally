@@ -41,20 +41,49 @@ local activePage
 local DEFAULT_WIDTH = 720
 local DEFAULT_HEIGHT = 460
 
+local function uiDB()
+  TallyDB.ui = TallyDB.ui or {}
+  TallyDB.ui.mainFrame = TallyDB.ui.mainFrame or {}
+  return TallyDB.ui
+end
+
+local function savePosition(self)
+  local point, _, relPoint, x, y = self:GetPoint()
+  if not point then return end
+  local store = uiDB().mainFrame
+  store.point = point
+  store.relPoint = relPoint
+  store.x = x
+  store.y = y
+end
+
+local function restorePosition(self)
+  local store = uiDB().mainFrame
+  if store.point and store.x ~= nil and store.y ~= nil then
+    self:ClearAllPoints()
+    self:SetPoint(store.point, UIParent, store.relPoint or store.point, store.x, store.y)
+  else
+    self:SetPoint("CENTER")
+  end
+end
+
 local function build()
   if frame then return frame end
 
   frame = CreateFrame("Frame", "TallyMainFrame", UIParent, "BackdropTemplate")
   frame:SetSize(DEFAULT_WIDTH, DEFAULT_HEIGHT)
-  frame:SetPoint("CENTER")
   frame:SetFrameStrata("HIGH")
   frame:SetMovable(true)
   frame:EnableMouse(true)
   frame:RegisterForDrag("LeftButton")
   frame:SetScript("OnDragStart", frame.StartMoving)
-  frame:SetScript("OnDragStop", frame.StopMovingOrSizing)
+  frame:SetScript("OnDragStop", function(self)
+    self:StopMovingOrSizing()
+    savePosition(self)
+  end)
   frame:SetClampedToScreen(true)
   frame:Hide()
+  restorePosition(frame)
 
   -- Backdrop fill.
   if frame.SetBackdrop then
@@ -119,9 +148,11 @@ end
 
 function MainFrame:Show()
   build():Show()
-  -- If no active page, default to the first registered.
-  if not activePage and pageOrder[1] then
-    self:ShowPage(pageOrder[1])
+  -- Restore the last-active tab, falling back to the first registered.
+  if not activePage then
+    local saved = uiDB().lastTab
+    local target = (saved and pages[saved]) and saved or pageOrder[1]
+    if target then self:ShowPage(target) end
   end
 end
 
@@ -240,6 +271,7 @@ function MainFrame:ShowPage(name)
 
   entry.instance:Show()
   activePage = name
+  uiDB().lastTab = name
   if frame.subtitle then frame.subtitle:SetText("— " .. name) end
   rebuildTabStrip()
 
