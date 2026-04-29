@@ -1,6 +1,6 @@
 # Tally
 
-A cog in the [Chronoforge](https://github.com/gezmodean-wow/cogworks) WoW addon suite.
+A cog in the [Cogworks](https://github.com/gezmodean-wow/cogworks) WoW addon suite.
 
 Personal Capital / Mint for World of Warcraft. Tally tracks every sale and purchase across all your characters and accounts, categorizes them, calculates your net worth, and gives you deeper research into individual items — augmenting (not replacing) TradeSkillMaster, FlipQueue, and other auction-house tools.
 

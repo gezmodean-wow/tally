@@ -74,7 +74,7 @@ TSM provides the price data Tally values items against. Any TSM custom price exp
 
 When FlipQueue is installed, Tally reads its sales log read-only and surfaces sales history, active auctions, and posting failures in `/tally research`. FlipQueue keeps owning the writes; Tally complements with the analytics view.
 
-### Sibling cogs in the [Chronoforge](https://addons.wago.io/addons/cogworks) suite
+### Sibling cogs in the [Cogworks](https://addons.wago.io/addons/cogworks) suite
 
 Tally ships alongside [Cogworks](https://addons.wago.io/addons/cogworks) (shared library), [FlipQueue](https://addons.wago.io/addons/flipqueue) (auction-house workflow), [Tempo](https://addons.wago.io/addons/tempo) (daily/weekly task cadence), and [Maxcraft](https://addons.wago.io/addons/maxcraft) (profession planning). Each is fully functional standalone; together they share the suite-wide minimap chrome and themable UI.
 
@@ -117,4 +117,4 @@ Recommended (greatly enhanced experience but optional):
 
 GitHub issues are canonical: https://github.com/gezmodean-wow/tally/issues
 
-Discord discussion happens in the **Chronoforge** community.
+Discord discussion happens in the **Cogworks** community.
