@@ -341,6 +341,37 @@ if LDB then
       if snap.warband.total > 0 then
         tooltip:AddDoubleLine("Warband", ns.NetWorth.FormatGold(snap.warband.total), 0.7, 0.85, 1, 1, 1, 1)
       end
+
+      -- 7d / 30d delta lines, sourced from history. Suppress silently when
+      -- the available snapshot is fresher than half the requested window —
+      -- otherwise we'd be comparing "now" to "1h ago" and calling it Δ7d.
+      local function deltaLine(label, windowSec)
+        if not (ns.History and ns.History.GetNetWorthAt) then return end
+        local past = ns.History:GetNetWorthAt(time() - windowSec)
+        if not past then return end
+        if (time() - past.atTime) < (windowSec * 0.5) then return end
+        local delta = snap.total - past.total
+        local sign = delta >= 0 and "+" or "-"
+        local pctStr = ""
+        if past.total > 0 then
+          pctStr = string.format(" (%s%.1f%%)", sign, math.abs(delta / past.total) * 100)
+        end
+        local r, g, b
+        local pctMag = past.total > 0 and math.abs(delta / past.total) * 100 or 0
+        if pctMag < 0.5 then
+          r, g, b = 0.7, 0.7, 0.7
+        elseif delta >= 0 then
+          r, g, b = 0.4, 1.0, 0.4
+        else
+          r, g, b = 1.0, 0.4, 0.4
+        end
+        tooltip:AddDoubleLine(label,
+          sign .. ns.NetWorth.FormatGold(math.abs(delta)) .. pctStr,
+          0.7, 0.7, 0.7, r, g, b)
+      end
+      deltaLine("  Δ 7d",  7  * 86400)
+      deltaLine("  Δ 30d", 30 * 86400)
+
       tooltip:AddLine(" ")
       tooltip:AddDoubleLine("Owned worth (incl. bound)", ns.NetWorth.FormatGold(owned.total),
         0.6, 0.6, 0.6, 0.85, 0.85, 0.85)

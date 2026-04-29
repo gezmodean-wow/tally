@@ -4,6 +4,10 @@ All notable changes to Tally will be documented in this file.
 
 ## [Unreleased]
 
+- LDB tooltip 7d/30d Δ (TLY-004):
+  - Tooltip now shows `Δ 7d` and `Δ 30d` lines under the running total when sufficient history exists, computed via `History:GetNetWorthAt`.
+  - Coloring: green for positive change, red for negative, neutral grey for changes within ±0.5% (fresh-data noise floor).
+  - Suppressed silently when no inventory snapshot exists in the window or the available snapshot is fresher than half the requested window (avoids noise like "Δ 7d" computed against a snapshot taken an hour ago).
 - Historical net-worth replay (TLY-005):
   - Inventory snapshots now also record per-character (and warband) gold totals, so historical net-worth replay can sum gold + items at any past timestamp.
   - Inventory snapshot schema bumped from `[charKey] = { bags=N, ... }` to `[charKey] = { saleable, total, locations = { bags=N, ... } }`. The saleable/total pair preserves the bound-vs-saleable signal that per-location counts can't reconstruct alone. Pre-bump snapshots upgrade lazily on read; saleable defaults to total for legacy data (slight over-count on pre-migration data, corrects forward).
