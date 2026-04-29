@@ -50,8 +50,13 @@ function ns:PLAYER_LOGIN()
   end
   -- Register UI pages with the main frame. Page bodies are lazy-created on
   -- first ShowPage so login cost is zero for users who never open the UI.
-  if ns.UI and ns.UI.MainFrame and ns.UI.CreateNetWorthPage then
-    ns.UI.MainFrame:RegisterPage("Net Worth", ns.UI.CreateNetWorthPage)
+  if ns.UI and ns.UI.MainFrame then
+    if ns.UI.CreateNetWorthPage then
+      ns.UI.MainFrame:RegisterPage("Net Worth", ns.UI.CreateNetWorthPage)
+    end
+    if ns.UI.CreateResearchPage then
+      ns.UI.MainFrame:RegisterPage("Research", ns.UI.CreateResearchPage)
+    end
   end
   -- Invalidate research cache on inventory updates so consumers always see
   -- fresh ownership/valuation. Cogworks event bus is the broadcast channel.
@@ -103,7 +108,8 @@ local function printHelp()
   print("  /tally networth at -<duration> — reconstruct net worth at a past time (e.g. -7d, -1h)")
   print("  /tally ownedworth (or /tly ow) — print owned worth (includes bound items)")
   print("  /tally ownedworth at -<duration> — historical owned-worth view")
-  print("  /tally research <itemlink-or-id> — print research record for an item")
+  print("  /tally research <itemlink-or-id> — open the research panel for an item")
+  print("  /tally research-chat <itemlink-or-id> (or /tly rc) — print research record to chat")
   print("  /tally rescan — force inventory rescan via Syndicator")
   print("  /tally strategy — print current price strategy")
   print("  /tally strategy <expression> — set price strategy (any TSM-valid expression)")
@@ -304,7 +310,17 @@ local function handleSlash(msg)
     handleNetWorth(rest, true)
   elseif cmd == "research" or cmd == "r" then
     if rest == "" then
-      print("|cff7fbfffTally:|r usage — /tally research <itemlink-or-id>")
+      -- Open the Research panel without an item; user can type into the input.
+      if ns.UI and ns.UI.ShowResearch then ns.UI.ShowResearch(nil)
+      else print("|cff7fbfffTally:|r usage — /tally research <itemlink-or-id>") end
+    else
+      if ns.UI and ns.UI.ShowResearch then ns.UI.ShowResearch(rest)
+      else ns.Research:Print(rest) end
+    end
+  elseif cmd == "research-chat" or cmd == "rc" then
+    -- Preserved chat-only printout for power users / debugging.
+    if rest == "" then
+      print("|cff7fbfffTally:|r usage — /tally research-chat <itemlink-or-id>")
     else
       ns.Research:Print(rest)
     end

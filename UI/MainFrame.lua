@@ -93,9 +93,17 @@ local function build()
   close:SetPoint("RIGHT", titleBar, "RIGHT", 4, 0)
   close:SetScript("OnClick", function() frame:Hide() end)
 
+  -- Tab strip — horizontal row of buttons under the title bar, one per
+  -- registered page. Layout is rebuilt on RegisterPage / ShowPage.
+  local tabStrip = CreateFrame("Frame", nil, frame)
+  tabStrip:SetPoint("TOPLEFT", titleBar, "BOTTOMLEFT", 8, -6)
+  tabStrip:SetPoint("TOPRIGHT", titleBar, "BOTTOMRIGHT", -8, -6)
+  tabStrip:SetHeight(24)
+  frame.tabStrip = tabStrip
+
   -- Body — hosts the active page.
   local body = CreateFrame("Frame", nil, frame)
-  body:SetPoint("TOPLEFT", titleBar, "BOTTOMLEFT", 0, 0)
+  body:SetPoint("TOPLEFT", tabStrip, "BOTTOMLEFT", -8, -4)
   body:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", -1, 1)
   frame.body = body
 
@@ -133,10 +141,81 @@ function MainFrame:GetActivePage()
   return activePage
 end
 
+local tabButtons = {}
+
+local function makeTabButton(parent)
+  local btn = CreateFrame("Button", nil, parent, "BackdropTemplate")
+  btn:SetSize(96, 22)
+  btn:SetBackdrop({
+    bgFile = "Interface\\Buttons\\WHITE8x8",
+    edgeFile = "Interface\\Buttons\\WHITE8x8",
+    edgeSize = 1,
+  })
+  btn:SetBackdropColor(themeColor("bgLight", { 0.12, 0.12, 0.16, 0.8 }))
+  btn:SetBackdropBorderColor(themeColor("border", { 0.30, 0.30, 0.40, 1 }))
+
+  local text = btn:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+  text:SetPoint("CENTER")
+  text:SetTextColor(themeColor("text", { 0.9, 0.9, 0.92, 1 }))
+  btn.text = text
+
+  btn:SetScript("OnEnter", function(self)
+    if not self.selected then
+      self:SetBackdropColor(themeColor("rowHover", { 1, 1, 1, 0.08 }))
+    end
+  end)
+  btn:SetScript("OnLeave", function(self)
+    if not self.selected then
+      self:SetBackdropColor(themeColor("bgLight", { 0.12, 0.12, 0.16, 0.8 }))
+    end
+  end)
+
+  function btn:SetSelected(on)
+    self.selected = on
+    if on then
+      self:SetBackdropColor(themeColor("brass", { 0.83, 0.63, 0.09, 0.7 }))
+      self.text:SetTextColor(1, 1, 1, 1)
+    else
+      self:SetBackdropColor(themeColor("bgLight", { 0.12, 0.12, 0.16, 0.8 }))
+      self.text:SetTextColor(themeColor("text", { 0.9, 0.9, 0.92, 1 }))
+    end
+  end
+
+  return btn
+end
+
+local function rebuildTabStrip()
+  if not frame or not frame.tabStrip then return end
+  -- Hide existing tabs we won't reuse.
+  for i = #pageOrder + 1, #tabButtons do
+    tabButtons[i]:Hide()
+  end
+  -- Create/update one tab per page.
+  for i, name in ipairs(pageOrder) do
+    local btn = tabButtons[i] or makeTabButton(frame.tabStrip)
+    tabButtons[i] = btn
+    btn.pageName = name
+    btn.text:SetText(name)
+    btn:ClearAllPoints()
+    btn:SetPoint("LEFT", frame.tabStrip, "LEFT", (i - 1) * 100, 0)
+    btn:SetScript("OnClick", function(self)
+      MainFrame:ShowPage(self.pageName)
+    end)
+    btn:SetSelected(name == activePage)
+    btn:Show()
+  end
+end
+
 function MainFrame:RegisterPage(name, createFn)
   if pages[name] then return end
   pages[name] = { create = createFn, instance = nil }
   pageOrder[#pageOrder + 1] = name
+  rebuildTabStrip()
+end
+
+function MainFrame:GetPage(name)
+  local entry = pages[name]
+  return entry and entry.instance or nil
 end
 
 function MainFrame:ShowPage(name)
@@ -162,6 +241,7 @@ function MainFrame:ShowPage(name)
   entry.instance:Show()
   activePage = name
   if frame.subtitle then frame.subtitle:SetText("— " .. name) end
+  rebuildTabStrip()
 
   -- Pages may opt-in to OnShow refresh by exposing a Refresh method.
   if entry.instance.Refresh then entry.instance:Refresh() end

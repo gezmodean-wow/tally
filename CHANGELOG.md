@@ -4,6 +4,12 @@ All notable changes to Tally will be documented in this file.
 
 ## [Unreleased]
 
+- Research panel UI:
+  - New `UI/ResearchPage.lua` registered as the second tab in the main frame. Item-link / item-ID / name lookup input at the top, drillable item header (icon + name + ID + strategy), stats row (unit value, owned, saleable, net-worth share, owned-worth share), price-history and inventory-history sparklines side-by-side with 7d / 30d Δ labels (color-coded by sign), per-character ownership table with per-location detail, and a sales summary footer (when FlipQueue is installed).
+  - `MainFrame` now has a tab strip — clicking a tab switches between Net Worth and Research pages. Brass-highlighted active tab. Tabs auto-rebuild when pages register.
+  - `Chart.lua` gains an `opts.minimal` sparkline mode that drops axes, labels, and grid for inline use.
+  - Slash wiring: `/tally research <item>` now opens the panel and runs the lookup. The chat printout is preserved under `/tally research-chat` (`/tly rc`) for power users.
+  - `ns.UI.ShowResearch(input)` convenience function: shows main frame, switches to Research tab, runs the lookup. Used by the slash command.
 - First UI pass — net-worth-over-time panel:
   - New `UI/MainFrame.lua` (Tally's first proper frame): movable, Cogworks-themed title bar, body region for pluggable pages, ESC closes. Pages register themselves and lazy-build on first show, so login cost stays zero for users who never open the UI.
   - New `UI/NetWorthPage.lua` (the first registered page): time-range buttons (7d / 30d / 90d / All — defaults to 30d), line chart of saleable net worth across the selected window, stats footer showing current total, Δ over window (color-coded), and snapshot count. Live-refreshes on inventory changes when the frame is open.

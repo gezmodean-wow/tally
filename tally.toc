@@ -26,4 +26,5 @@ Research\Aggregator.lua
 UI\Chart.lua
 UI\MainFrame.lua
 UI\NetWorthPage.lua
+UI\ResearchPage.lua
 Core.lua

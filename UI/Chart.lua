@@ -20,6 +20,8 @@
 --   yTicks / xTicks (number of grid divisions; defaults 4 / 5)
 --   lineColor / gridColor / labelColor (RGBA tables; defaults from Cogworks theme)
 --   thickness (line thickness in pixels; default 2)
+--   minimal (bool) — sparkline mode: zero label space, no grid, no tick labels.
+--                    Useful for inline sparklines in research views.
 
 local addonName, ns = ...
 ns.UI = ns.UI or {}
@@ -49,6 +51,12 @@ function ns.UI.CreateLineChart(parent, opts)
   opts = opts or {}
   for k, v in pairs(DEFAULTS) do
     if opts[k] == nil then opts[k] = v end
+  end
+  if opts.minimal then
+    opts.yLabelWidth = 0
+    opts.xLabelHeight = 0
+    opts.yTicks = 0
+    opts.xTicks = 0
   end
 
   local frame = CreateFrame("Frame", nil, parent)
@@ -195,37 +203,43 @@ function ns.UI.CreateLineChart(parent, opts)
     local function px(x) return ((x - xMin) / (xMax - xMin)) * plotW end
     local function py(y) return ((y - yMin) / (yMax - yMin)) * plotH end
 
-    -- Y-axis grid + labels.
-    local gr, gg, gb, ga = themeColor("border", { 0.30, 0.30, 0.40, 0.4 })
-    ga = (ga or 1) * 0.4 -- soften grid
-    local lr, lg, lb, la = themeColor("textDim", { 0.6, 0.6, 0.6, 1 })
+    -- Axes & labels (skipped in minimal/sparkline mode).
+    if opts.yTicks > 0 then
+      local gr, gg, gb, ga = themeColor("border", { 0.30, 0.30, 0.40, 0.4 })
+      ga = (ga or 1) * 0.4 -- soften grid
+      local lr, lg, lb, la = themeColor("textDim", { 0.6, 0.6, 0.6, 1 })
 
-    for i = 0, opts.yTicks do
-      local f = i / opts.yTicks
-      local y = yMin + (yMax - yMin) * f
-      local yPx = py(y)
-      local g = acquireGrid()
-      g:SetColorTexture(gr, gg, gb, ga)
-      g:SetStartPoint("BOTTOMLEFT", plot, 0, yPx)
-      g:SetEndPoint("BOTTOMLEFT", plot, plotW, yPx)
-      local fs = acquireYLabel()
-      fs:ClearAllPoints()
-      fs:SetPoint("RIGHT", plot, "BOTTOMLEFT", -4, yPx)
-      fs:SetWidth(opts.yLabelWidth - 4)
-      fs:SetText(yFormatter(y))
-      fs:SetTextColor(lr, lg, lb, la)
+      for i = 0, opts.yTicks do
+        local f = i / opts.yTicks
+        local y = yMin + (yMax - yMin) * f
+        local yPx = py(y)
+        local g = acquireGrid()
+        g:SetColorTexture(gr, gg, gb, ga)
+        g:SetStartPoint("BOTTOMLEFT", plot, 0, yPx)
+        g:SetEndPoint("BOTTOMLEFT", plot, plotW, yPx)
+        if opts.yLabelWidth > 0 then
+          local fs = acquireYLabel()
+          fs:ClearAllPoints()
+          fs:SetPoint("RIGHT", plot, "BOTTOMLEFT", -4, yPx)
+          fs:SetWidth(opts.yLabelWidth - 4)
+          fs:SetText(yFormatter(y))
+          fs:SetTextColor(lr, lg, lb, la)
+        end
+      end
     end
 
-    -- X-axis labels (no vertical grid for cleanliness).
-    for i = 0, opts.xTicks do
-      local f = i / opts.xTicks
-      local x = xMin + (xMax - xMin) * f
-      local xPx = px(x)
-      local fs = acquireXLabel()
-      fs:ClearAllPoints()
-      fs:SetPoint("TOP", plot, "BOTTOMLEFT", xPx, -2)
-      fs:SetText(xFormatter(x))
-      fs:SetTextColor(lr, lg, lb, la)
+    if opts.xTicks > 0 and opts.xLabelHeight > 0 then
+      local lr, lg, lb, la = themeColor("textDim", { 0.6, 0.6, 0.6, 1 })
+      for i = 0, opts.xTicks do
+        local f = i / opts.xTicks
+        local x = xMin + (xMax - xMin) * f
+        local xPx = px(x)
+        local fs = acquireXLabel()
+        fs:ClearAllPoints()
+        fs:SetPoint("TOP", plot, "BOTTOMLEFT", xPx, -2)
+        fs:SetText(xFormatter(x))
+        fs:SetTextColor(lr, lg, lb, la)
+      end
     end
 
     -- Line segments.
