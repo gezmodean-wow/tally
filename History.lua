@@ -24,10 +24,15 @@
 --       snapshots = {
 --         {
 --           atTime = N,
+--           gold = { [charKey] = copper, Warband = copper },
 --           items = {
 --             [itemID] = {
---               [charKey] = { bags=N, reagent=N, bank=N, mail=N,
---                             equipped=N, void=N, auctions=N, warbank=N },
+--               [charKey] = {
+--                 saleable = K,
+--                 total = T,
+--                 locations = { bags=N, reagent=N, bank=N, mail=N,
+--                               equipped=N, void=N, auctions=N, warbank=N },
+--               },
 --             },
 --           },
 --         },
@@ -189,43 +194,48 @@ local function collectOwnedItemIDs()
   return ids
 end
 
--- Build a per-itemID, per-charKey, per-location count snapshot.
--- Only non-zero locations are emitted, so chars holding nothing of an item
--- don't appear under that item. The synthetic "Warband" charKey carries
--- warbank counts.
+-- Build a per-itemID, per-charKey, per-location count snapshot. Each
+-- (item, char) entry carries `saleable`, `total`, and `locations`. The
+-- saleable/total pair preserves the bound-vs-saleable signal that the
+-- per-location counts alone can't reconstruct (bags items can be either).
+-- Only entries with non-zero total are emitted.
 local function collectInventorySnapshot()
   local out = {}
   local rollup = ns.Inventory and ns.Inventory:Get() or nil
-  if not rollup then return out end
+  if not rollup then return out, {} end
+
+  local gold = {}
 
   local function emit(charKey, items)
     if type(items) ~= "table" then return end
     for _, entry in pairs(items) do
       local itemID = entry.itemID
-      if itemID and itemID > 0 and entry.locations then
-        local hasAny = false
+      if itemID and itemID > 0 and entry.total and entry.total > 0 then
         local locs = {}
-        for loc, count in pairs(entry.locations) do
-          if count and count > 0 then
-            locs[loc] = count
-            hasAny = true
+        if type(entry.locations) == "table" then
+          for loc, count in pairs(entry.locations) do
+            if count and count > 0 then locs[loc] = count end
           end
         end
-        if hasAny then
-          out[itemID] = out[itemID] or {}
-          out[itemID][charKey] = locs
-        end
+        out[itemID] = out[itemID] or {}
+        out[itemID][charKey] = {
+          saleable = entry.saleable or 0,
+          total = entry.total,
+          locations = locs,
+        }
       end
     end
   end
 
   for charKey, char in pairs(rollup.characters or {}) do
     emit(charKey, char.items)
+    gold[charKey] = char.gold or 0
   end
   if rollup.warband then
     emit("Warband", rollup.warband.items)
+    gold["Warband"] = rollup.warband.gold or 0
   end
-  return out
+  return out, gold
 end
 
 -- Records both pricing and inventory snapshots at the same atTime.
@@ -265,11 +275,13 @@ function History:Snapshot(opts)
   end
 
   -- Inventory
-  local items = collectInventorySnapshot()
+  local items, gold = collectInventorySnapshot()
   local invItemCount = 0
   for _ in pairs(items) do invItemCount = invItemCount + 1 end
+  local invHasGold = false
+  for _ in pairs(gold) do invHasGold = true; break end
 
-  if pricedCount == 0 and invItemCount == 0 then
+  if pricedCount == 0 and invItemCount == 0 and not invHasGold then
     return false, "nothing to record (rollup empty and no priced items)"
   end
 
@@ -277,8 +289,8 @@ function History:Snapshot(opts)
     table.insert(pBucket.snapshots, { atTime = now, prices = prices })
     pBucket.lastSnapshotAt = now
   end
-  if invItemCount > 0 then
-    table.insert(iBucket.snapshots, { atTime = now, items = items })
+  if invItemCount > 0 or invHasGold then
+    table.insert(iBucket.snapshots, { atTime = now, items = items, gold = gold })
     iBucket.lastSnapshotAt = now
   end
 
@@ -335,14 +347,32 @@ end
 -- Inventory queries
 -- ============================================================================
 
+-- Reads a per-(char, item) entry under either schema. Old shape was a flat
+-- locations map (`{ bags=N, ... }`); new shape wraps it in
+-- `{ saleable, total, locations }`. Returns (saleable, total, locations).
+local function readCharItemEntry(entry)
+  if type(entry) ~= "table" then return 0, 0, {} end
+  if entry.total ~= nil then
+    return entry.saleable or 0, entry.total, entry.locations or {}
+  end
+  -- Legacy shape: locations map directly under charKey.
+  local total = 0
+  for _, n in pairs(entry) do
+    if type(n) == "number" then total = total + n end
+  end
+  -- Without saleable signal in legacy data, assume all saleable. Slight
+  -- over-count for old equipped/void items but only affects pre-migration
+  -- snapshots; corrects forward.
+  return total, total, entry
+end
+
 local function snapshotItemTotal(snap, itemID)
   local rec = snap.items and snap.items[itemID]
   if not rec then return 0, {} end
   local total = 0
   local byChar = {}
-  for charKey, locs in pairs(rec) do
-    local sub = 0
-    for _, n in pairs(locs) do sub = sub + n end
+  for charKey, entry in pairs(rec) do
+    local _, sub = readCharItemEntry(entry)
     if sub > 0 then
       byChar[charKey] = sub
       total = total + sub
@@ -367,8 +397,8 @@ function History:GetItemInventoryHistory(itemID)
   return out
 end
 
--- Returns the raw per-location detail for itemID at each snapshot —
--- { atTime, byChar = { [charKey] = { [location] = count } } }.
+-- Returns per-snapshot per-char detail for itemID, normalized into the
+-- new schema shape: { atTime, byChar = { [charKey] = { saleable, total, locations } } }.
 function History:GetItemInventoryRaw(itemID)
   if not itemID then return {} end
   local b = inventoryBucket()
@@ -376,7 +406,12 @@ function History:GetItemInventoryRaw(itemID)
   for _, snap in ipairs(b.snapshots) do
     local rec = snap.items and snap.items[itemID]
     if rec then
-      out[#out + 1] = { atTime = snap.atTime, byChar = rec }
+      local byChar = {}
+      for charKey, entry in pairs(rec) do
+        local saleable, total, locations = readCharItemEntry(entry)
+        byChar[charKey] = { saleable = saleable, total = total, locations = locations }
+      end
+      out[#out + 1] = { atTime = snap.atTime, byChar = byChar }
     end
   end
   return out
@@ -385,6 +420,107 @@ end
 -- Returns ({ first, latest, delta, byCharDelta = { [charKey] = N } }, n).
 -- delta is the change in total count over the window. byCharDelta breaks
 -- the change down per character; an entry of 0 means unchanged within window.
+-- ============================================================================
+-- Historical net-worth replay
+-- ============================================================================
+
+-- Find the snapshot at-or-before atTime in a sorted (oldest first) list.
+-- Returns nil if every snapshot is after atTime.
+local function findAtOrBefore(snapshots, atTime)
+  if type(snapshots) ~= "table" or #snapshots == 0 then return nil end
+  local found = nil
+  for _, snap in ipairs(snapshots) do
+    if snap.atTime <= atTime then found = snap
+    else break end
+  end
+  return found
+end
+
+-- Reconstruct net worth at a past timestamp using the nearest-prior
+-- inventory snapshot for counts/gold and the nearest-prior pricing snapshot
+-- (under the current strategy) for unit values. Returns a table with the
+-- same shape as NetWorth:Snapshot() plus an `atTime` field.
+--
+--   opts.includeBound = true  → owned-worth view (uses `total` counts)
+--                       false → net-worth view (uses `saleable` counts; default)
+--   opts.strategy             → override strategy lookup (defaults to current)
+--
+-- Returns (snapshot, info) where info may carry warnings (e.g., no pricing
+-- data available for the requested time).
+function History:GetNetWorthAt(atTime, opts)
+  if type(atTime) ~= "number" then return nil, "atTime required" end
+  opts = opts or {}
+  local includeBound = opts.includeBound or false
+  local strategy = opts.strategy or (ns.NetWorth and ns.NetWorth:GetStrategy())
+  if not strategy then return nil, "no strategy" end
+
+  local invBucket = inventoryBucket()
+  local invSnap = findAtOrBefore(invBucket.snapshots, atTime)
+  if not invSnap then return nil, "no inventory snapshot at or before atTime" end
+
+  local pSnap
+  local pBucket = db().pricing[strategy]
+  if pBucket then pSnap = findAtOrBefore(pBucket.snapshots, atTime) end
+  local prices = (pSnap and pSnap.prices) or {}
+
+  local snapshot = {
+    view = includeBound and "owned" or "net",
+    atTime = invSnap.atTime,
+    pricedAt = pSnap and pSnap.atTime or nil,
+    strategy = strategy,
+    total = 0, gold = 0, items = 0,
+    breakdown = { tsm = 0, token = 0, vendor = 0, none = 0 },
+    byCharacter = {},
+    warband = { gold = 0, items = 0, total = 0 },
+  }
+
+  -- Gold per char (and warband).
+  for charKey, copper in pairs(invSnap.gold or {}) do
+    if charKey == "Warband" then
+      snapshot.warband.gold = copper
+    else
+      snapshot.byCharacter[charKey] = snapshot.byCharacter[charKey] or { gold = 0, items = 0, total = 0 }
+      snapshot.byCharacter[charKey].gold = copper
+    end
+    snapshot.gold = snapshot.gold + copper
+  end
+
+  -- Items per (char, itemID).
+  for itemID, perChar in pairs(invSnap.items or {}) do
+    local unit = prices[itemID]
+    for charKey, entry in pairs(perChar) do
+      local saleable, total = readCharItemEntry(entry)
+      local count = includeBound and total or saleable
+      if count > 0 then
+        local subtotal = (unit or 0) * count
+        if charKey == "Warband" then
+          snapshot.warband.items = snapshot.warband.items + subtotal
+        else
+          snapshot.byCharacter[charKey] = snapshot.byCharacter[charKey] or { gold = 0, items = 0, total = 0 }
+          snapshot.byCharacter[charKey].items = snapshot.byCharacter[charKey].items + subtotal
+        end
+        snapshot.items = snapshot.items + subtotal
+        if unit and unit > 0 then
+          snapshot.breakdown.tsm = snapshot.breakdown.tsm + subtotal
+        else
+          snapshot.breakdown.none = snapshot.breakdown.none + subtotal
+        end
+      end
+    end
+  end
+
+  -- Per-char totals.
+  for _, c in pairs(snapshot.byCharacter) do
+    c.total = c.gold + c.items
+  end
+  snapshot.warband.total = snapshot.warband.gold + snapshot.warband.items
+  snapshot.total = snapshot.gold + snapshot.items
+
+  local info = nil
+  if not pSnap then info = "no pricing snapshot at or before atTime; items contribute 0" end
+  return snapshot, info
+end
+
 function History:GetItemInventoryTrend(itemID, windowSec)
   local series = self:GetItemInventoryHistory(itemID)
   if #series == 0 then return nil, 0 end

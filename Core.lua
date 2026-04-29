@@ -68,11 +68,12 @@ end
 -- Major bumps are breaking; minor bumps are additive.
 _G.TallyAPI = {
   major = 1,
-  minor = 2,
+  minor = 3,
   api = {
     GetItemResearch = function(input, itemName) return ns.Research:GetRecord(input, itemName) end,
     InvalidateItemResearch = function(itemKey) ns.Research:Invalidate(itemKey) end,
-    GetNetWorthSnapshot = function() return ns.NetWorth:Snapshot() end,
+    GetNetWorthSnapshot = function(opts) return ns.NetWorth:Snapshot(opts) end,
+    GetNetWorthSnapshotAt = function(atTime, opts) return ns.History:GetNetWorthAt(atTime, opts) end,
     GetInventoryRollup = function() return ns.Inventory:Get() end,
     GetItemPriceHistory = function(itemID, strategy) return ns.History:GetItemHistory(itemID, strategy) end,
     GetItemPriceTrend = function(itemID, windowSec, strategy) return ns.History:GetItemTrend(itemID, windowSec, strategy) end,
@@ -88,7 +89,9 @@ local function printHelp()
   local prefix = "|cff7fbfffTally|r"
   print(prefix .. " — Personal Capital for WoW.")
   print("  /tally networth (or /tly nw) — print current net worth (saleable items only)")
+  print("  /tally networth at -<duration> — reconstruct net worth at a past time (e.g. -7d, -1h)")
   print("  /tally ownedworth (or /tly ow) — print owned worth (includes bound items)")
+  print("  /tally ownedworth at -<duration> — historical owned-worth view")
   print("  /tally research <itemlink-or-id> — print research record for an item")
   print("  /tally rescan — force inventory rescan via Syndicator")
   print("  /tally strategy — print current price strategy")
@@ -110,6 +113,70 @@ local function describeAge(seconds)
   local m = math.floor(seconds / 60)
   if m > 0 then return m .. "m" end
   return seconds .. "s"
+end
+
+-- Parse a relative-time expression into a positive seconds offset (always past).
+-- Accepts forms like "-7d", "7d", "1h", "90m", "30s", "1w". Returns nil on bad input.
+local function parsePastOffsetSec(text)
+  if type(text) ~= "string" or text == "" then return nil end
+  text = text:lower():gsub("%s+", "")
+  local sign = "-"
+  if text:sub(1, 1) == "-" or text:sub(1, 1) == "+" then
+    sign = text:sub(1, 1); text = text:sub(2)
+  end
+  local n, unit = text:match("^(%d+)([dhmsw])$")
+  if not n then return nil end
+  n = tonumber(n)
+  local mult = ({ s = 1, m = 60, h = 3600, d = 86400, w = 7 * 86400 })[unit]
+  if not mult or sign == "+" then return nil end
+  return n * mult
+end
+
+local function handleNetWorth(rest, includeBound)
+  local err = "|cffff4040Tally:|r"
+  rest = (rest or ""):match("^%s*(.-)%s*$")
+
+  -- "at <duration>" → reconstruct historical snapshot.
+  local atArg = rest:match("^at%s+(.+)$")
+  if atArg then
+    local offsetSec = parsePastOffsetSec(atArg)
+    if not offsetSec then
+      print(err .. " usage — /tally networth at -<duration> (e.g. -7d, -1h, -30m)")
+      return
+    end
+    if not ns.History or not ns.History.GetNetWorthAt then
+      print(err .. " history module unavailable")
+      return
+    end
+    local atTime = time() - offsetSec
+    local snap, info = ns.History:GetNetWorthAt(atTime, { includeBound = includeBound })
+    if not snap then
+      print(err .. " " .. tostring(info or "no historical data"))
+      return
+    end
+    local label = string.format("(at %s, %s ago)",
+      date("%Y-%m-%d %H:%M", snap.atTime), describeAge(offsetSec))
+    ns.NetWorth:PrintSnapshot(snap, label)
+    if info then print("  |cffffd070note:|r " .. info) end
+    -- Δ vs current
+    local current = ns.NetWorth:Snapshot({ includeBound = includeBound })
+    local delta = current.total - snap.total
+    local sign = delta >= 0 and "+" or "-"
+    local pct = ""
+    if snap.total > 0 then
+      pct = string.format(" (%s%.1f%%)", delta >= 0 and "+" or "-", math.abs(delta / snap.total) * 100)
+    end
+    print(string.format("  Δ vs now: %s%s%s",
+      sign, ns.NetWorth.FormatGold(math.abs(delta)), pct))
+    return
+  end
+
+  if rest ~= "" then
+    print(err .. " unknown net-worth subcommand. Try `/tally networth` or `/tally networth at -7d`.")
+    return
+  end
+
+  ns.NetWorth:Print({ includeBound = includeBound })
 end
 
 local function handleHistory(args)
@@ -215,9 +282,9 @@ local function handleSlash(msg)
   local cmd, rest = msg:match("^(%S+)%s*(.*)$")
   cmd = cmd:lower()
   if cmd == "networth" or cmd == "nw" then
-    ns.NetWorth:Print()
+    handleNetWorth(rest, false)
   elseif cmd == "ownedworth" or cmd == "ow" then
-    ns.NetWorth:Print({ includeBound = true })
+    handleNetWorth(rest, true)
   elseif cmd == "research" or cmd == "r" then
     if rest == "" then
       print("|cff7fbfffTally:|r usage — /tally research <itemlink-or-id>")

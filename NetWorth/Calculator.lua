@@ -93,27 +93,34 @@ end
 
 NetWorth.FormatGold = formatGold
 
-function NetWorth:Print(opts)
-  local snap = self:Snapshot(opts)
+-- Pretty-print an arbitrary snapshot (current or reconstructed). headerSuffix
+-- is appended to the title line — useful for "(at 2026-04-21 14:30)" on
+-- historical snapshots.
+function NetWorth:PrintSnapshot(snap, headerSuffix)
   local prefix = "|cff7fbfffTally|r"
   local label = snap.view == "owned" and "owned worth (incl. bound)" or "net worth (saleable only)"
-  print(prefix .. " " .. label .. " — " .. snap.strategy .. ":")
+  local header = label .. " — " .. snap.strategy
+  if headerSuffix and headerSuffix ~= "" then header = header .. " " .. headerSuffix end
+  print(prefix .. " " .. header .. ":")
   print("  Total: " .. formatGold(snap.total))
   print("    Gold: " .. formatGold(snap.gold))
   print("    Items: " .. formatGold(snap.items))
-  if snap.breakdown.none > 0 then
+  if snap.breakdown and snap.breakdown.none and snap.breakdown.none > 0 then
     print("    |cffff8080Unpriced items:|r " .. formatGold(snap.breakdown.none))
   end
-  if snap.warband.total > 0 then
+  if snap.warband and snap.warband.total > 0 then
     print("  Warband: " .. formatGold(snap.warband.total)
       .. " (" .. formatGold(snap.warband.gold) .. " gold + " .. formatGold(snap.warband.items) .. " items)")
   end
-  -- Sort characters by total descending so the heavyweights come first.
   local chars = {}
-  for k, v in pairs(snap.byCharacter) do chars[#chars + 1] = { key = k, data = v } end
+  for k, v in pairs(snap.byCharacter or {}) do chars[#chars + 1] = { key = k, data = v } end
   table.sort(chars, function(a, b) return a.data.total > b.data.total end)
   for _, c in ipairs(chars) do
     print(string.format("  %s: %s (%s gold + %s items)",
       c.key, formatGold(c.data.total), formatGold(c.data.gold), formatGold(c.data.items)))
   end
+end
+
+function NetWorth:Print(opts)
+  self:PrintSnapshot(self:Snapshot(opts))
 end

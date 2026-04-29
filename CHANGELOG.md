@@ -4,6 +4,12 @@ All notable changes to Tally will be documented in this file.
 
 ## [Unreleased]
 
+- Historical net-worth replay (TLY-005):
+  - Inventory snapshots now also record per-character (and warband) gold totals, so historical net-worth replay can sum gold + items at any past timestamp.
+  - Inventory snapshot schema bumped from `[charKey] = { bags=N, ... }` to `[charKey] = { saleable, total, locations = { bags=N, ... } }`. The saleable/total pair preserves the bound-vs-saleable signal that per-location counts can't reconstruct alone. Pre-bump snapshots upgrade lazily on read; saleable defaults to total for legacy data (slight over-count on pre-migration data, corrects forward).
+  - New `History:GetNetWorthAt(atTime, opts)` reconstructs net worth at any past time using the nearest-prior inventory snapshot for counts/gold and the nearest-prior pricing snapshot for unit values. Returns the same shape as `NetWorth:Snapshot()` plus `atTime` and `pricedAt` markers. `opts.includeBound` switches between net (saleable) and owned (incl. bound) views.
+  - New slash form: `/tally networth at -<duration>` and `/tally ownedworth at -<duration>`. Duration accepts `-7d`, `-1h`, `-30m`, `-1w`, etc. Output prints the historical snapshot plus `Δ vs now` line with absolute and percentage delta.
+  - `_G.TallyAPI` bumped to v1.3: adds `GetNetWorthSnapshotAt(atTime, opts)`. `GetNetWorthSnapshot` now accepts an `opts` argument (additive).
 - Adopted Cogworks v0.10.0 (TLY-003):
   - `.pkgmeta` external bumped to `v0.10.0`; TOC now loads `Libs\Cogworks-1.0\Cogworks-1.0.xml` to pick up the multi-file manifest (Items / Realms / API / Icons / Sections).
   - Minimap registration goes through `Cogworks:RegisterCogMinimapButton`, which hides LDBIcon's default tracking border and mounts the suite-shared brass gear ring around our inner glyph. Soft-degrades to a plain `LDBIcon:Register` on older Cogworks.
