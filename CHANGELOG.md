@@ -4,6 +4,14 @@ All notable changes to Tally will be documented in this file.
 
 ## [Unreleased]
 
+- Tally ledger — canonical, source-agnostic transaction history (Pass 1):
+  - New root `Ledger.lua` owns Tally's own transaction store under `TallyDB.ledger`. Standalone — no FlipQueue dependency. Cross-source dedupe via `id = "<source>:<sourceId>"`.
+  - Canonical entry shape: `{ id, atTime, kind, itemKey, itemID, charKey, copper, count, source, sourceId, meta }`. Kinds covered: `sale`, `purchase`, `vendor-sell`, `vendor-buy`, `mail-receive`, `mail-send`, `trade`, `repair`, `ah-fee`, `ah-cancel`, `ah-expire`, `refund`. `Ledger:KindSign(kind)` classifies each as income/expense/neutral.
+  - Pluggable adapter pattern via `Ledger:RegisterSource(name, { label, importFn, isAvailable })`. `Ledger:ImportFromAllSources()` runs every available adapter; auto-fires on `PLAYER_LOGIN` and on each `InventoryChanged` so new activity flows in mid-session (dedupe makes re-runs free).
+  - First adapter: `Sources/FlipQueue.lua` — read-only import from `FlipQueueDB.log`. FlipQueue retains writes; Tally pulls. Each FQ row maps to 1-2 ledger entries (sale/expire/cancel + optional purchase from `buyPrice`). Stable hash IDs over `(charKey, postedAt, itemKey, postedQuantity)` so re-imports dedupe even if FQ removes/reorders rows.
+  - New `UI/LedgerPage.lua` (4th tab in main frame): filter chips (All / Sales / Purchases / AH Activity / Other), totals row (income / expense / net / count, color-coded), scrollable transaction list with date / character / kind / item / source / signed amount columns.
+  - `Research/Aggregator.lua` shifts `record.sales` / `record.failures` / `record.purchases` from direct `FlipQueueDB.log` reads to `Ledger:Query({ itemID = N })`. Now any registered source's data flows into the research panel. Active auctions stay sourced from FlipQueue (in-flight state, not ledger-shaped).
+  - `_G.TallyAPI` v1.4 adds `QueryLedger(filter)` and `LedgerStats(filter)` for sibling cogs.
 - UI polish round:
   - `NetWorthPage` switches to a two-column layout: line chart on the left, scrollable per-character total table on the right (synthetic `Warband` row when warband holdings are non-zero, sorted by total descending).
   - Saleable / Owned toggle on the control row — switches both the chart series and the per-character totals between net-worth and owned-worth views without leaving the panel.

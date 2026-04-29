@@ -22,10 +22,13 @@ Pricing\Sources.lua
 Inventory\Ownership.lua
 NetWorth\Calculator.lua
 History.lua
+Ledger.lua
+Sources\FlipQueue.lua
 Research\Aggregator.lua
 UI\Chart.lua
 UI\MainFrame.lua
 UI\NetWorthPage.lua
 UI\ResearchPage.lua
+UI\LedgerPage.lua
 UI\SettingsPage.lua
 Core.lua

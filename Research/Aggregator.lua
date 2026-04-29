@@ -143,73 +143,53 @@ local function buildPricing(itemID, itemKey)
   }
 end
 
--- Augment a research record with FlipQueue log data when FlipQueue is present.
--- Read-only; FlipQueue keeps owning the writes.
-local function augmentFromFlipQueue(record, itemID, itemName)
-  local fqdb = _G.FlipQueueDB
-  if type(fqdb) ~= "table" or type(fqdb.log) ~= "table" then return end
+-- Pull transaction history (sales / failures / purchases) from Tally's
+-- canonical ledger. Source-agnostic — any registered adapter (FlipQueue,
+-- TSM, Native, Auctionator) contributes here. The record shape preserves
+-- FlipQueue's ItemResearch contract so existing consumers keep working.
+local function augmentTxnsFromLedger(record, itemID)
+  if not (ns.Ledger and itemID) then return end
 
-  for _, entry in ipairs(fqdb.log) do
-    local entryID = tonumber((entry.itemKey or ""):match("^(%d+);"))
-    local matchByID = entryID and itemID and entryID == itemID
-    local matchByName = itemName and entry.name and entry.name:lower() == itemName:lower()
-    if matchByID or matchByName then
-      if not record.icon and entry.icon then record.icon = entry.icon end
-      if not record.quality and entry.quality then record.quality = entry.quality end
-      if (not record.name or record.name == "") and entry.name then record.name = entry.name end
-
-      local status = entry.auctionStatus or ""
-      local sold = (status == "sold" or status == "collected") and entry.soldPrice
-      local active = (status == "active")
-      local failed = (status == "expired" or status == "cancelled")
-
-      if sold then
-        local soldCopper = entry.soldPrice or copperFromPrice(entry.postedPrice or entry.expectedPrice)
-        table.insert(record.sales, {
-          soldPrice = soldCopper,
-          postedPrice = entry.postedPrice or "",
-          targetRealm = entry.targetRealm or "Unknown",
-          charKey = entry.charKey or "",
-          soldAt = entry.soldAt,
-          postedAt = entry.postedAt,
-          quantity = entry.postedQuantity or 1,
-        })
-      elseif failed then
-        table.insert(record.failures, {
-          postedPrice = entry.postedPrice or "",
-          targetRealm = entry.targetRealm or "Unknown",
-          charKey = entry.charKey or "",
-          postedAt = entry.postedAt,
-          auctionStatus = entry.auctionStatus,
-          saleOutcome = entry.saleOutcome,
-          fee = entry.ahFee or 0,
-          totalFeesSpent = entry.totalFeesSpent or 0,
-          postAttempts = entry.postAttempts or 0,
-          postHistory = entry.postHistory,
-        })
-      elseif active then
-        table.insert(record.activeAuctions, {
-          postedPrice = entry.postedPrice or "",
-          expectedPrice = entry.expectedPrice or "",
-          targetRealm = entry.targetRealm or "Unknown",
-          charKey = entry.charKey or "",
-          postedAt = entry.postedAt,
-          quantity = entry.postedQuantity or 1,
-        })
-      end
-
-      if entry.buyPrice and entry.buyPrice ~= "" then
-        table.insert(record.purchases, {
-          price = copperFromPrice(entry.buyPrice),
-          priceStr = entry.buyPrice,
-          realm = entry.buyLocation or entry.targetRealm or "Unknown",
-          charKey = entry.charKey or "",
-          timestamp = entry.postedAt,
-        })
-      end
+  for _, e in ipairs(ns.Ledger:Query({ itemID = itemID })) do
+    local meta = e.meta or {}
+    if e.kind == "sale" then
+      table.insert(record.sales, {
+        soldPrice = e.copper or 0,
+        postedPrice = meta.postedPrice or "",
+        targetRealm = meta.targetRealm or "Unknown",
+        charKey = e.charKey or "",
+        soldAt = e.atTime,
+        postedAt = meta.postedAt,
+        quantity = e.count or 1,
+        source = e.source,
+      })
+    elseif e.kind == "ah-expire" or e.kind == "ah-cancel" then
+      table.insert(record.failures, {
+        postedPrice = meta.postedPrice or "",
+        targetRealm = meta.targetRealm or "Unknown",
+        charKey = e.charKey or "",
+        postedAt = meta.postedAt or e.atTime,
+        auctionStatus = (e.kind == "ah-expire") and "expired" or "cancelled",
+        saleOutcome = meta.saleOutcome,
+        fee = meta.ahFee or 0,
+        totalFeesSpent = meta.totalFeesSpent or 0,
+        postAttempts = meta.postAttempts or 0,
+        postHistory = meta.postHistory,
+        source = e.source,
+      })
+    elseif e.kind == "purchase" then
+      table.insert(record.purchases, {
+        price = e.copper or 0,
+        priceStr = meta.postedPrice or "",
+        realm = meta.targetRealm or "Unknown",
+        charKey = e.charKey or "",
+        timestamp = e.atTime,
+        source = e.source,
+      })
     end
   end
 
+  -- Sales summary.
   local totalRev, count = 0, 0
   for _, s in ipairs(record.sales) do
     totalRev = totalRev + (s.soldPrice or 0)
@@ -228,6 +208,7 @@ local function augmentFromFlipQueue(record, itemID, itemName)
     record.salesSummary.byRealm[r].total = record.salesSummary.byRealm[r].total + (s.soldPrice or 0)
   end
 
+  -- Failure summary.
   local expired, cancelled, feesLost = 0, 0, 0
   for _, f in ipairs(record.failures) do
     if f.auctionStatus == "expired" then expired = expired + 1
@@ -235,6 +216,36 @@ local function augmentFromFlipQueue(record, itemID, itemName)
     feesLost = feesLost + (f.totalFeesSpent or f.fee or 0)
   end
   record.failureSummary = { expiredCount = expired, cancelledCount = cancelled, totalFeesLost = feesLost }
+end
+
+-- FlipQueue-specific augmentation: icon enrichment + active (in-flight)
+-- auctions. Active auctions aren't ledger-shaped (they're ephemeral state,
+-- not completed transactions), so they stay sourced directly from FQ.
+local function augmentMetaFromFlipQueue(record, itemID, itemName)
+  local fqdb = _G.FlipQueueDB
+  if type(fqdb) ~= "table" or type(fqdb.log) ~= "table" then return end
+
+  for _, entry in ipairs(fqdb.log) do
+    local entryID = tonumber((entry.itemKey or ""):match("^(%d+);"))
+    local matchByID = entryID and itemID and entryID == itemID
+    local matchByName = itemName and entry.name and entry.name:lower() == itemName:lower()
+    if matchByID or matchByName then
+      if not record.icon and entry.icon then record.icon = entry.icon end
+      if not record.quality and entry.quality then record.quality = entry.quality end
+      if (not record.name or record.name == "") and entry.name then record.name = entry.name end
+
+      if (entry.auctionStatus or "") == "active" then
+        table.insert(record.activeAuctions, {
+          postedPrice = entry.postedPrice or "",
+          expectedPrice = entry.expectedPrice or "",
+          targetRealm = entry.targetRealm or "Unknown",
+          charKey = entry.charKey or "",
+          postedAt = entry.postedAt,
+          quantity = entry.postedQuantity or 1,
+        })
+      end
+    end
+  end
 end
 
 function Research:GetRecord(input, itemName, skipCache)
@@ -300,7 +311,8 @@ function Research:GetRecord(input, itemName, skipCache)
   end
 
   if itemID then
-    augmentFromFlipQueue(record, itemID, record.name ~= "" and record.name or nil)
+    augmentTxnsFromLedger(record, itemID)
+    augmentMetaFromFlipQueue(record, itemID, record.name ~= "" and record.name or nil)
   end
 
   -- Tally pricing history: time-series snapshots under the active strategy.

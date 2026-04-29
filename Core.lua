@@ -48,6 +48,14 @@ function ns:PLAYER_LOGIN()
   if ns.Inventory and ns.Inventory.RegisterSyndicatorCallbacks then
     ns.Inventory:RegisterSyndicatorCallbacks()
   end
+  -- Register ledger source adapters. Each adapter registers itself with
+  -- ns.Ledger; we then run the available ones to backfill on login.
+  if ns.Sources then
+    if ns.Sources.FlipQueue then ns.Sources.FlipQueue:Register() end
+  end
+  if ns.Ledger and ns.Ledger.ImportFromAllSources then
+    ns.Ledger:ImportFromAllSources()
+  end
   -- Register UI pages with the main frame. Page bodies are lazy-created on
   -- first ShowPage so login cost is zero for users who never open the UI.
   if ns.UI and ns.UI.MainFrame then
@@ -56,6 +64,9 @@ function ns:PLAYER_LOGIN()
     end
     if ns.UI.CreateResearchPage then
       ns.UI.MainFrame:RegisterPage("Research", ns.UI.CreateResearchPage)
+    end
+    if ns.UI.CreateLedgerPage then
+      ns.UI.MainFrame:RegisterPage("Ledger", ns.UI.CreateLedgerPage)
     end
     if ns.UI.CreateSettingsPage then
       ns.UI.MainFrame:RegisterPage("Settings", ns.UI.CreateSettingsPage)
@@ -70,6 +81,12 @@ function ns:PLAYER_LOGIN()
       -- + TSM are loaded. History:MaybeSnapshot is gated on min-interval, so
       -- subsequent inventory churn won't spam snapshots.
       if ns.History then ns.History:MaybeSnapshot() end
+      -- Re-import from registered sources. Dedupe by entry id keeps this
+      -- O(N) on the source's data without producing duplicates, so picking
+      -- up new FlipQueue / TSM activity mid-session is essentially free.
+      if ns.Ledger and ns.Ledger.ImportFromAllSources then
+        ns.Ledger:ImportFromAllSources()
+      end
       -- Refresh open UI so live values stay current.
       if ns.UI and ns.UI.MainFrame and ns.UI.MainFrame:IsShown() then
         local active = ns.UI.MainFrame:GetActivePage()
@@ -86,7 +103,7 @@ end
 -- Major bumps are breaking; minor bumps are additive.
 _G.TallyAPI = {
   major = 1,
-  minor = 3,
+  minor = 4,
   api = {
     GetItemResearch = function(input, itemName) return ns.Research:GetRecord(input, itemName) end,
     InvalidateItemResearch = function(itemKey) ns.Research:Invalidate(itemKey) end,
@@ -97,6 +114,8 @@ _G.TallyAPI = {
     GetItemPriceTrend = function(itemID, windowSec, strategy) return ns.History:GetItemTrend(itemID, windowSec, strategy) end,
     GetItemInventoryHistory = function(itemID) return ns.History:GetItemInventoryHistory(itemID) end,
     GetItemInventoryTrend = function(itemID, windowSec) return ns.History:GetItemInventoryTrend(itemID, windowSec) end,
+    QueryLedger = function(filter) return ns.Ledger:Query(filter) end,
+    LedgerStats = function(filter) return ns.Ledger:Stats(filter) end,
   },
 }
 
