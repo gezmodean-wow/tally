@@ -4,6 +4,12 @@ All notable changes to Tally will be documented in this file.
 
 ## [Unreleased]
 
+- First UI pass — net-worth-over-time panel:
+  - New `UI/MainFrame.lua` (Tally's first proper frame): movable, Cogworks-themed title bar, body region for pluggable pages, ESC closes. Pages register themselves and lazy-build on first show, so login cost stays zero for users who never open the UI.
+  - New `UI/NetWorthPage.lua` (the first registered page): time-range buttons (7d / 30d / 90d / All — defaults to 30d), line chart of saleable net worth across the selected window, stats footer showing current total, Δ over window (color-coded), and snapshot count. Live-refreshes on inventory changes when the frame is open.
+  - New `UI/Chart.lua` reusable line-chart widget. Pure-Lua via `Frame:CreateLine()`, segment + grid + label pooling so refreshes don't accumulate texture regions. Configurable y-formatter (defaults to gold-formatted) and x-formatter (defaults to `%m/%d`).
+  - New `History:GetNetWorthSeries(startTime, endTime, opts)` for efficient chart data — one O(n+m) two-pointer walk across inventory + pricing snapshots, instead of N replay calls.
+  - Open via `/tally show` (or `/tly show` / `/tally ui`), or LDB left-click. LDB right-click preserves the chat printout for power-user quick reads.
 - LDB tooltip 7d/30d Δ (TLY-004):
   - Tooltip now shows `Δ 7d` and `Δ 30d` lines under the running total when sufficient history exists, computed via `History:GetNetWorthAt`.
   - Coloring: green for positive change, red for negative, neutral grey for changes within ±0.5% (fresh-data noise floor).

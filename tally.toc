@@ -23,4 +23,7 @@ Inventory\Ownership.lua
 NetWorth\Calculator.lua
 History.lua
 Research\Aggregator.lua
+UI\Chart.lua
+UI\MainFrame.lua
+UI\NetWorthPage.lua
 Core.lua

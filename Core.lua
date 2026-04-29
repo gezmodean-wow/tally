@@ -48,6 +48,11 @@ function ns:PLAYER_LOGIN()
   if ns.Inventory and ns.Inventory.RegisterSyndicatorCallbacks then
     ns.Inventory:RegisterSyndicatorCallbacks()
   end
+  -- Register UI pages with the main frame. Page bodies are lazy-created on
+  -- first ShowPage so login cost is zero for users who never open the UI.
+  if ns.UI and ns.UI.MainFrame and ns.UI.CreateNetWorthPage then
+    ns.UI.MainFrame:RegisterPage("Net Worth", ns.UI.CreateNetWorthPage)
+  end
   -- Invalidate research cache on inventory updates so consumers always see
   -- fresh ownership/valuation. Cogworks event bus is the broadcast channel.
   if Cogworks and Cogworks.RegisterCallback and Cogworks.Events then
@@ -57,6 +62,11 @@ function ns:PLAYER_LOGIN()
       -- + TSM are loaded. History:MaybeSnapshot is gated on min-interval, so
       -- subsequent inventory churn won't spam snapshots.
       if ns.History then ns.History:MaybeSnapshot() end
+      -- Refresh open UI so live values stay current.
+      if ns.UI and ns.UI.MainFrame and ns.UI.MainFrame:IsShown() then
+        local active = ns.UI.MainFrame:GetActivePage()
+        if active then ns.UI.MainFrame:ShowPage(active) end
+      end
     end)
   end
 end
@@ -88,6 +98,7 @@ _G.TallyAPI = {
 local function printHelp()
   local prefix = "|cff7fbfffTally|r"
   print(prefix .. " — Personal Capital for WoW.")
+  print("  /tally show — open the Tally main frame")
   print("  /tally networth (or /tly nw) — print current net worth (saleable items only)")
   print("  /tally networth at -<duration> — reconstruct net worth at a past time (e.g. -7d, -1h)")
   print("  /tally ownedworth (or /tly ow) — print owned worth (includes bound items)")
@@ -281,7 +292,13 @@ local function handleSlash(msg)
   end
   local cmd, rest = msg:match("^(%S+)%s*(.*)$")
   cmd = cmd:lower()
-  if cmd == "networth" or cmd == "nw" then
+  if cmd == "show" or cmd == "ui" then
+    if ns.UI and ns.UI.MainFrame then
+      ns.UI.MainFrame:Toggle()
+    else
+      print("|cffff4040Tally:|r UI module unavailable.")
+    end
+  elseif cmd == "networth" or cmd == "nw" then
     handleNetWorth(rest, false)
   elseif cmd == "ownedworth" or cmd == "ow" then
     handleNetWorth(rest, true)
@@ -327,6 +344,12 @@ if LDB then
     icon = "Interface\\AddOns\\Tally\\Art\\tl-inner",
     OnClick = function(_, button)
       if button == "LeftButton" then
+        if ns.UI and ns.UI.MainFrame then
+          ns.UI.MainFrame:Toggle()
+        else
+          ns.NetWorth:Print()
+        end
+      elseif button == "RightButton" then
         ns.NetWorth:Print()
       end
     end,

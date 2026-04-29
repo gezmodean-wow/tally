@@ -518,6 +518,65 @@ function History:GetNetWorthAt(atTime, opts)
   return snapshot, info
 end
 
+-- Build a series of historical net-worth points across [startTime, endTime].
+-- Each in-range inventory snapshot becomes a series entry, valued against
+-- the nearest-prior pricing snapshot. Used to feed the net-worth-over-time
+-- chart in the UI; one O(n+m) pass instead of N replay calls.
+--
+--   opts.includeBound = true  → owned-worth basis (uses `total` counts)
+--                       false → net-worth basis (saleable; default)
+--   opts.strategy             → override strategy (defaults to current)
+--
+-- Returns a list of points sorted oldest → newest:
+--   { { atTime, total, gold, items, view, strategy }, ... }
+function History:GetNetWorthSeries(startTime, endTime, opts)
+  opts = opts or {}
+  local includeBound = opts.includeBound or false
+  local strategy = opts.strategy or (ns.NetWorth and ns.NetWorth:GetStrategy())
+  if not strategy then return {} end
+
+  local invSnaps = inventoryBucket().snapshots or {}
+  local pSnaps = (db().pricing[strategy] and db().pricing[strategy].snapshots) or {}
+
+  -- Two-pointer walk: pricing snapshots are sorted by atTime, advance the
+  -- price pointer as the inventory pointer moves forward.
+  local out = {}
+  local pIdx = 0  -- last index <= current invSnap.atTime
+  for _, invSnap in ipairs(invSnaps) do
+    if invSnap.atTime >= (startTime or 0) and invSnap.atTime <= (endTime or invSnap.atTime) then
+      while pSnaps[pIdx + 1] and pSnaps[pIdx + 1].atTime <= invSnap.atTime do
+        pIdx = pIdx + 1
+      end
+      local prices = (pIdx > 0 and pSnaps[pIdx].prices) or {}
+
+      local gold = 0
+      for _, copper in pairs(invSnap.gold or {}) do gold = gold + copper end
+
+      local items = 0
+      for itemID, perChar in pairs(invSnap.items or {}) do
+        local unit = prices[itemID] or 0
+        if unit > 0 then
+          for _, entry in pairs(perChar) do
+            local saleable, total = readCharItemEntry(entry)
+            local count = includeBound and total or saleable
+            if count > 0 then items = items + unit * count end
+          end
+        end
+      end
+
+      out[#out + 1] = {
+        atTime = invSnap.atTime,
+        total = gold + items,
+        gold = gold,
+        items = items,
+        view = includeBound and "owned" or "net",
+        strategy = strategy,
+      }
+    end
+  end
+  return out
+end
+
 -- Returns ({ first, latest, delta, byCharDelta = { [charKey] = N } }, n).
 -- delta is the change in total count over the window. byCharDelta breaks
 -- the change down per character; an entry of 0 means unchanged within window.
