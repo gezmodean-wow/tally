@@ -417,9 +417,6 @@ function History:GetItemInventoryRaw(itemID)
   return out
 end
 
--- Returns ({ first, latest, delta, byCharDelta = { [charKey] = N } }, n).
--- delta is the change in total count over the window. byCharDelta breaks
--- the change down per character; an entry of 0 means unchanged within window.
 -- ============================================================================
 -- Historical net-worth replay
 -- ============================================================================
@@ -521,6 +518,9 @@ function History:GetNetWorthAt(atTime, opts)
   return snapshot, info
 end
 
+-- Returns ({ first, latest, delta, byCharDelta = { [charKey] = N } }, n).
+-- delta is the change in total count over the window. byCharDelta breaks
+-- the change down per character; an entry of 0 means unchanged within window.
 function History:GetItemInventoryTrend(itemID, windowSec)
   local series = self:GetItemInventoryHistory(itemID)
   if #series == 0 then return nil, 0 end
