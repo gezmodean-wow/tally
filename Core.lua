@@ -57,6 +57,9 @@ function ns:PLAYER_LOGIN()
     if ns.UI.CreateResearchPage then
       ns.UI.MainFrame:RegisterPage("Research", ns.UI.CreateResearchPage)
     end
+    if ns.UI.CreateSettingsPage then
+      ns.UI.MainFrame:RegisterPage("Settings", ns.UI.CreateSettingsPage)
+    end
   end
   -- Invalidate research cache on inventory updates so consumers always see
   -- fresh ownership/valuation. Cogworks event bus is the broadcast channel.

@@ -4,6 +4,11 @@ All notable changes to Tally will be documented in this file.
 
 ## [Unreleased]
 
+- Settings panel UI:
+  - New `UI/SettingsPage.lua` registered as the third tab in the main frame. Three sections: history cadence (interval / retention / daily-rollup numeric inputs), pricing strategy (TSM expression text input), and snapshots + maintenance (per-strategy snapshot stats, "Take snapshot now" button, "Clear all history" button gated by a confirmation popup).
+  - Numeric and strategy inputs apply on Enter or focus-loss. Invalid values flash the input border red and revert to the previous value; if the underlying setter returns an error message, that's printed to chat too.
+  - Snapshot status auto-refreshes whenever the page is shown, so opening the tab after a snapshot fires reflects the new state.
+  - Mirrors the same surface as `/tally history` but with affordances suited to mouse-driven config.
 - Research panel UI:
   - New `UI/ResearchPage.lua` registered as the second tab in the main frame. Item-link / item-ID / name lookup input at the top, drillable item header (icon + name + ID + strategy), stats row (unit value, owned, saleable, net-worth share, owned-worth share), price-history and inventory-history sparklines side-by-side with 7d / 30d Δ labels (color-coded by sign), per-character ownership table with per-location detail, and a sales summary footer (when FlipQueue is installed).
   - `MainFrame` now has a tab strip — clicking a tab switches between Net Worth and Research pages. Brass-highlighted active tab. Tabs auto-rebuild when pages register.
