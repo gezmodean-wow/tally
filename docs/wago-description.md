@@ -117,4 +117,4 @@ Recommended (greatly enhanced experience but optional):
 
 GitHub issues are canonical: https://github.com/gezmodean-wow/tally/issues
 
-Discord discussion happens in the **Cogworks** community.
+Discord discussion happens in the **Chronoforge** community.

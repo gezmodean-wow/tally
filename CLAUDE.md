@@ -1,10 +1,10 @@
 # Tally — Claude Code guidance
 
-Tally is a cog in the Chronoforge WoW addon suite by Gezmodean (`gezmodean-wow` on GitHub), supported by the **Chronoforge** Discord community.
+Tally is a cog in the Cogworks WoW addon suite by Gezmodean (`gezmodean-wow` on GitHub), supported by the **Chronoforge** Discord community.
 
 ## What this cog does
 
-Tally is the personal-finance layer of the Chronoforge suite — Personal Capital / Mint, but for WoW. It maintains an account-wide ledger of every sale and purchase, categorizes transactions, builds pricing history over time, calculates net worth across your full Syndicator-aware ownership graph (gold, items, WoW tokens, all linked accounts), and exposes per-item research that augments TSM, FlipQueue, and other auction-house data sources. Stance is **augment, not replace**: each sibling cog stays fully functional without Tally; installing Tally unlocks richer research, cross-account rollups, and pricing-history analytics for cogs that want them. FlipQueue's item-research and ledger sections will eventually migrate into Tally.
+Tally is the personal-finance layer of the Cogworks suite — Personal Capital / Mint, but for WoW. It maintains an account-wide ledger of every sale and purchase, categorizes transactions, builds pricing history over time, calculates net worth across your full Syndicator-aware ownership graph (gold, items, WoW tokens, all linked accounts), and exposes per-item research that augments TSM, FlipQueue, and other auction-house data sources. Stance is **augment, not replace**: each sibling cog stays fully functional without Tally; installing Tally unlocks richer research, cross-account rollups, and pricing-history analytics for cogs that want them. FlipQueue's item-research and ledger sections will eventually migrate into Tally.
 
 ## Stack and conventions
 
