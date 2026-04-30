@@ -113,3 +113,36 @@ end
 function Pricing:HasTSM()
   return tsmAvailable()
 end
+
+-- Resolve the TSM group path for an item. Returns "Group/Subgroup" or nil
+-- when TSM isn't installed or the item isn't grouped. Handles both the
+-- self-passed and bare bindings of GetGroupPathByItem (TSM has shipped
+-- both shapes). Falls back to the base item-ID string when bonus-ID
+-- variants aren't grouped — TSM groups commonly key on bare i:<id>.
+function Pricing:GetTSMGroupPath(itemID)
+  if not tsmAvailable() then return nil end
+  if type(TSM_API.GetGroupPathByItem) ~= "function" then return nil end
+  if not itemID or itemID <= 0 then return nil end
+
+  local primary = "i:" .. itemID
+  if type(TSM_API.ToItemString) == "function" then
+    local ok, str = pcall(TSM_API.ToItemString, primary)
+    if ok and str then primary = str end
+  end
+
+  local function lookup(itemString)
+    local ok, path = pcall(TSM_API.GetGroupPathByItem, TSM_API, itemString)
+    if not ok then
+      ok, path = pcall(TSM_API.GetGroupPathByItem, itemString)
+    end
+    if ok and path and path ~= "" then return path end
+    return nil
+  end
+
+  local path = lookup(primary)
+  if path then return path end
+  if primary ~= ("i:" .. itemID) then
+    return lookup("i:" .. itemID)
+  end
+  return nil
+end

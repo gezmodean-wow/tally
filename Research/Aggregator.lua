@@ -217,16 +217,22 @@ local function augmentTxnsFromLedger(record, itemID)
   end
   record.failureSummary = { expiredCount = expired, cancelledCount = cancelled, totalFeesLost = feesLost }
 
-  -- Purchases summary.
-  local totalCost, purchaseCount, totalQty = 0, 0, 0
+  -- Purchases summary (totals + per-realm breakdown).
+  local totalCost, purchaseCount = 0, 0
+  local purchasesByRealm = {}
   for _, p in ipairs(record.purchases) do
     totalCost = totalCost + (p.price or 0)
     purchaseCount = purchaseCount + 1
+    local realm = p.realm or "Unknown"
+    purchasesByRealm[realm] = purchasesByRealm[realm] or { count = 0, total = 0 }
+    purchasesByRealm[realm].count = purchasesByRealm[realm].count + 1
+    purchasesByRealm[realm].total = purchasesByRealm[realm].total + (p.price or 0)
   end
   record.purchasesSummary = {
     count = purchaseCount,
     totalCost = totalCost,
     avgPrice = purchaseCount > 0 and math.floor(totalCost / purchaseCount) or 0,
+    byRealm = purchasesByRealm,
   }
 
   -- AH fees from native + FQ ah-fee entries (separate kind in the ledger).
@@ -238,10 +244,8 @@ local function augmentTxnsFromLedger(record, itemID)
   end
 
   -- P&L. Profit = sales revenue - purchase cost - AH fees (active + lost).
-  -- Note: feesLost from failure summary captures FQ-tracked fees on
-  -- expired/cancelled auctions; feesPaid captures successful-sale AH cuts.
-  -- They can co-occur (same auction posted twice with one expire + one sale)
-  -- which is fine — both flows count against profit.
+  -- feesLost captures fees on expired/cancelled auctions; feesPaid captures
+  -- successful-sale AH cuts. Both count against net profit.
   local totalRevenue = record.salesSummary.totalRevenue
   local salesQty = 0
   for _, s in ipairs(record.sales) do salesQty = salesQty + (s.quantity or 1) end
@@ -256,6 +260,118 @@ local function augmentTxnsFromLedger(record, itemID)
     salesQty = salesQty,
     purchaseCount = purchaseCount,
   }
+
+  -- Per-realm P&L breakdown — combine sales/purchases/fees per realm.
+  -- AH fee entries from the ledger don't carry a target realm, so they're
+  -- attributed to the character's home realm via meta.targetRealm when
+  -- present; otherwise they roll up into the unattributed bucket.
+  local feesByRealm = {}
+  if ns.Ledger and itemID then
+    for _, fe in ipairs(ns.Ledger:Query({ kind = "ah-fee", itemID = itemID })) do
+      local realm = (fe.meta and fe.meta.targetRealm) or "Unknown"
+      feesByRealm[realm] = (feesByRealm[realm] or 0) + (fe.copper or 0)
+    end
+  end
+  for _, f in ipairs(record.failures) do
+    local realm = f.targetRealm or "Unknown"
+    feesByRealm[realm] = (feesByRealm[realm] or 0) + (f.totalFeesSpent or f.fee or 0)
+  end
+
+  local byRealm = {}
+  local function ensureRealm(r)
+    byRealm[r] = byRealm[r] or {
+      revenue = 0, cost = 0, fees = 0, netProfit = 0,
+      salesCount = 0, purchaseCount = 0, salesQty = 0,
+    }
+    return byRealm[r]
+  end
+  for realm, data in pairs(record.salesSummary.byRealm) do
+    local r = ensureRealm(realm)
+    r.revenue = data.total
+    r.salesCount = data.count
+  end
+  for _, s in ipairs(record.sales) do
+    ensureRealm(s.targetRealm or "Unknown").salesQty = (byRealm[s.targetRealm or "Unknown"].salesQty)
+      + (s.quantity or 1)
+  end
+  for realm, data in pairs(purchasesByRealm) do
+    local r = ensureRealm(realm)
+    r.cost = data.total
+    r.purchaseCount = data.count
+  end
+  for realm, fee in pairs(feesByRealm) do
+    ensureRealm(realm).fees = fee
+  end
+  for _, r in pairs(byRealm) do
+    r.netProfit = r.revenue - r.cost - r.fees
+  end
+  record.profitByRealm = byRealm
+end
+
+-- Auctionator shopping list memberships. Auctionator stores user-defined
+-- shopping lists in the AUCTIONATOR_SHOPPING_LISTS SavedVariable; each
+-- list's `items` is a flat array of search-term strings, so the only
+-- viable match is item name (case-insensitive). Returns a list of list
+-- names that contain this item by name.
+local function augmentAuctionatorLists(record, itemName)
+  if type(_G.AUCTIONATOR_SHOPPING_LISTS) ~= "table" then return end
+  if not itemName or itemName == "" then return end
+  local target = itemName:lower()
+  local found = {}
+  for _, list in ipairs(_G.AUCTIONATOR_SHOPPING_LISTS) do
+    if type(list) == "table" and list.name and not list.isTemporary
+       and type(list.items) == "table" then
+      for _, term in ipairs(list.items) do
+        if type(term) == "string" and term:lower() == target then
+          found[#found + 1] = list.name
+          break
+        end
+      end
+    end
+  end
+  if #found > 0 then record.auctionatorLists = found end
+end
+
+-- FlipQueue todo memberships. Walks the active list + any upcoming lists
+-- for tasks that reference this item. Used to surface "active to-dos to
+-- purchase / post / collect" context in the research view.
+local function augmentFlipQueueTodos(record, itemID, itemName)
+  local fqdb = _G.FlipQueueDB
+  if type(fqdb) ~= "table" or type(fqdb.todoLists) ~= "table" then return end
+
+  local function matchTask(task)
+    if not task or task.status == "completed" then return false end
+    local taskID = tonumber(task.itemID) or tonumber((task.itemKey or ""):match("^(%d+)"))
+    if itemID and taskID and itemID == taskID then return true end
+    if itemName and task.name and task.name:lower() == itemName:lower() then return true end
+    return false
+  end
+
+  local out = {}
+  local function walkList(list, listLabel)
+    if type(list) ~= "table" or type(list.tasks) ~= "table" then return end
+    for _, task in ipairs(list.tasks) do
+      if matchTask(task) then
+        out[#out + 1] = {
+          listLabel = listLabel,
+          action = task.action,
+          status = task.status,
+          assignedChar = task.assignedChar,
+          quantity = task.quantity,
+          targetRealm = task.targetRealm,
+        }
+      end
+    end
+  end
+
+  walkList(fqdb.todoLists.active, "active")
+  if type(fqdb.todoLists.upcoming) == "table" then
+    for i, list in ipairs(fqdb.todoLists.upcoming) do
+      walkList(list, "upcoming#" .. i)
+    end
+  end
+
+  if #out > 0 then record.fqTodos = out end
 end
 
 -- FlipQueue-specific augmentation: icon enrichment + active (in-flight)
@@ -345,6 +461,8 @@ function Research:GetRecord(input, itemName, skipCache)
     record.tsm = record.pricing.sources
     record.valuation.netWorthContribution = (record.pricing.unitValue or 0) * record.saleableInventory
     record.valuation.ownedWorthContribution = (record.pricing.unitValue or 0) * record.totalInventory
+    -- TSM group path (for "currently in <X> group" context).
+    record.tsmGroup = ns.Pricing:GetTSMGroupPath(itemID)
   else
     record.pricing = { strategy = ns.NetWorth:GetStrategy(), unitValue = 0, sources = {} }
     record.tsm = {}
@@ -353,6 +471,8 @@ function Research:GetRecord(input, itemName, skipCache)
   if itemID then
     augmentTxnsFromLedger(record, itemID)
     augmentMetaFromFlipQueue(record, itemID, record.name ~= "" and record.name or nil)
+    augmentAuctionatorLists(record, record.name ~= "" and record.name or nil)
+    augmentFlipQueueTodos(record, itemID, record.name ~= "" and record.name or nil)
   end
 
   -- Tally pricing history: time-series snapshots under the active strategy.
@@ -402,6 +522,25 @@ function Research:Print(input)
     or (record.itemID and ("item:" .. record.itemID))
     or record.itemKey
   print(prefix .. " " .. linkOrName)
+  if record.tsmGroup and record.tsmGroup ~= "" then
+    print("  TSM group: " .. record.tsmGroup)
+  end
+  if record.auctionatorLists and #record.auctionatorLists > 0 then
+    print("  Auctionator lists: " .. table.concat(record.auctionatorLists, ", "))
+  end
+  if record.fqTodos and #record.fqTodos > 0 then
+    local byAction = {}
+    for _, t in ipairs(record.fqTodos) do
+      local key = t.action or "task"
+      byAction[key] = (byAction[key] or 0) + 1
+    end
+    local parts = {}
+    for action, count in pairs(byAction) do
+      parts[#parts + 1] = string.format("%d %s", count, action)
+    end
+    table.sort(parts)
+    print("  FQ todos: " .. table.concat(parts, ", "))
+  end
   if record.isPet then
     print(string.format("  Owned: %d (pets aren't priced — net-worth contribution skipped)",
       record.totalInventory))
@@ -477,6 +616,25 @@ function Research:Print(input)
       line = line .. string.format("; per-unit %s%s%s|r", color, pSign, fmt(math.abs(p.perUnitProfit)))
     end
     print(line)
+    -- Per-realm P&L (top 3 by absolute net profit, when there's any breakdown).
+    if record.profitByRealm then
+      local rows = {}
+      for realm, data in pairs(record.profitByRealm) do
+        rows[#rows + 1] = { realm = realm, data = data }
+      end
+      table.sort(rows, function(a, b) return math.abs(a.data.netProfit) > math.abs(b.data.netProfit) end)
+      if #rows > 1 then
+        local parts = {}
+        for i = 1, math.min(3, #rows) do
+          local r = rows[i]
+          local rSign = r.data.netProfit >= 0 and "+" or "-"
+          local rColor = r.data.netProfit >= 0 and "|cff7fff7f" or "|cffff8080"
+          parts[#parts + 1] = string.format("%s %s%s%s|r",
+            r.realm, rColor, rSign, fmt(math.abs(r.data.netProfit)))
+        end
+        print("    by realm: " .. table.concat(parts, ", "))
+      end
+    end
   end
   if record.failureSummary.expiredCount + record.failureSummary.cancelledCount > 0 then
     print(string.format("  Failures: %d expired / %d cancelled, %s fees",

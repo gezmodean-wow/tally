@@ -123,7 +123,7 @@ function ns.UI.CreateResearchPage(parent)
   local header = CreateFrame("Frame", nil, page)
   header:SetPoint("TOPLEFT", row, "BOTTOMLEFT", 0, -10)
   header:SetPoint("TOPRIGHT", row, "BOTTOMRIGHT", 0, -10)
-  header:SetHeight(48)
+  header:SetHeight(60)
 
   local icon = header:CreateTexture(nil, "ARTWORK")
   icon:SetPoint("LEFT", header, "LEFT", 0, 0)
@@ -137,6 +137,15 @@ function ns.UI.CreateResearchPage(parent)
   local sub = header:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
   sub:SetPoint("TOPLEFT", name, "BOTTOMLEFT", 0, -2)
   sub:SetText("Type an item link, ID, or name above.")
+
+  -- Context line: Auctionator shopping-list memberships + active FQ todos.
+  -- Hidden when neither has anything to surface.
+  local context = header:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+  context:SetPoint("TOPLEFT", sub, "BOTTOMLEFT", 0, -2)
+  context:SetPoint("RIGHT", header, "RIGHT", -4, 0)
+  context:SetJustifyH("LEFT")
+  context:SetTextColor(themeColor("textDim", { 0.6, 0.6, 0.6, 1 }))
+  context:Hide()
 
   -- Stats row -----------------------------------------------------------------
 
@@ -215,18 +224,80 @@ function ns.UI.CreateResearchPage(parent)
   invPanel.title:SetText("INVENTORY HISTORY")
   invPanel.spark:SetYFormatter(function(n) return tostring(math.floor(n)) end)
 
-  -- Ownership table -----------------------------------------------------------
+  -- Two scroll panels side by side: ownership on the left, per-realm
+  -- P&L breakdown on the right. Each gets ~half the page width, with the
+  -- right column slightly wider to accommodate the realm breakdown columns.
 
   local ownerHdr = page:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
   ownerHdr:SetPoint("TOPLEFT", sparkRow, "BOTTOMLEFT", 0, -10)
   ownerHdr:SetText("WHERE IT LIVES")
+  ownerHdr:SetTextColor(themeColor("brass", { 0.83, 0.63, 0.09, 1 }))
 
   local ownerScroll = CreateFrame("ScrollFrame", nil, page, "UIPanelScrollFrameTemplate")
   ownerScroll:SetPoint("TOPLEFT", ownerHdr, "BOTTOMLEFT", 0, -4)
-  ownerScroll:SetPoint("BOTTOMRIGHT", page, "BOTTOMRIGHT", -22, 56)
+  ownerScroll:SetWidth(300)
+  ownerScroll:SetPoint("BOTTOM", page, "BOTTOM", 0, 56)
   local ownerContent = CreateFrame("Frame", nil, ownerScroll)
-  ownerContent:SetSize(640, 1)
+  ownerContent:SetSize(280, 1)
   ownerScroll:SetScrollChild(ownerContent)
+
+  local realmHdr = page:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+  realmHdr:SetPoint("TOPLEFT", ownerScroll, "TOPRIGHT", 24, 14)
+  realmHdr:SetText("PER REALM (P&L)")
+  realmHdr:SetTextColor(themeColor("brass", { 0.83, 0.63, 0.09, 1 }))
+
+  local realmScroll = CreateFrame("ScrollFrame", nil, page, "UIPanelScrollFrameTemplate")
+  realmScroll:SetPoint("TOPLEFT", realmHdr, "BOTTOMLEFT", 0, -4)
+  realmScroll:SetPoint("BOTTOMRIGHT", page, "BOTTOMRIGHT", -22, 56)
+  local realmContent = CreateFrame("Frame", nil, realmScroll)
+  realmContent:SetSize(320, 1)
+  realmScroll:SetScrollChild(realmContent)
+
+  -- Column headers for the realm table (rendered as a fixed first row).
+  local realmHeaderRow = CreateFrame("Frame", nil, realmContent)
+  realmHeaderRow:SetPoint("TOPLEFT", realmContent, "TOPLEFT", 0, 0)
+  realmHeaderRow:SetPoint("RIGHT", realmContent, "RIGHT", 0, 0)
+  realmHeaderRow:SetHeight(14)
+  local function makeRealmHdrCol(parent, x, w, text)
+    local fs = parent:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+    fs:SetPoint("LEFT", parent, "LEFT", x, 0)
+    fs:SetWidth(w); fs:SetJustifyH(x == 0 and "LEFT" or "RIGHT")
+    fs:SetText(text)
+    fs:SetTextColor(themeColor("textDim", { 0.6, 0.6, 0.6, 1 }))
+  end
+  --   Realm 0..120 | Sold 120..150 | Bought 150..180 | Net 180..end
+  makeRealmHdrCol(realmHeaderRow, 0,   120, "REALM")
+  makeRealmHdrCol(realmHeaderRow, 120, 50,  "SOLD")
+  makeRealmHdrCol(realmHeaderRow, 170, 60,  "BOUGHT")
+  local netHdr = realmHeaderRow:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+  netHdr:SetPoint("RIGHT", realmHeaderRow, "RIGHT", -2, 0)
+  netHdr:SetText("NET")
+  netHdr:SetTextColor(themeColor("textDim", { 0.6, 0.6, 0.6, 1 }))
+
+  local realmRows = {}
+  local function getRealmRow(i)
+    local r = realmRows[i]
+    if not r then
+      r = CreateFrame("Frame", nil, realmContent)
+      r:SetHeight(16)
+      r:SetPoint("LEFT", realmContent, "LEFT", 0, 0)
+      r:SetPoint("RIGHT", realmContent, "RIGHT", 0, 0)
+      r.realm = r:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+      r.realm:SetPoint("LEFT", r, "LEFT", 0, 0)
+      r.realm:SetWidth(120); r.realm:SetJustifyH("LEFT")
+      r.sold = r:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+      r.sold:SetPoint("LEFT", r, "LEFT", 120, 0)
+      r.sold:SetWidth(50); r.sold:SetJustifyH("RIGHT")
+      r.bought = r:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+      r.bought:SetPoint("LEFT", r, "LEFT", 170, 0)
+      r.bought:SetWidth(60); r.bought:SetJustifyH("RIGHT")
+      r.net = r:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+      r.net:SetPoint("RIGHT", r, "RIGHT", -2, 0)
+      r.net:SetJustifyH("RIGHT")
+      realmRows[i] = r
+    end
+    return r
+  end
 
   local ownerRows = {}
   local function getOwnerRow(i)
@@ -295,6 +366,7 @@ function ns.UI.CreateResearchPage(parent)
       icon:SetTexture("Interface\\Icons\\INV_Misc_QuestionMark")
       name:SetText("(no item selected)")
       sub:SetText("Type an item link, ID, or name above.")
+      context:Hide()
       valPrice:SetText("—")
       valOwn:SetText("—")
       valSale:SetText("—")
@@ -307,6 +379,7 @@ function ns.UI.CreateResearchPage(parent)
       invPanel.d7:SetText("7d —")
       invPanel.d30:SetText("30d —")
       clearOwnerRows(0)
+      for i = 1, #realmRows do realmRows[i]:Hide() end
       salesLbl:SetText("")
       salesVal:SetText("")
       pnlLbl:SetText("")
@@ -324,7 +397,41 @@ function ns.UI.CreateResearchPage(parent)
     if record.pricing and record.pricing.strategy then
       subParts[#subParts + 1] = "strategy: " .. record.pricing.strategy
     end
+    if record.tsmGroup and record.tsmGroup ~= "" then
+      subParts[#subParts + 1] = "TSM group: " .. record.tsmGroup
+    end
     sub:SetText(table.concat(subParts, "  •  "))
+
+    -- Context line: Auctionator shopping list memberships + FQ todos.
+    local ctxParts = {}
+    if record.auctionatorLists and #record.auctionatorLists > 0 then
+      ctxParts[#ctxParts + 1] = "Auctionator: " .. table.concat(record.auctionatorLists, ", ")
+    end
+    if record.fqTodos and #record.fqTodos > 0 then
+      local byAction = {}
+      for _, t in ipairs(record.fqTodos) do
+        local key = t.action or "task"
+        byAction[key] = (byAction[key] or 0) + 1
+      end
+      local todoParts = {}
+      for action, count in pairs(byAction) do
+        todoParts[#todoParts + 1] = string.format("%d %s", count, action)
+      end
+      table.sort(todoParts)
+      ctxParts[#ctxParts + 1] = "FQ todos: " .. table.concat(todoParts, ", ")
+    end
+    if record.activeAuctions and #record.activeAuctions > 0 then
+      local total = 0
+      for _, a in ipairs(record.activeAuctions) do total = total + (a.quantity or 1) end
+      ctxParts[#ctxParts + 1] = string.format("Active auctions: %d (×%d total)",
+        #record.activeAuctions, total)
+    end
+    if #ctxParts > 0 then
+      context:SetText(table.concat(ctxParts, "  •  "))
+      context:Show()
+    else
+      context:Hide()
+    end
 
     -- Stats
     if record.pricing and record.pricing.unitValue and record.pricing.unitValue > 0 then
@@ -403,6 +510,36 @@ function ns.UI.CreateResearchPage(parent)
     end
     clearOwnerRows(#rows)
     ownerContent:SetHeight(math.max(1, #rows * 18))
+
+    -- Per-realm P&L table.
+    local realmList = {}
+    if record.profitByRealm then
+      for realm, data in pairs(record.profitByRealm) do
+        realmList[#realmList + 1] = { realm = realm, data = data }
+      end
+    end
+    table.sort(realmList, function(a, b) return math.abs(a.data.netProfit) > math.abs(b.data.netProfit) end)
+
+    local sR, sG, sB = themeColor("success", { 0.30, 0.85, 0.30, 1 })
+    local eR, eG, eB = themeColor("error",   { 1.00, 0.40, 0.40, 1 })
+    local nR, nG, nB = themeColor("textDim", { 0.6,  0.6,  0.6,  1 })
+
+    for i, item in ipairs(realmList) do
+      local row = getRealmRow(i)
+      row:SetPoint("TOPLEFT", realmContent, "TOPLEFT", 0, -14 - (i - 1) * 16)
+      row.realm:SetText(item.realm)
+      row.sold:SetText(item.data.salesCount > 0 and tostring(item.data.salesCount) or "")
+      row.bought:SetText(item.data.purchaseCount > 0 and tostring(item.data.purchaseCount) or "")
+      local n = item.data.netProfit
+      local sign = n >= 0 and "+" or "-"
+      row.net:SetText(sign .. formatGoldShort(math.abs(n)))
+      if n > 0 then row.net:SetTextColor(sR, sG, sB)
+      elseif n < 0 then row.net:SetTextColor(eR, eG, eB)
+      else row.net:SetTextColor(nR, nG, nB) end
+      row:Show()
+    end
+    for i = #realmList + 1, #realmRows do realmRows[i]:Hide() end
+    realmContent:SetHeight(math.max(1, 14 + #realmList * 16))
 
     -- Sales
     if record.salesSummary and record.salesSummary.count and record.salesSummary.count > 0 then

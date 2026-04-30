@@ -4,6 +4,13 @@ All notable changes to Tally will be documented in this file.
 
 ## [Unreleased]
 
+- Richer Research context — TSM group, Auctionator lists, FQ todos, per-realm P&L:
+  - **TSM group lookup** — new `Pricing:GetTSMGroupPath(itemID)` resolves an item's TSM group path via `TSM_API.GetGroupPathByItem`, with bare item-ID fallback for bonus-ID variants. Surfaces in the research record as `record.tsmGroup` (e.g. `Flipping/Herbs`).
+  - **Auctionator shopping list memberships** — when Auctionator is installed, walks `AUCTIONATOR_SHOPPING_LISTS` and finds lists containing the item by name. Stored on `record.auctionatorLists`.
+  - **FlipQueue todo memberships** — walks `FlipQueueDB.todoLists.active` + `upcoming[*]` for non-completed tasks referencing the item. Stored on `record.fqTodos` with `action / status / assignedChar / quantity / targetRealm` per task.
+  - **Per-realm P&L breakdown** — new `record.profitByRealm` map keyed by target realm, each row carrying revenue / cost / fees / netProfit / sales count / purchase count. AH fees from the ledger and from `failureSummary.totalFeesLost` both attribute to realms via the entry's `meta.targetRealm`.
+  - **Research panel** gains a context line under the item header showing Auctionator list memberships, FQ todos, and active-auction count when present (hidden if all three are empty). Right column of the body now shows `PER REALM (P&L)` table — REALM / SOLD / BOUGHT / NET — replacing what was a single full-width ownership area; `WHERE IT LIVES` lives on the left half. Item-header sub-line now also shows the TSM group when set.
+  - Chat printout (`/tally research-chat`) gains TSM group, Auctionator lists, FQ todos, and a top-3 per-realm P&L breakdown line.
 - Profit-and-loss in the Research panel:
   - `Research:GetRecord` now computes `record.purchasesSummary` (count, total cost, avg price) alongside `record.salesSummary`, plus a top-level `record.profitSummary` covering revenue, cost, fees (AH cuts + lost fees on expired/cancelled), net profit, and per-unit profit.
   - Research panel UI surfaces a P&L column in the bottom footer: shows net profit, per-unit profit, and total fees, color-coded by sign. Activity column on the left now shows both sales and purchases counts/totals when both exist.
