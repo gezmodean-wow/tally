@@ -8,8 +8,8 @@
 ## Dependencies: Syndicator
 ## X-Category: Miscellaneous
 ## X-Website: https://github.com/gezmodean-wow/tally
-## X-Curse-Project-ID:
-## X-Wago-ID:
+## X-Curse-Project-ID: 1528434
+## X-Wago-ID: qGZOxeNd
 
 Libs\LibStub\LibStub.lua
 Libs\CallbackHandler-1.0\CallbackHandler-1.0.lua
