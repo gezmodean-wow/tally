@@ -216,6 +216,46 @@ local function augmentTxnsFromLedger(record, itemID)
     feesLost = feesLost + (f.totalFeesSpent or f.fee or 0)
   end
   record.failureSummary = { expiredCount = expired, cancelledCount = cancelled, totalFeesLost = feesLost }
+
+  -- Purchases summary.
+  local totalCost, purchaseCount, totalQty = 0, 0, 0
+  for _, p in ipairs(record.purchases) do
+    totalCost = totalCost + (p.price or 0)
+    purchaseCount = purchaseCount + 1
+  end
+  record.purchasesSummary = {
+    count = purchaseCount,
+    totalCost = totalCost,
+    avgPrice = purchaseCount > 0 and math.floor(totalCost / purchaseCount) or 0,
+  }
+
+  -- AH fees from native + FQ ah-fee entries (separate kind in the ledger).
+  local feesPaid = 0
+  if ns.Ledger and itemID then
+    for _, fe in ipairs(ns.Ledger:Query({ kind = "ah-fee", itemID = itemID })) do
+      feesPaid = feesPaid + (fe.copper or 0)
+    end
+  end
+
+  -- P&L. Profit = sales revenue - purchase cost - AH fees (active + lost).
+  -- Note: feesLost from failure summary captures FQ-tracked fees on
+  -- expired/cancelled auctions; feesPaid captures successful-sale AH cuts.
+  -- They can co-occur (same auction posted twice with one expire + one sale)
+  -- which is fine — both flows count against profit.
+  local totalRevenue = record.salesSummary.totalRevenue
+  local salesQty = 0
+  for _, s in ipairs(record.sales) do salesQty = salesQty + (s.quantity or 1) end
+  local netProfit = totalRevenue - totalCost - feesPaid - feesLost
+  record.profitSummary = {
+    totalRevenue = totalRevenue,
+    totalCost = totalCost,
+    totalFees = feesPaid + feesLost,
+    netProfit = netProfit,
+    perUnitProfit = salesQty > 0 and math.floor(netProfit / salesQty) or 0,
+    salesCount = record.salesSummary.count,
+    salesQty = salesQty,
+    purchaseCount = purchaseCount,
+  }
 end
 
 -- FlipQueue-specific augmentation: icon enrichment + active (in-flight)
@@ -417,8 +457,26 @@ function Research:Print(input)
     if #parts > 0 then print("  Prices: " .. table.concat(parts, " | ")) end
   end
   if record.salesSummary.count > 0 then
-    print(string.format("  Sales (FlipQueue log): %d sold, %s revenue, avg %s",
+    print(string.format("  Sales (ledger): %d sold, %s revenue, avg %s",
       record.salesSummary.count, fmt(record.salesSummary.totalRevenue), fmt(record.salesSummary.avgPrice)))
+  end
+  if record.purchasesSummary and record.purchasesSummary.count > 0 then
+    print(string.format("  Purchases (ledger): %d bought, %s spent, avg %s",
+      record.purchasesSummary.count, fmt(record.purchasesSummary.totalCost), fmt(record.purchasesSummary.avgPrice)))
+  end
+  if record.profitSummary and (record.profitSummary.salesCount > 0
+     or record.profitSummary.purchaseCount > 0) then
+    local p = record.profitSummary
+    local sign = p.netProfit >= 0 and "+" or "-"
+    local color = p.netProfit >= 0 and "|cff7fff7f" or "|cffff8080"
+    local line = string.format("  P&L: %s%s%s|r net (revenue %s − cost %s − fees %s)",
+      color, sign, fmt(math.abs(p.netProfit)),
+      fmt(p.totalRevenue), fmt(p.totalCost), fmt(p.totalFees))
+    if p.salesQty > 0 then
+      local pSign = p.perUnitProfit >= 0 and "+" or "-"
+      line = line .. string.format("; per-unit %s%s%s|r", color, pSign, fmt(math.abs(p.perUnitProfit)))
+    end
+    print(line)
   end
   if record.failureSummary.expiredCount + record.failureSummary.cancelledCount > 0 then
     print(string.format("  Failures: %d expired / %d cancelled, %s fees",

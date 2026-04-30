@@ -4,6 +4,12 @@ All notable changes to Tally will be documented in this file.
 
 ## [Unreleased]
 
+- Profit-and-loss in the Research panel:
+  - `Research:GetRecord` now computes `record.purchasesSummary` (count, total cost, avg price) alongside `record.salesSummary`, plus a top-level `record.profitSummary` covering revenue, cost, fees (AH cuts + lost fees on expired/cancelled), net profit, and per-unit profit.
+  - Research panel UI surfaces a P&L column in the bottom footer: shows net profit, per-unit profit, and total fees, color-coded by sign. Activity column on the left now shows both sales and purchases counts/totals when both exist.
+  - Chat printout (`/tally research-chat`) gets matching Sales / Purchases / P&L lines.
+  - Source-agnostic by construction — any registered ledger source (Native / FlipQueue / TSM / future Auctionator) contributes to both sides of the P&L equation.
+- Native source bug fix: `scanInbox` now returns `(inserted, skipped)` matching the source-import contract instead of dropping the skipped count on the floor.
 - Multi-source ledger backfill (Pass 2 + Pass 3):
   - **`Sources/Native.lua`** — Tally's own observer of WoW transaction events. Subscribes to `MAIL_SHOW` / `MAIL_CLOSED` / `MAIL_INBOX_UPDATE`, scans the open inbox via `GetInboxInvoiceInfo`, and emits ledger entries for `seller` invoices (sale + ah-fee for the AH cut) and `buyer` invoices (purchase). Stable hash dedupe via `(charKey, invoiceType, itemName, otherPlayer, bid, buyout)`. **Tally now captures real AH activity with zero sibling-addon dependencies.**
   - **`Sources/TSM.lua`** — backfill from TSM's Accounting CSVs. Reads `TradeSkillMasterDB[r@<realm>@internalData@<csvName>]` for `csvSales`, `csvBuys`, `csvExpired`, `csvCancelled`. Maps each row to the appropriate ledger kind (`sale`/`vendor-sell` based on the `source` column for sales; `purchase`/`vendor-buy` for buys; `ah-expire` / `ah-cancel` for the others). Per-realm parsing; charKey reconstructed from `(player, realm)` pair. Stable hash from `(realm, kind, player, itemString, stackSize, quantity, price, time)` so re-imports dedupe deterministically.

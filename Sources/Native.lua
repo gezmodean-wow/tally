@@ -135,11 +135,12 @@ end
 
 -- Scan the open mailbox for invoices and emit ledger entries for any that
 -- aren't already recorded. Safe to call repeatedly — dedupe handles re-runs.
+-- Returns (insertedCount, skippedCount) for parity with the source-import API.
 local function scanInbox()
-  if not isMailOpen then return 0 end
-  if not GetInboxNumItems then return 0 end
+  if not isMailOpen then return 0, 0 end
+  if not GetInboxNumItems then return 0, 0 end
   local n = GetInboxNumItems() or 0
-  if n <= 0 then return 0 end
+  if n <= 0 then return 0, 0 end
 
   local charKey = currentCharKey()
   local entries = {}
@@ -158,9 +159,8 @@ local function scanInbox()
     end
   end
 
-  if #entries == 0 then return 0 end
-  local inserted = ns.Ledger:InsertMany(entries)
-  return inserted
+  if #entries == 0 then return 0, 0 end
+  return ns.Ledger:InsertMany(entries)
 end
 
 -- ============================================================================
@@ -196,7 +196,7 @@ function Native:Register()
   if not ns.Ledger or not ns.Ledger.RegisterSource then return end
   ns.Ledger:RegisterSource(SOURCE_NAME, {
     label = "Tally (native events)",
-    importFn = function() return scanInbox(), 0 end,
+    importFn = scanInbox,
     isAvailable = function() return true end,
   })
 end

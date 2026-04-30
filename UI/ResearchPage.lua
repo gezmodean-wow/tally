@@ -253,19 +253,31 @@ function ns.UI.CreateResearchPage(parent)
     return row
   end
 
-  -- Sales footer --------------------------------------------------------------
+  -- Sales + P&L footer --------------------------------------------------------
 
   local sales = CreateFrame("Frame", nil, page)
   sales:SetPoint("BOTTOMLEFT", page, "BOTTOMLEFT", 0, 0)
   sales:SetPoint("BOTTOMRIGHT", page, "BOTTOMRIGHT", 0, 0)
   sales:SetHeight(48)
 
+  -- Left column: sales activity summary.
   local salesLbl = sales:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
   salesLbl:SetPoint("TOPLEFT", sales, "TOPLEFT", 0, 0)
   salesLbl:SetTextColor(themeColor("textDim", { 0.6, 0.6, 0.6, 1 }))
 
   local salesVal = sales:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
   salesVal:SetPoint("TOPLEFT", salesLbl, "BOTTOMLEFT", 0, -2)
+  salesVal:SetWidth(320); salesVal:SetJustifyH("LEFT")
+
+  -- Right column: profit-and-loss summary.
+  local pnlLbl = sales:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+  pnlLbl:SetPoint("TOPLEFT", sales, "TOPLEFT", 340, 0)
+  pnlLbl:SetTextColor(themeColor("textDim", { 0.6, 0.6, 0.6, 1 }))
+
+  local pnlVal = sales:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+  pnlVal:SetPoint("TOPLEFT", pnlLbl, "BOTTOMLEFT", 0, -2)
+  pnlVal:SetPoint("RIGHT", sales, "RIGHT", 0, 0)
+  pnlVal:SetJustifyH("LEFT")
 
   -- Refresh logic -------------------------------------------------------------
 
@@ -297,6 +309,8 @@ function ns.UI.CreateResearchPage(parent)
       clearOwnerRows(0)
       salesLbl:SetText("")
       salesVal:SetText("")
+      pnlLbl:SetText("")
+      pnlVal:SetText("")
       return
     end
 
@@ -392,17 +406,57 @@ function ns.UI.CreateResearchPage(parent)
 
     -- Sales
     if record.salesSummary and record.salesSummary.count and record.salesSummary.count > 0 then
-      salesLbl:SetText("FLIPQUEUE SALES")
-      salesVal:SetText(string.format("%d sold • %s revenue • avg %s",
+      local parts = { string.format("%d sold • %s revenue • avg %s",
         record.salesSummary.count,
         formatGold(record.salesSummary.totalRevenue),
-        formatGold(record.salesSummary.avgPrice)))
+        formatGold(record.salesSummary.avgPrice)) }
+      if record.purchasesSummary and record.purchasesSummary.count > 0 then
+        parts[#parts + 1] = string.format("%d bought • %s spent",
+          record.purchasesSummary.count,
+          formatGold(record.purchasesSummary.totalCost))
+      end
+      salesLbl:SetText("ACTIVITY")
+      salesVal:SetText(table.concat(parts, "  •  "))
+    elseif record.purchasesSummary and record.purchasesSummary.count > 0 then
+      salesLbl:SetText("PURCHASES")
+      salesVal:SetText(string.format("%d bought • %s spent",
+        record.purchasesSummary.count,
+        formatGold(record.purchasesSummary.totalCost)))
     elseif record.activeAuctions and #record.activeAuctions > 0 then
       salesLbl:SetText("ACTIVE AUCTIONS")
       salesVal:SetText(tostring(#record.activeAuctions))
     else
       salesLbl:SetText("")
       salesVal:SetText("")
+    end
+
+    -- P&L (right column).
+    if record.profitSummary and (record.profitSummary.salesCount > 0
+       or record.profitSummary.purchaseCount > 0) then
+      pnlLbl:SetText("P&L")
+      local p = record.profitSummary
+      local sign = p.netProfit >= 0 and "+" or "-"
+      local r, g, b
+      if p.netProfit >= 0 then
+        r, g, b = themeColor("success", { 0.30, 0.85, 0.30, 1 })
+      else
+        r, g, b = themeColor("error", { 1.00, 0.40, 0.40, 1 })
+      end
+      local perUnitTxt = ""
+      if p.salesQty > 0 then
+        local pSign = p.perUnitProfit >= 0 and "+" or "-"
+        perUnitTxt = string.format("  •  per-unit %s%s", pSign, formatGold(math.abs(p.perUnitProfit)))
+      end
+      local feesTxt = ""
+      if p.totalFees > 0 then
+        feesTxt = string.format("  •  fees %s", formatGold(p.totalFees))
+      end
+      pnlVal:SetText(string.format("Net %s%s%s%s",
+        sign, formatGold(math.abs(p.netProfit)), perUnitTxt, feesTxt))
+      pnlVal:SetTextColor(r, g, b)
+    else
+      pnlLbl:SetText("")
+      pnlVal:SetText("")
     end
   end
 
