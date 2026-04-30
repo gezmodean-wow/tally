@@ -340,6 +340,86 @@ function ns.UI.CreateSettingsPage(parent)
   end)
   clearBtn:SetPoint("LEFT", snapBtn, "RIGHT", 8, 0)
 
+  -- ============================================================================
+  -- SECTION 4: Data sources — registered ledger adapters with import controls
+  -- ============================================================================
+
+  local sourcesHdr = makeSectionHeader(page, actionRow, "BOTTOMLEFT", 18, "DATA SOURCES")
+
+  local sourcesContainer = CreateFrame("Frame", nil, page)
+  sourcesContainer:SetPoint("TOPLEFT", sourcesHdr, "BOTTOMLEFT", 0, -8)
+  sourcesContainer:SetPoint("RIGHT", page, "RIGHT", 0, 0)
+  sourcesContainer:SetHeight(1) -- height grows with rows
+
+  local sourceRows = {}
+
+  local function getSourceRow(i)
+    local row = sourceRows[i]
+    if not row then
+      row = CreateFrame("Frame", nil, sourcesContainer)
+      row:SetHeight(22)
+      row:SetPoint("LEFT", sourcesContainer, "LEFT", 0, 0)
+      row:SetPoint("RIGHT", sourcesContainer, "RIGHT", 0, 0)
+
+      row.label = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+      row.label:SetPoint("LEFT", row, "LEFT", 0, 0)
+      row.label:SetWidth(160)
+      row.label:SetJustifyH("LEFT")
+
+      row.status = row:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+      row.status:SetPoint("LEFT", row.label, "RIGHT", 8, 0)
+      row.status:SetWidth(120)
+      row.status:SetJustifyH("LEFT")
+
+      row.count = row:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+      row.count:SetPoint("LEFT", row.status, "RIGHT", 8, 0)
+      row.count:SetWidth(120)
+      row.count:SetJustifyH("LEFT")
+
+      row.btn = makeButton(row, "Import now", 100, function() end)
+      row.btn:SetPoint("RIGHT", row, "RIGHT", 0, 0)
+
+      sourceRows[i] = row
+    end
+    return row
+  end
+
+  local function loadSources()
+    if not (ns.Ledger and ns.Ledger.GetSources) then return end
+    local list = ns.Ledger:GetSources()
+    for i, s in ipairs(list) do
+      local row = getSourceRow(i)
+      row:SetPoint("TOPLEFT", sourcesContainer, "TOPLEFT", 0, -(i - 1) * 24)
+      row.label:SetText(s.label or s.name)
+
+      local available = ns.Ledger:IsSourceAvailable(s.name)
+      if available then
+        row.status:SetText("|cff7fffaeAvailable|r")
+      else
+        row.status:SetText("|cff888888Not detected|r")
+      end
+
+      local count = #(ns.Ledger:Query({ source = s.name }))
+      row.count:SetText(string.format("%d entries", count))
+
+      row.btn:SetEnabled(available)
+      row.btn:SetScript("OnClick", function()
+        local inserted, skipped, err = ns.Ledger:ImportFromSource(s.name)
+        if err then
+          print("|cffff4040Tally:|r import failed for " .. s.name .. " — " .. tostring(err))
+        else
+          print(string.format("|cff7fbfffTally:|r imported %d new entries from %s (%d skipped as duplicates).",
+            inserted or 0, s.name, skipped or 0))
+        end
+        loadSources()
+      end)
+      row:Show()
+    end
+    for i = #list + 1, #sourceRows do sourceRows[i]:Hide() end
+    sourcesContainer:SetHeight(math.max(1, #list * 24))
+  end
+  refreshFns[#refreshFns + 1] = loadSources
+
   -- Public refresh ------------------------------------------------------------
 
   function page:Refresh()

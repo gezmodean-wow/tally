@@ -51,7 +51,9 @@ function ns:PLAYER_LOGIN()
   -- Register ledger source adapters. Each adapter registers itself with
   -- ns.Ledger; we then run the available ones to backfill on login.
   if ns.Sources then
+    if ns.Sources.Native    then ns.Sources.Native:Register()    end
     if ns.Sources.FlipQueue then ns.Sources.FlipQueue:Register() end
+    if ns.Sources.TSM       then ns.Sources.TSM:Register()       end
   end
   if ns.Ledger and ns.Ledger.ImportFromAllSources then
     ns.Ledger:ImportFromAllSources()
