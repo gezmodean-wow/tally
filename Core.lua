@@ -200,34 +200,56 @@ local function printHelp()
 end
 
 -- Wipes the data stores Tally accumulates at runtime — ledger, history,
--- inventory rollup — and triggers a fresh Syndicator rebuild + sibling-source
--- backfill. Config is preserved (strategy, history cadence, minimap, UI prefs).
--- Used by `/tally reset` and the Settings panel "Reset all Tally data" button
--- as a quick-iterate path for testing the first-run experience.
+-- inventory rollup, the setup-completed flag, and any user source opt-outs
+-- — then re-runs the inventory scan and re-shows the setup wizard so the
+-- user lands back in the first-run flow. Config that doesn't represent
+-- accumulated data is preserved (strategy, history cadence, minimap, UI
+-- position).
+--
+-- The wizard handles the chunked backfill from sibling sources — reset
+-- intentionally does NOT auto-import. Otherwise we'd race the wizard's
+-- own backfill on Finish and double-insert / starve the user's input
+-- thread before they've even picked a pace.
 local function resetData()
   local prefix = "|cff7fbfffTally|r"
   if ns.Ledger and ns.Ledger.Clear then ns.Ledger:Clear() end
   if ns.History and ns.History.Clear then ns.History:Clear() end
   TallyDB.inventoryRollup = nil
+  TallyDB.setup = nil          -- clear completed flag so wizard re-fires
+  TallyDB.disabledSources = nil -- re-let the user pick sources in the wizard
 
-  print(prefix .. " data cleared (ledger, history, inventory rollup). Rebuilding…")
+  print(prefix .. " data cleared (ledger, history, inventory rollup, setup state). Rebuilding inventory…")
 
   if ns.Inventory and ns.Inventory.Rebuild then
     ns.Inventory:Rebuild()
   end
 
-  -- Sibling-source re-import is deferred a couple of seconds so the rebuild
-  -- broadcast settles first; otherwise the UI flashes through a half-built
-  -- state. Native source is event-driven and contributes nothing here.
-  if ns.Ledger and ns.Ledger.ImportFromAllSources and C_Timer and C_Timer.After then
-    C_Timer.After(2, function()
-      local results = ns.Ledger:ImportFromAllSources()
-      local total = 0
-      for _, r in ipairs(results) do total = total + (r.inserted or 0) end
-      print(string.format("%s reset complete — %d ledger entries re-imported from sibling sources.",
-        prefix, total))
-      if ns.UI and ns.UI.MainFrame and ns.UI.MainFrame.IsShown and ns.UI.MainFrame:IsShown() then
-        ns.UI.MainFrame:RefreshActivePage()
+  -- Hand off to the setup wizard. Defer slightly so the rebuild broadcast
+  -- + UI close races settle. The wizard's own onComplete drives the
+  -- chunked sibling-source backfill via Ledger:ImportFromAllSourcesChunked.
+  if C_Timer and C_Timer.After then
+    C_Timer.After(0.5, function()
+      -- Close the main frame if it's open (likely is — user clicked the
+      -- reset button from Settings) so the wizard isn't competing with it
+      -- for screen real estate.
+      if ns.UI and ns.UI.MainFrame and ns.UI.MainFrame.IsShown
+         and ns.UI.MainFrame:IsShown() then
+        ns.UI.MainFrame:Hide()
+      end
+      if ns.UI and ns.UI.ShowSetupWizard then
+        ns.UI.ShowSetupWizard()
+        print(prefix .. " setup wizard reopened — your data will be re-imported when you finish it.")
+      else
+        -- Wizard unavailable (no Cogworks v0.11.0?). Fall back to the old
+        -- behaviour: synchronous slurp. Better than leaving the user with
+        -- an empty ledger.
+        print(prefix .. " setup wizard unavailable; running synchronous backfill instead.")
+        if ns.Ledger and ns.Ledger.ImportFromAllSources then
+          local results = ns.Ledger:ImportFromAllSources()
+          local total = 0
+          for _, r in ipairs(results) do total = total + (r.inserted or 0) end
+          print(string.format("%s reset complete — %d ledger entries re-imported.", prefix, total))
+        end
       end
     end)
   end

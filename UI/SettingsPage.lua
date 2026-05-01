@@ -145,7 +145,62 @@ local function makeButton(parent, label, w, onClick)
 end
 
 function ns.UI.CreateSettingsPage(parent)
-  local page = CreateFrame("Frame", nil, parent)
+  -- Outer wrapper returned to MainFrame. Filled by the scroll frame so
+  -- our content can grow taller than the main-frame body.
+  local outer = CreateFrame("Frame", nil, parent)
+
+  local scrollFrame = CreateFrame("ScrollFrame", nil, outer)
+  scrollFrame:SetPoint("TOPLEFT", outer, "TOPLEFT", 0, 0)
+  scrollFrame:SetPoint("BOTTOMRIGHT", outer, "BOTTOMRIGHT", -10, 0)
+  scrollFrame:EnableMouseWheel(true)
+  scrollFrame:SetScript("OnMouseWheel", function(self, delta)
+    local cur = self:GetVerticalScroll()
+    local maxScroll = self:GetVerticalScrollRange()
+    local step = 30
+    self:SetVerticalScroll(math.max(0, math.min(cur - delta * step, maxScroll)))
+  end)
+
+  -- The actual content host. All section anchors below point at `page`,
+  -- which is now the scroll-child — sizing it tall enough to fit every
+  -- section is what enables scrolling. Width tracks the scrollFrame.
+  local page = CreateFrame("Frame", nil, scrollFrame)
+  page:SetSize(540, 720)  -- height is a generous initial estimate; we
+                          -- recompute precisely at the bottom of build
+                          -- once every section's BOTTOM anchor exists.
+  scrollFrame:SetScrollChild(page)
+  scrollFrame:SetScript("OnSizeChanged", function(self, w, _)
+    page:SetWidth(w)
+  end)
+
+  -- Thin themed scrollbar (mirrors cw:CreateScrollTable's track/thumb
+  -- styling so this page reads as the same family).
+  local track = CreateFrame("Frame", nil, outer)
+  track:SetWidth(6)
+  track:SetPoint("TOPLEFT", scrollFrame, "TOPRIGHT", 2, 0)
+  track:SetPoint("BOTTOMLEFT", scrollFrame, "BOTTOMRIGHT", 2, 0)
+  local trackBg = track:CreateTexture(nil, "BACKGROUND")
+  trackBg:SetAllPoints()
+  trackBg:SetColorTexture(themeColor("border", { 0.30, 0.30, 0.40, 0.15 }))
+  local thumb = track:CreateTexture(nil, "ARTWORK")
+  thumb:SetWidth(6)
+  thumb:SetColorTexture(themeColor("brass", { 0.83, 0.63, 0.09, 0.5 }))
+
+  local function updateThumb()
+    local maxScroll = scrollFrame:GetVerticalScrollRange()
+    local trackH = track:GetHeight()
+    if maxScroll <= 0 or trackH <= 0 then thumb:Hide(); return end
+    thumb:Show()
+    local viewH = scrollFrame:GetHeight()
+    local contentH = viewH + maxScroll
+    local thumbH = math.max(20, trackH * (viewH / contentH))
+    thumb:SetHeight(thumbH)
+    local pos = (scrollFrame:GetVerticalScroll() / maxScroll) * (trackH - thumbH)
+    thumb:ClearAllPoints()
+    thumb:SetPoint("TOP", track, "TOP", 0, -pos)
+  end
+  scrollFrame:HookScript("OnVerticalScroll", updateThumb)
+  scrollFrame:HookScript("OnSizeChanged", updateThumb)
+  scrollFrame:HookScript("OnScrollRangeChanged", updateThumb)
 
   local refreshFns = {}
 
@@ -496,7 +551,7 @@ function ns.UI.CreateSettingsPage(parent)
 
   local resetBtn = makeButton(resetRow, "Reset all Tally data", 200, function()
     StaticPopupDialogs["TALLY_RESET_DATA"] = StaticPopupDialogs["TALLY_RESET_DATA"] or {
-      text = "Wipe Tally's ledger, history, and inventory rollup?\n\nConfig (strategy, cadence, minimap, UI position) is preserved. Tally will rebuild from Syndicator and re-import from any installed sibling sources (TSM, FlipQueue) immediately after.\n\nThis cannot be undone.",
+      text = "Wipe Tally's ledger, history, inventory rollup, and setup state?\n\nConfig (strategy, cadence, minimap, UI position) is preserved. The setup wizard will reopen so you can re-pick sources, strategy, and pace; the chunked backfill kicks off when you finish the wizard.\n\nThis cannot be undone.",
       button1 = ACCEPT or "Accept",
       button2 = CANCEL or "Cancel",
       timeout = 0,
@@ -504,7 +559,9 @@ function ns.UI.CreateSettingsPage(parent)
       hideOnEscape = true,
       OnAccept = function()
         if ns.Reset then ns.Reset() end
-        if page.Refresh then page:Refresh() end
+        -- Don't Refresh page right after — Reset hides the main frame
+        -- and shows the wizard. The Settings panel will pick up fresh
+        -- state next time it's opened.
       end,
     }
     StaticPopup_Show("TALLY_RESET_DATA")
@@ -515,7 +572,13 @@ function ns.UI.CreateSettingsPage(parent)
   resetNote:SetPoint("LEFT", resetBtn, "RIGHT", 12, 0)
   resetNote:SetPoint("RIGHT", resetRow, "RIGHT", 0, 0)
   resetNote:SetJustifyH("LEFT")
-  resetNote:SetText("Wipes ledger, history, inventory rollup. Config preserved; sibling-source import re-runs.")
+  resetNote:SetText("Wipes data + reopens setup wizard. Config (strategy, cadence) preserved.")
+
+  -- Size the scroll-child to fit every section. Without this, the scroll
+  -- frame thinks the content is exactly its own viewport height and
+  -- nothing scrolls. We use a generous fixed height that covers the
+  -- max likely source-row count; the bottom dead-space is harmless.
+  page:SetHeight(720)
 
   -- Public refresh ------------------------------------------------------------
 
@@ -523,8 +586,17 @@ function ns.UI.CreateSettingsPage(parent)
     for _, fn in ipairs(refreshFns) do
       pcall(fn)
     end
+    -- Re-tally page height now that loadSources may have grown the
+    -- DATA SOURCES container, so the bottom DANGER ZONE is reachable.
+    local dynamicH = 720
+    if sourcesContainer and sourcesContainer.GetHeight then
+      dynamicH = 720 + math.max(0, sourcesContainer:GetHeight() - 24)
+    end
+    page:SetHeight(dynamicH)
   end
 
+  function outer:Refresh() page:Refresh() end
+
   page:Refresh()
-  return page
+  return outer
 end

@@ -219,10 +219,14 @@ local function buildPrimerStep(parent)
   local netSnap = ns.NetWorth:Snapshot()
   local ownedSnap = ns.NetWorth:Snapshot({ includeBound = true })
 
+  local CARD_W = 180
+  local PAD = 8
+  local LABEL_H, VALUE_H, BODY_GAP = 14, 20, 6
+
   local function makeCard(anchor, anchorPt, label, value, body)
     local card = CreateFrame("Frame", nil, f, "BackdropTemplate")
     card:SetPoint("TOPLEFT", anchor, anchorPt, 0, -10)
-    card:SetSize(180, 130)
+    card:SetWidth(CARD_W)
     card:SetBackdrop({
       bgFile = "Interface\\Buttons\\WHITE8x8",
       edgeFile = "Interface\\Buttons\\WHITE8x8",
@@ -232,7 +236,7 @@ local function buildPrimerStep(parent)
     card:SetBackdropBorderColor(themeColor("border", { 0.30, 0.30, 0.40, 1 }))
 
     local lbl = card:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
-    lbl:SetPoint("TOPLEFT", card, "TOPLEFT", 8, -8)
+    lbl:SetPoint("TOPLEFT", card, "TOPLEFT", PAD, -PAD)
     lbl:SetText(label)
 
     local val = card:CreateFontString(nil, "OVERLAY", "GameFontNormal")
@@ -240,13 +244,24 @@ local function buildPrimerStep(parent)
     val:SetText(value)
     val:SetTextColor(themeColor("brass", { 0.83, 0.63, 0.09, 1 }))
 
+    -- Body: wrap to card width, measure resulting height, size the card
+    -- to fit. WoW renders the FontString into the wrapped layout once
+    -- SetText + SetWidth are set; GetStringHeight returns the post-wrap
+    -- height. We size the card's height from that so longer text never
+    -- clips. All three cards then equalize to the tallest after creation.
     local b = card:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
-    b:SetPoint("TOPLEFT", val, "BOTTOMLEFT", 0, -6)
-    b:SetPoint("BOTTOMRIGHT", card, "BOTTOMRIGHT", -8, 8)
+    b:SetPoint("TOPLEFT", val, "BOTTOMLEFT", 0, -BODY_GAP)
+    b:SetWidth(CARD_W - 2 * PAD)
     b:SetJustifyH("LEFT")
     b:SetJustifyV("TOP")
+    b:SetWordWrap(true)
     b:SetSpacing(2)
     b:SetText(body)
+    card._body = b
+    card._fixedTopH = PAD + LABEL_H + 4 + VALUE_H + BODY_GAP
+
+    -- Initial size; equalizeCards (below) bumps every card to the max.
+    card:SetHeight(card._fixedTopH + b:GetStringHeight() + PAD)
     return card
   end
 
@@ -262,6 +277,16 @@ local function buildPrimerStep(parent)
     formatGoldShort(netSnap.warband.total),
     "Gold + items physically in the warbank, plus any warbound items wherever they sit (a Warbound Until Equipped sword in your alt's bags belongs to the warband, not the alt).")
   card3:SetPoint("TOPLEFT", card2, "TOPRIGHT", 12, 0)
+
+  -- Equalize card heights: the tallest body sets the height for all three
+  -- so they line up bottom-edge. Bound is always dynamic (depends on the
+  -- font + locale + which screen DPI the user has), so we never hard-code.
+  local cards = { card1, card2, card3 }
+  local maxH = 0
+  for _, c in ipairs(cards) do
+    if c:GetHeight() > maxH then maxH = c:GetHeight() end
+  end
+  for _, c in ipairs(cards) do c:SetHeight(maxH) end
 
   local note = f:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
   note:SetPoint("TOPLEFT", card1, "BOTTOMLEFT", 0, -16)
