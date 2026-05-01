@@ -180,17 +180,48 @@ local function buildSourcesStep(parent, state)
       state.sources[s.name].enabled = false
     end
 
-    -- Live row count probe via getEntriesFn if available.
+    -- Per-source availability hint. We deliberately do NOT call the
+    -- adapter's full getEntriesFn just to display a count — TSM's parse
+    -- on a 90k-row CSV is multi-second and would freeze the wizard. The
+    -- multi-progress widget shows the real count once parse runs at
+    -- import time. Cheap O(1) probes only here.
     local count = row:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
     count:SetPoint("LEFT", status, "RIGHT", 8, 0)
     count:SetPoint("RIGHT", row, "RIGHT", 0, 0)
     count:SetJustifyH("LEFT")
-    -- Probing the parse can be expensive (TSM 90k rows); only do it if the
-    -- source is small or skip with a "(estimated on import)" placeholder.
-    -- For TLY-25 first cut, show ledger-already-present count to give a
-    -- sense of whether it's already imported.
-    local present = #(ns.Ledger:Query({ source = s.name }) or {})
-    count:SetText(string.format("%d entries already in ledger", present))
+    if not available then
+      count:SetText("")
+    elseif s.name == "tally-native" then
+      count:SetText("|cff999999live — captured as events fire|r")
+    elseif s.name == "flipqueue" then
+      -- O(1) — FlipQueueDB.log is a regular Lua array.
+      local n = (_G.FlipQueueDB and _G.FlipQueueDB.log and #_G.FlipQueueDB.log) or 0
+      count:SetText(string.format("|cff999999%d events to scan|r", n))
+    elseif s.name == "journalator" then
+      -- Live-month buckets are O(1) each. Archived-month counts would
+      -- require deserialize-and-decompress per month — skip those for
+      -- the wizard, just report the archive-month count as a hint.
+      local archives = (_G.JOURNALATOR_ARCHIVE_TIMES and #_G.JOURNALATOR_ARCHIVE_TIMES) or 0
+      local liveCount = 0
+      local logs = _G.Journalator and _G.Journalator.State and _G.Journalator.State.Logs
+      if type(logs) == "table" then
+        for _, bucket in pairs(logs) do
+          if type(bucket) == "table" then liveCount = liveCount + #bucket end
+        end
+      end
+      count:SetText(string.format(
+        "|cff999999%d live + %d month%s archived|r",
+        liveCount, archives, archives == 1 and "" or "s"))
+    elseif s.name == "tsm" then
+      -- TSM CSVs are strings; counting by scanning newlines is roughly
+      -- O(N) over the byte stream. For 90k rows that's a brief blocking
+      -- pass — acceptable since the user just clicked "Next" to get
+      -- here, but let's stay friendly and show "data available" without
+      -- the precise number. Real count appears in the per-source bar.
+      count:SetText("|cff999999data available — count at import|r")
+    else
+      count:SetText("")
+    end
   end
   listHost:SetHeight(math.max(rowH, #sources * rowH))
 
