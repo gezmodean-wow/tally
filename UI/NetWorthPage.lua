@@ -135,11 +135,17 @@ function ns.UI.CreateNetWorthPage(parent)
   strategyText:SetPoint("RIGHT", controlRow, "RIGHT", -2, 0)
   strategyText:SetJustifyH("RIGHT")
 
-  -- Chart + per-character table sit side by side. Chart on the left ~65%
-  -- of the row width; table on the right ~35%.
+  -- Chart + per-character table sit side by side. Chart on the left,
+  -- table on the right. Chart is anchored both sides — its right edge
+  -- is set as a fraction of the middle frame's width on resize so the
+  -- char panel always gets a readable share even when the player widens
+  -- the main frame. Tester feedback: 440px-fixed chart + remainder for
+  -- chars left the chars cramped (long "Char-Realm" names truncated).
   local middle = CreateFrame("Frame", nil, page)
   middle:SetPoint("TOPLEFT", controlRow, "BOTTOMLEFT", 0, -8)
   middle:SetPoint("BOTTOMRIGHT", page, "BOTTOMRIGHT", 0, 60)
+
+  local CHAR_PANEL_MIN_W = 320  -- enough for "Hugemane-Argent Dawn" + value
 
   local chart = ns.UI.CreateLineChart(middle, {
     yLabelWidth = 72,
@@ -149,7 +155,20 @@ function ns.UI.CreateNetWorthPage(parent)
   })
   chart:SetPoint("TOPLEFT", middle, "TOPLEFT", 0, 0)
   chart:SetPoint("BOTTOMLEFT", middle, "BOTTOMLEFT", 0, 0)
-  chart:SetWidth(440)
+
+  -- Recompute chart width from middle's actual width on every layout.
+  -- Char panel claims max(CHAR_PANEL_MIN_W, 35% of width); chart gets the
+  -- rest minus a 12px gutter. Falls back to a sensible default before
+  -- middle has a measured width.
+  local function applyChartWidth()
+    local mw = middle:GetWidth()
+    if not mw or mw < 1 then return end
+    local panelW = math.max(CHAR_PANEL_MIN_W, math.floor(mw * 0.35))
+    local chartW = math.max(280, mw - panelW - 12)
+    chart:SetWidth(chartW)
+  end
+  middle:SetScript("OnSizeChanged", function() applyChartWidth() end)
+  applyChartWidth()
 
   chart:SetYFormatter(function(copper)
     return formatGoldShort(copper)
@@ -181,6 +200,12 @@ function ns.UI.CreateNetWorthPage(parent)
   local charContent = CreateFrame("Frame", nil, charScroll)
   charContent:SetSize(220, 1)
   charScroll:SetScrollChild(charContent)
+  -- Track the scroll-frame width so rows fill the available space rather
+  -- than the hardcoded 220px stub. Without this, the right-aligned
+  -- "value" column hugs the 220px boundary even on a 320px-wide panel.
+  charScroll:SetScript("OnSizeChanged", function(self, w, _)
+    if w and w > 0 then charContent:SetWidth(w) end
+  end)
 
   local charRows = {}
   local function getCharRow(i)
@@ -190,30 +215,39 @@ function ns.UI.CreateNetWorthPage(parent)
       -- into the Inventory tab filtered to that character — the user's
       -- "I have one char with most of my net worth, why?" question.
       row = CreateFrame("Button", nil, charContent)
-      row:SetHeight(28)
-      row:SetPoint("LEFT", charContent, "LEFT", 4, 0)
-      row:SetPoint("RIGHT", charContent, "RIGHT", -4, 0)
+      row:SetHeight(34)
+      row:SetPoint("LEFT", charContent, "LEFT", 6, 0)
+      row:SetPoint("RIGHT", charContent, "RIGHT", -6, 0)
 
       row.bg = row:CreateTexture(nil, "BACKGROUND")
       row.bg:SetAllPoints()
       row.bg:SetColorTexture(1, 1, 1, 0)
 
-      row.name = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-      row.name:SetPoint("TOPLEFT", row, "TOPLEFT", 0, 0)
-      row.name:SetWidth(120)
+      -- Top line. Name takes everything not claimed by the right-aligned
+      -- value — anchoring TOPLEFT/TOPRIGHT with explicit gap lets the
+      -- name column scale with the panel width. Cuts off via word-wrap
+      -- if the panel is squeezed below CHAR_PANEL_MIN_W (shouldn't
+      -- happen with the proportional chart split, but defensive).
+      row.name = row:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+      row.name:SetPoint("TOPLEFT", row, "TOPLEFT", 0, -2)
       row.name:SetJustifyH("LEFT")
+      row.name:SetWordWrap(false)
 
-      row.value = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-      row.value:SetPoint("TOPRIGHT", row, "TOPRIGHT", 0, 0)
+      row.value = row:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+      row.value:SetPoint("TOPRIGHT", row, "TOPRIGHT", 0, -2)
       row.value:SetJustifyH("RIGHT")
+
+      -- Constrain name's right edge so it doesn't overrun the value.
+      row.name:SetPoint("RIGHT", row.value, "LEFT", -8, 0)
 
       -- Sub-line: gold vs items + share of total. Answers "why is this
       -- char dominant" at-a-glance; full answer lives in the Inventory
       -- drill-down (click row).
       row.sub = row:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
-      row.sub:SetPoint("TOPLEFT", row.name, "BOTTOMLEFT", 0, -2)
+      row.sub:SetPoint("TOPLEFT", row.name, "BOTTOMLEFT", 0, -3)
       row.sub:SetPoint("RIGHT", row, "RIGHT", 0, 0)
       row.sub:SetJustifyH("LEFT")
+      row.sub:SetWordWrap(false)
 
       row:SetScript("OnEnter", function(self)
         self.bg:SetColorTexture(1, 1, 1, 0.06)
@@ -325,7 +359,7 @@ function ns.UI.CreateNetWorthPage(parent)
     end
     table.sort(rows, function(a, b) return a.total > b.total end)
 
-    local rowHeight = 28
+    local rowHeight = 34
     for i, r in ipairs(rows) do
       local row = getCharRow(i)
       row:SetPoint("TOP", charContent, "TOP", 0, -(i - 1) * rowHeight)
