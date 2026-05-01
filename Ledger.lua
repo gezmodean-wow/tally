@@ -408,12 +408,12 @@ function Ledger:ImportFromAllSourcesChunked(opts)
     local name = sourceOrder[sourceIdx]
     local s = sources[name]
     if not s then return nextSource() end
-    if s.isAvailableFn then
-      local ok, available = pcall(s.isAvailableFn)
-      if not ok or not available then
-        results[#results + 1] = { source = name, inserted = 0, skipped = 0, skippedSource = true }
-        return nextSource()
-      end
+    -- IsSourceAvailable also enforces TallyDB.disabledSources opt-out,
+    -- so sources the user unchecked in the wizard land here cleanly.
+    if not self:IsSourceAvailable(name) then
+      results[#results + 1] = { source = name, inserted = 0, skipped = 0, skippedSource = true }
+      if opts.onSourceSkipped then pcall(opts.onSourceSkipped, name, s.label) end
+      return nextSource()
     end
 
     -- Prefer the chunkable getEntriesFn path. Falls back to importFn for
@@ -629,4 +629,22 @@ end
 
 function Ledger:Count()
   return #db().entries
+end
+
+-- ============================================================================
+-- Setup gate (TLY-25)
+-- ============================================================================
+--
+-- Returns true once the user has completed the setup wizard (or has been
+-- grandfathered as a pre-wizard upgrader). Source adapters and the
+-- import drivers respect this gate — until it returns true, no rows
+-- flow into the ledger from any source. The wizard's onComplete
+-- handler is the only thing that flips it on.
+--
+-- Why gate every path: testers reported that even after `/tally reset`
+-- (which clears the gate), the deferred PLAYER_LOGIN import + the
+-- 5-minute ticker + mailbox scans kept silently writing rows. The
+-- expected behavior is "nothing imported until I finish the wizard."
+function Ledger:IsSetupComplete()
+  return TallyDB and TallyDB.setup and TallyDB.setup.completed and true or false
 end

@@ -69,12 +69,32 @@ function ns:PLAYER_LOGIN()
     if ns.Sources.TSM         then ns.Sources.TSM:Register()         end
     if ns.Sources.Journalator then ns.Sources.Journalator:Register() end
   end
+  -- Pre-wizard upgrader grandfather: anyone who has inventory data already
+  -- (i.e., an existing Tally user installing this build) gets the setup
+  -- flag flipped true so their imports keep flowing. Only fresh installs
+  -- and post-`/tally reset` users go through the wizard gate.
+  if TallyDB.inventoryRollup and TallyDB.inventoryRollup.lastFullScan
+     and not (TallyDB.setup and TallyDB.setup.completed) then
+    TallyDB.setup = TallyDB.setup or {}
+    TallyDB.setup.completed = true
+    TallyDB.setup.grandfathered = true
+    TallyDB.setup.completedAt = TallyDB.setup.completedAt or time()
+  end
+
   -- TLY-21: defer the initial sibling-source backfill 5s after login so
   -- character-select / first-zone-load isn't fighting a multi-MB TSM CSV
   -- parse for the player's input thread. Native source is event-driven
   -- and doesn't need this timer.
+  --
+  -- TLY-25: gated on the setup-complete flag. Fresh installs and
+  -- post-reset users see the wizard first; nothing flows into the
+  -- ledger until they finish it.
   if ns.Ledger and ns.Ledger.ImportFromAllSources and C_Timer and C_Timer.After then
-    C_Timer.After(5, function() ns.Ledger:ImportFromAllSources() end)
+    C_Timer.After(5, function()
+      if ns.Ledger:IsSetupComplete() then
+        ns.Ledger:ImportFromAllSources()
+      end
+    end)
   end
   -- Register UI pages with the main frame. Page bodies are lazy-created on
   -- first ShowPage so login cost is zero for users who never open the UI.
@@ -143,8 +163,14 @@ function ns:PLAYER_LOGIN()
   -- well below the cadence at which TSM Accounting / FlipQueue write new
   -- rows, while staying far away from the per-bag-event hot path. Native
   -- source is event-driven (MAIL_INBOX_UPDATE) so it never relies on this.
+  -- TLY-25: gated on setup-complete; the ticker keeps running but each
+  -- tick is a no-op until the wizard finishes.
   if ns.Ledger and ns.Ledger.ImportFromAllSources and C_Timer and C_Timer.NewTicker then
-    C_Timer.NewTicker(300, function() ns.Ledger:ImportFromAllSources() end)
+    C_Timer.NewTicker(300, function()
+      if ns.Ledger:IsSetupComplete() then
+        ns.Ledger:ImportFromAllSources()
+      end
+    end)
   end
 end
 
@@ -533,11 +559,24 @@ local LDB = LibStub and LibStub("LibDataBroker-1.1", true)
 local LDBIcon = LibStub and LibStub("LibDBIcon-1.0", true)
 
 if LDB then
+  -- Pre-setup tooltip + click behavior. Until the user finishes the wizard,
+  -- the icon makes that crystal clear instead of pretending to show a
+  -- (mostly-empty) net worth tooltip.
+  local function setupPending()
+    return ns.Ledger and ns.Ledger.IsSetupComplete and not ns.Ledger:IsSetupComplete()
+  end
+
   local dataobject = LDB:NewDataObject(addonName, {
     type = "data source",
     text = addonName,
     icon = "Interface\\AddOns\\Tally\\Art\\tl-inner",
     OnClick = function(_, button)
+      -- Pre-setup: any click launches the wizard. Net worth doesn't mean
+      -- anything yet so right-click's chat printout would be noise.
+      if setupPending() then
+        if ns.UI and ns.UI.ShowSetupWizard then ns.UI.ShowSetupWizard() end
+        return
+      end
       if button == "LeftButton" then
         if ns.UI and ns.UI.MainFrame then
           ns.UI.MainFrame:Toggle()
@@ -549,6 +588,38 @@ if LDB then
       end
     end,
     OnTooltipShow = function(tooltip)
+      -- Pre-setup: dedicated "setup required" tooltip. Hides the
+      -- regular net worth breakdown until imports have actually run,
+      -- so the user doesn't see "Total: 0g" and assume Tally is broken.
+      if setupPending() then
+        tooltip:SetText("|cffffd070Tally|r — setup required")
+        tooltip:AddLine(" ")
+        tooltip:AddLine("Tally hasn't run its first-time setup yet.", 1, 1, 1, true)
+        tooltip:AddLine("Nothing has been imported from TSM, FlipQueue,", 0.85, 0.85, 0.85, true)
+        tooltip:AddLine("Journalator, or your mailbox until you finish", 0.85, 0.85, 0.85, true)
+        tooltip:AddLine("the wizard.", 0.85, 0.85, 0.85, true)
+        tooltip:AddLine(" ")
+        local detected = {}
+        if ns.Ledger and ns.Ledger.GetSources then
+          for _, s in ipairs(ns.Ledger:GetSources()) do
+            if s.name ~= "tally-native" and ns.Ledger:IsSourceAvailable(s.name) then
+              detected[#detected + 1] = s.label
+            end
+          end
+        end
+        if #detected > 0 then
+          tooltip:AddLine("Sources detected: " .. table.concat(detected, ", "),
+            0.6, 0.85, 0.6, true)
+        else
+          tooltip:AddLine("No sibling sources detected — Tally will run on",
+            0.85, 0.7, 0.5, true)
+          tooltip:AddLine("native event capture only.", 0.85, 0.7, 0.5, true)
+        end
+        tooltip:AddLine(" ")
+        tooltip:AddLine("Click to start setup.", 1, 0.82, 0, true)
+        return
+      end
+
       local snap = ns.NetWorth:Snapshot()
       local owned = ns.NetWorth:Snapshot({ includeBound = true })
       tooltip:SetText("|cff7fbfffTally|r — net worth (saleable items only)")
@@ -601,11 +672,19 @@ if LDB then
 
   -- Live-update LDB text with the running total. Throttled to event-driven
   -- updates from Cogworks; if Cogworks isn't available we update on demand only.
+  -- Pre-setup we surface "setup required" instead of "0g" so the launcher
+  -- text itself is unambiguous.
   local function refreshText()
+    if setupPending() then
+      dataobject.text = "|cffffd070setup required|r"
+      return
+    end
     local snap = ns.NetWorth:Snapshot()
     dataobject.text = ns.NetWorth.FormatGold(snap.total)
   end
   refreshText()
+  ns.RefreshLDB = refreshText  -- exposed so the wizard can re-skin the
+                                 -- launcher the moment setup completes
 
   if Cogworks and Cogworks.RegisterCallback and Cogworks.Events then
     Cogworks.RegisterCallback(addonName, Cogworks.Events.InventoryChanged, refreshText)

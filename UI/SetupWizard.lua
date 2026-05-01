@@ -574,52 +574,82 @@ end
 local function startBackfill(state)
   local preset = PACE_PRESETS[state.pace] or PACE_PRESETS.gentle
 
-  local bar = ns.UI.CreateProgressBar({
-    label = "Importing",
-    total = 0,  -- unknown until first source reports
-  })
-  bar:Show()
-  bar:Pulse()
+  -- Build the per-source widget BEFORE flipping setup.completed. Sources
+  -- the user opted out of are excluded from the panel (clean visual);
+  -- sources detected as unavailable show a "skipped" state so the user
+  -- isn't left wondering why TSM isn't there.
+  local sourceList = {}
+  if ns.Ledger and ns.Ledger.GetSources then
+    for _, s in ipairs(ns.Ledger:GetSources()) do
+      sourceList[#sourceList + 1] = { name = s.name, label = s.label }
+    end
+  end
 
-  local currentSource = ""
-  local currentTotal = 0
+  local panel = ns.UI.CreateMultiProgress({
+    title = "Importing your data",
+    sources = sourceList,
+  })
+  panel:Show()
+  panel:SetFooter("Pace: " .. (PACE_PRESETS[state.pace] and PACE_PRESETS[state.pace].label or state.pace))
+
+  -- Pre-populate state for sources the user opted out of.
+  for _, s in ipairs(sourceList) do
+    local sourceState = state.sources[s.name]
+    if sourceState and not sourceState.enabled then
+      local b = panel:GetBar(s.name)
+      if b then b:SetState("skipped") end
+    end
+  end
+
+  -- Flip the setup gate ON before triggering the chunked import — the
+  -- driver respects the gate (we made everything else respect it too,
+  -- so this single flag is the difference between "import" and "no-op").
+  -- We flip BEFORE the chunked driver fires its first onSourceStart.
+  TallyDB.setup = TallyDB.setup or {}
+  TallyDB.setup.completed = true
+  TallyDB.setup.completedAt = time()
+  TallyDB.setup.grandfathered = nil
+  if ns.RefreshLDB then pcall(ns.RefreshLDB) end
 
   ns.Ledger:ImportFromAllSourcesChunked({
     chunkSize = preset.chunkSize,
     delaySec = preset.delaySec,
     sourceDelay = 0.5,
+    onSourceSkipped = function(name)
+      local b = panel:GetBar(name)
+      if b then b:SetState("skipped") end
+    end,
     onSourceStart = function(name, label, total)
-      currentSource = label or name
-      currentTotal = total or 0
-      bar:SetLabel(string.format("Importing %s", currentSource))
-      if currentTotal > 0 then
-        bar:SetTotal(currentTotal)
-        bar:SetValue(0)
-      else
-        bar:Pulse()
+      local b = panel:GetBar(name)
+      if not b then return end
+      b:SetState("importing")
+      if total and total > 0 then
+        b:SetTotal(total)
+        b:SetValue(0)
       end
     end,
     onSourceProgress = function(name, inserted, total)
-      bar:SetValue(inserted)
+      local b = panel:GetBar(name)
+      if b then b:SetValue(inserted) end
     end,
     onSourceDone = function(name, inserted, skipped)
+      local b = panel:GetBar(name)
+      if b then b:Complete(inserted, skipped) end
       print(string.format("|cff7fbfffTally:|r %s: %d new entries (%d skipped).",
         name, inserted, skipped))
     end,
     onComplete = function(results)
       local total = 0
       for _, r in ipairs(results) do total = total + (r.inserted or 0) end
-      bar:Complete(string.format("Import complete — %d entries imported.", total))
-
-      -- Mark setup as done so the wizard doesn't auto-run again on next login.
-      TallyDB.setup = TallyDB.setup or {}
-      TallyDB.setup.completed = true
-      TallyDB.setup.completedAt = time()
+      panel:Complete(string.format("Import complete — %s entries across %d sources.",
+        BreakUpLargeNumbers and BreakUpLargeNumbers(total) or tostring(total),
+        #results))
 
       -- Refresh the main UI if it's open so the user immediately sees the new data.
       if ns.UI.MainFrame and ns.UI.MainFrame:IsShown() then
         ns.UI.MainFrame:RefreshActivePage()
       end
+      if ns.RefreshLDB then pcall(ns.RefreshLDB) end
     end,
   })
 end

@@ -138,6 +138,12 @@ end
 -- Returns (insertedCount, skippedCount) for parity with the source-import API.
 local function scanInbox()
   if not isMailOpen then return 0, 0 end
+  -- TLY-25: respect the setup gate. Mailbox scans are event-driven —
+  -- the user could open mail seconds after install, before any wizard
+  -- has run, and we'd silently start writing rows. Wait for the wizard.
+  if ns.Ledger and ns.Ledger.IsSetupComplete and not ns.Ledger:IsSetupComplete() then
+    return 0, 0
+  end
   if not GetInboxNumItems then return 0, 0 end
   local n = GetInboxNumItems() or 0
   if n <= 0 then return 0, 0 end
