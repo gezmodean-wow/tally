@@ -26,11 +26,17 @@ Ledger.lua
 Sources\Native.lua
 Sources\FlipQueue.lua
 Sources\TSM.lua
+Sources\Journalator.lua
+Research\Lifecycle.lua
 Research\Aggregator.lua
 UI\Chart.lua
+UI\ProgressBar.lua
 UI\MainFrame.lua
 UI\NetWorthPage.lua
 UI\ResearchPage.lua
+UI\LifecyclePage.lua
 UI\LedgerPage.lua
+UI\CompareLedgersPage.lua
 UI\SettingsPage.lua
+UI\SetupWizard.lua
 Core.lua

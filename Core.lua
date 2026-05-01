@@ -64,9 +64,10 @@ function ns:PLAYER_LOGIN()
   -- Register ledger source adapters. Each adapter registers itself with
   -- ns.Ledger; we then run the available ones to backfill on login.
   if ns.Sources then
-    if ns.Sources.Native    then ns.Sources.Native:Register()    end
-    if ns.Sources.FlipQueue then ns.Sources.FlipQueue:Register() end
-    if ns.Sources.TSM       then ns.Sources.TSM:Register()       end
+    if ns.Sources.Native      then ns.Sources.Native:Register()      end
+    if ns.Sources.FlipQueue   then ns.Sources.FlipQueue:Register()   end
+    if ns.Sources.TSM         then ns.Sources.TSM:Register()         end
+    if ns.Sources.Journalator then ns.Sources.Journalator:Register() end
   end
   -- TLY-21: defer the initial sibling-source backfill 5s after login so
   -- character-select / first-zone-load isn't fighting a multi-MB TSM CSV
@@ -84,12 +85,33 @@ function ns:PLAYER_LOGIN()
     if ns.UI.CreateResearchPage then
       ns.UI.MainFrame:RegisterPage("Research", ns.UI.CreateResearchPage)
     end
+    if ns.UI.CreateLifecyclePage then
+      ns.UI.MainFrame:RegisterPage("Lifecycle", ns.UI.CreateLifecyclePage)
+    end
     if ns.UI.CreateLedgerPage then
       ns.UI.MainFrame:RegisterPage("Ledger", ns.UI.CreateLedgerPage)
+    end
+    -- Compare tab is gated by a Settings toggle; default off so non-debug
+    -- users don't see it. Read TallyDB directly to avoid an order
+    -- dependency between this block and the Settings panel.
+    TallyDB.ui = TallyDB.ui or {}
+    if TallyDB.ui.showCompareTab and ns.UI.CreateCompareLedgersPage then
+      ns.UI.MainFrame:RegisterPage("Compare", ns.UI.CreateCompareLedgersPage)
     end
     if ns.UI.CreateSettingsPage then
       ns.UI.MainFrame:RegisterPage("Settings", ns.UI.CreateSettingsPage)
     end
+  end
+
+  -- TLY-25: auto-show the setup wizard for fresh installs with detected
+  -- sibling sources. Deferred 6s after login (1s past the source-import
+  -- defer) so source registration + availability checks have settled.
+  if C_Timer and C_Timer.After and ns.UI and ns.UI.ShouldShowSetupWizard then
+    C_Timer.After(6, function()
+      if ns.UI.ShouldShowSetupWizard() then
+        if ns.UI.ShowSetupWizard then ns.UI.ShowSetupWizard() end
+      end
+    end)
   end
   -- Invalidate research cache on inventory updates so consumers always see
   -- fresh ownership/valuation. Cogworks event bus is the broadcast channel.
@@ -130,7 +152,7 @@ end
 -- Major bumps are breaking; minor bumps are additive.
 _G.TallyAPI = {
   major = 1,
-  minor = 4,
+  minor = 5,
   api = {
     GetItemResearch = function(input, itemName) return ns.Research:GetRecord(input, itemName) end,
     InvalidateItemResearch = function(itemKey) ns.Research:Invalidate(itemKey) end,
@@ -143,6 +165,9 @@ _G.TallyAPI = {
     GetItemInventoryTrend = function(itemID, windowSec) return ns.History:GetItemInventoryTrend(itemID, windowSec) end,
     QueryLedger = function(filter) return ns.Ledger:Query(filter) end,
     LedgerStats = function(filter) return ns.Ledger:Stats(filter) end,
+    -- v1.5 (TLY-26 / TLY-27)
+    GetItemLifecycle = function(itemID, opts) return ns.Lifecycle and ns.Lifecycle:GetRecord(itemID, opts) or nil end,
+    CompareLedgerSources = function(a, b, filter) return ns.Ledger:Compare(a, b, filter) end,
   },
 }
 
@@ -168,7 +193,47 @@ local function printHelp()
   print("  /tally history retention <days> — set max age of recorded snapshots")
   print("  /tally history rollup <days> — collapse snapshots older than this to one per day")
   print("  /tally history clear [strategy] — wipe history (all strategies, or one)")
+  print("  /tally reset confirm — wipe ledger + history + inventory rollup, then re-init")
+  print("  /tally setup — re-run the first-time setup wizard")
+  print("  /tally lifecycle <itemlink-or-id> — open per-item lifecycle drill-down")
+  print("  /tally compare — open the multi-source ledger comparison view")
 end
+
+-- Wipes the data stores Tally accumulates at runtime — ledger, history,
+-- inventory rollup — and triggers a fresh Syndicator rebuild + sibling-source
+-- backfill. Config is preserved (strategy, history cadence, minimap, UI prefs).
+-- Used by `/tally reset` and the Settings panel "Reset all Tally data" button
+-- as a quick-iterate path for testing the first-run experience.
+local function resetData()
+  local prefix = "|cff7fbfffTally|r"
+  if ns.Ledger and ns.Ledger.Clear then ns.Ledger:Clear() end
+  if ns.History and ns.History.Clear then ns.History:Clear() end
+  TallyDB.inventoryRollup = nil
+
+  print(prefix .. " data cleared (ledger, history, inventory rollup). Rebuilding…")
+
+  if ns.Inventory and ns.Inventory.Rebuild then
+    ns.Inventory:Rebuild()
+  end
+
+  -- Sibling-source re-import is deferred a couple of seconds so the rebuild
+  -- broadcast settles first; otherwise the UI flashes through a half-built
+  -- state. Native source is event-driven and contributes nothing here.
+  if ns.Ledger and ns.Ledger.ImportFromAllSources and C_Timer and C_Timer.After then
+    C_Timer.After(2, function()
+      local results = ns.Ledger:ImportFromAllSources()
+      local total = 0
+      for _, r in ipairs(results) do total = total + (r.inserted or 0) end
+      print(string.format("%s reset complete — %d ledger entries re-imported from sibling sources.",
+        prefix, total))
+      if ns.UI and ns.UI.MainFrame and ns.UI.MainFrame.IsShown and ns.UI.MainFrame:IsShown() then
+        ns.UI.MainFrame:RefreshActivePage()
+      end
+    end)
+  end
+end
+
+ns.Reset = resetData
 
 local function describeAge(seconds)
   if not seconds or seconds <= 0 then return "—" end
@@ -386,6 +451,39 @@ local function handleSlash(msg)
       local ok, err = ns.NetWorth:SetStrategy(rest)
       if ok then print("|cff7fbfffTally:|r price strategy set to '" .. rest .. "'.")
       else print("|cffff4040Tally:|r " .. tostring(err)) end
+    end
+  elseif cmd == "reset" then
+    if rest == "confirm" then
+      resetData()
+    else
+      print("|cffff4040Tally:|r `/tally reset confirm` will wipe ledger, history, and inventory rollup.")
+      print("|cffff4040Tally:|r Config (strategy, history cadence, minimap, UI prefs) is preserved. Sibling-source import re-runs after.")
+    end
+  elseif cmd == "setup" or cmd == "wizard" then
+    if ns.UI and ns.UI.ShowSetupWizard then
+      ns.UI.ShowSetupWizard()
+    else
+      print("|cffff4040Tally:|r setup wizard unavailable.")
+    end
+  elseif cmd == "lifecycle" or cmd == "lc" then
+    if ns.UI and ns.UI.ShowLifecycle then
+      ns.UI.ShowLifecycle(rest)
+    else
+      print("|cffff4040Tally:|r lifecycle UI unavailable.")
+    end
+  elseif cmd == "compare" then
+    if ns.UI and ns.UI.MainFrame and ns.UI.CreateCompareLedgersPage then
+      -- If the Compare tab isn't currently registered (toggle off), turn
+      -- it on for this session so the slash command works regardless.
+      TallyDB.ui = TallyDB.ui or {}
+      if not TallyDB.ui.showCompareTab then
+        TallyDB.ui.showCompareTab = true
+        ns.UI.MainFrame:RegisterPage("Compare", ns.UI.CreateCompareLedgersPage)
+      end
+      ns.UI.MainFrame:Show()
+      ns.UI.MainFrame:ShowPage("Compare")
+    else
+      print("|cffff4040Tally:|r compare view unavailable.")
     end
   else
     printHelp()

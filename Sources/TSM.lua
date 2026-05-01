@@ -191,8 +191,12 @@ end
 
 local CSV_NAMES = { "csvSales", "csvBuys", "csvExpired", "csvCancelled" }
 
-local function importAll()
-  if not isAvailable() then return 0, 0 end
+-- Parse phase only — returns the entries that would be inserted. Used by
+-- the chunked driver (Ledger:ImportFromAllSourcesChunked) so the bulk insert
+-- can be sliced into framerate-friendly batches. The synchronous importAll
+-- below is a thin wrapper that calls this and InsertMany.
+local function getEntries()
+  if not isAvailable() then return {}, 0 end
   local entries = {}
 
   for _, csvName in ipairs(CSV_NAMES) do
@@ -210,6 +214,11 @@ local function importAll()
     end
   end
 
+  return entries, 0
+end
+
+local function importAll()
+  local entries = getEntries()
   return ns.Ledger:InsertMany(entries)
 end
 
@@ -222,6 +231,7 @@ function TSMSrc:Register()
   ns.Ledger:RegisterSource(SOURCE_NAME, {
     label = "TSM Accounting",
     importFn = importAll,
+    getEntriesFn = getEntries,
     isAvailable = isAvailable,
   })
 end
@@ -229,3 +239,4 @@ end
 -- Exposed for testing.
 TSMSrc.IsAvailable = isAvailable
 TSMSrc.ImportAll = importAll
+TSMSrc.GetEntries = getEntries

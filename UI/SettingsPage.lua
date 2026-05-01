@@ -427,6 +427,96 @@ function ns.UI.CreateSettingsPage(parent)
   end
   refreshFns[#refreshFns + 1] = loadSources
 
+  -- ============================================================================
+  -- SECTION 5: Setup + advanced views
+  -- ============================================================================
+
+  local setupHdr = makeSectionHeader(page, sourcesContainer, "BOTTOMLEFT", 18, "SETUP + ADVANCED")
+
+  local setupRow = CreateFrame("Frame", nil, page)
+  setupRow:SetPoint("TOPLEFT", setupHdr, "BOTTOMLEFT", 0, -10)
+  setupRow:SetPoint("RIGHT", page, "RIGHT", 0, 0)
+  setupRow:SetHeight(24)
+
+  local rerunBtn = makeButton(setupRow, "Re-run setup wizard", 180, function()
+    if ns.UI and ns.UI.ShowSetupWizard then ns.UI.ShowSetupWizard()
+    else print("|cffff4040Tally:|r setup wizard unavailable.") end
+  end)
+  rerunBtn:SetPoint("LEFT", setupRow, "LEFT", 0, 0)
+
+  local rerunNote = setupRow:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+  rerunNote:SetPoint("LEFT", rerunBtn, "RIGHT", 12, 0)
+  rerunNote:SetPoint("RIGHT", setupRow, "RIGHT", 0, 0)
+  rerunNote:SetJustifyH("LEFT")
+  rerunNote:SetText("Walk through source detection, strategy, history config, and chunked backfill again.")
+
+  -- Compare-tab toggle
+  local compareRow = CreateFrame("Frame", nil, page)
+  compareRow:SetPoint("TOPLEFT", setupRow, "BOTTOMLEFT", 0, -6)
+  compareRow:SetPoint("RIGHT", page, "RIGHT", 0, 0)
+  compareRow:SetHeight(22)
+
+  local compareCB = CreateFrame("CheckButton", nil, compareRow, "UICheckButtonTemplate")
+  compareCB:SetSize(20, 20)
+  compareCB:SetPoint("LEFT", compareRow, "LEFT", 0, 0)
+  TallyDB.ui = TallyDB.ui or {}
+  compareCB:SetChecked(TallyDB.ui.showCompareTab and true or false)
+
+  local compareLabel = compareRow:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+  compareLabel:SetPoint("LEFT", compareCB, "RIGHT", 4, 0)
+  compareLabel:SetText("Show ledger comparison tab")
+
+  local compareNote = compareRow:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+  compareNote:SetPoint("LEFT", compareLabel, "RIGHT", 12, 0)
+  compareNote:SetPoint("RIGHT", compareRow, "RIGHT", 0, 0)
+  compareNote:SetJustifyH("LEFT")
+  compareNote:SetText("Debug-oriented side-by-side diff between two ledger sources. Reload required for tab to appear/disappear.")
+
+  compareCB:SetScript("OnClick", function(self)
+    TallyDB.ui = TallyDB.ui or {}
+    TallyDB.ui.showCompareTab = self:GetChecked() and true or nil
+    -- Live-register the page on enable so users don't strictly need a reload
+    -- to use it — only to remove the tab visually.
+    if TallyDB.ui.showCompareTab and ns.UI and ns.UI.MainFrame and ns.UI.CreateCompareLedgersPage
+       and ns.UI.MainFrame.RegisterPage and not ns.UI.MainFrame:GetPage("Compare") then
+      ns.UI.MainFrame:RegisterPage("Compare", ns.UI.CreateCompareLedgersPage)
+    end
+  end)
+
+  -- ============================================================================
+  -- SECTION 6: Danger zone — full data reset (testing aid + recovery path)
+  -- ============================================================================
+
+  local dangerHdr = makeSectionHeader(page, compareRow, "BOTTOMLEFT", 18, "DANGER ZONE")
+
+  local resetRow = CreateFrame("Frame", nil, page)
+  resetRow:SetPoint("TOPLEFT", dangerHdr, "BOTTOMLEFT", 0, -10)
+  resetRow:SetPoint("RIGHT", page, "RIGHT", 0, 0)
+  resetRow:SetHeight(24)
+
+  local resetBtn = makeButton(resetRow, "Reset all Tally data", 200, function()
+    StaticPopupDialogs["TALLY_RESET_DATA"] = StaticPopupDialogs["TALLY_RESET_DATA"] or {
+      text = "Wipe Tally's ledger, history, and inventory rollup?\n\nConfig (strategy, cadence, minimap, UI position) is preserved. Tally will rebuild from Syndicator and re-import from any installed sibling sources (TSM, FlipQueue) immediately after.\n\nThis cannot be undone.",
+      button1 = ACCEPT or "Accept",
+      button2 = CANCEL or "Cancel",
+      timeout = 0,
+      whileDead = true,
+      hideOnEscape = true,
+      OnAccept = function()
+        if ns.Reset then ns.Reset() end
+        if page.Refresh then page:Refresh() end
+      end,
+    }
+    StaticPopup_Show("TALLY_RESET_DATA")
+  end)
+  resetBtn:SetPoint("LEFT", resetRow, "LEFT", 0, 0)
+
+  local resetNote = resetRow:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+  resetNote:SetPoint("LEFT", resetBtn, "RIGHT", 12, 0)
+  resetNote:SetPoint("RIGHT", resetRow, "RIGHT", 0, 0)
+  resetNote:SetJustifyH("LEFT")
+  resetNote:SetText("Wipes ledger, history, inventory rollup. Config preserved; sibling-source import re-runs.")
+
   -- Public refresh ------------------------------------------------------------
 
   function page:Refresh()

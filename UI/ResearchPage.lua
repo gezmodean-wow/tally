@@ -118,6 +118,20 @@ function ns.UI.CreateResearchPage(parent)
   lookupBtn:SetPoint("LEFT", input, "RIGHT", 6, 0)
   lookupBtn:SetText("Look up")
 
+  -- Drill-down to per-item lifecycle (TLY-26): jump to the Lifecycle tab
+  -- with the current item pre-loaded. Hidden until a lookup has resolved.
+  local lifecycleBtn = CreateFrame("Button", nil, row, "UIPanelButtonTemplate")
+  lifecycleBtn:SetSize(140, 22)
+  lifecycleBtn:SetPoint("LEFT", lookupBtn, "RIGHT", 6, 0)
+  lifecycleBtn:SetText("View lifecycle →")
+  lifecycleBtn:Disable()
+  lifecycleBtn:SetScript("OnClick", function()
+    local text = input:GetText()
+    if text and text ~= "" and ns.UI.ShowLifecycle then
+      ns.UI.ShowLifecycle(text)
+    end
+  end)
+
   -- Item header ---------------------------------------------------------------
 
   local header = CreateFrame("Frame", nil, page)
@@ -550,6 +564,13 @@ function ns.UI.CreateResearchPage(parent)
     end
   end
 
+  -- Enable the Lifecycle drill-down button once a successful lookup has
+  -- happened. We don't have a direct hook into Research:GetRecord success,
+  -- so we enable it any time LookUp is called with non-empty text.
+  function page:_setLifecycleEnabled(enabled)
+    if enabled then lifecycleBtn:Enable() else lifecycleBtn:Disable() end
+  end
+
   function page:LookUp(text)
     if not text or text == "" then return end
     input:SetText(text)
@@ -557,6 +578,7 @@ function ns.UI.CreateResearchPage(parent)
     if not (ns.Research and ns.Research.GetRecord) then return end
     local record = ns.Research:GetRecord(text)
     applyRecord(record)
+    self:_setLifecycleEnabled(record and record.itemID and record.itemID > 0)
   end
 
   function page:Refresh()

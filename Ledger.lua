@@ -46,19 +46,37 @@ local Ledger = {}
 ns.Ledger = Ledger
 
 -- Canonical kind enum exposed for adapters and UI filters.
+--
+-- Phase-1 kinds (Native + TSM + FlipQueue): sale, purchase, ah-cancel,
+-- ah-expire, ah-fee, vendor-sell, vendor-buy, mail-receive, mail-send,
+-- trade, repair, refund.
+--
+-- Phase-2 kinds (TLY-23, sourced primarily from Journalator): ah-deposit
+-- (post-time escrow paired with sale/expire/cancel at view time), taxi,
+-- trainer, quest-reward, loot, mission, trading-post, crafting-order-placed,
+-- crafting-order-fulfilled.
 Ledger.Kinds = {
-  Sale         = "sale",
-  Purchase     = "purchase",
-  AhCancel     = "ah-cancel",
-  AhExpire     = "ah-expire",
-  AhFee        = "ah-fee",
-  VendorSell   = "vendor-sell",
-  VendorBuy    = "vendor-buy",
-  MailReceive  = "mail-receive",
-  MailSend     = "mail-send",
-  Trade        = "trade",
-  Repair       = "repair",
-  Refund       = "refund",
+  Sale                    = "sale",
+  Purchase                = "purchase",
+  AhCancel                = "ah-cancel",
+  AhExpire                = "ah-expire",
+  AhFee                   = "ah-fee",
+  AhDeposit               = "ah-deposit",
+  VendorSell              = "vendor-sell",
+  VendorBuy               = "vendor-buy",
+  MailReceive             = "mail-receive",
+  MailSend                = "mail-send",
+  Trade                   = "trade",
+  Repair                  = "repair",
+  Refund                  = "refund",
+  Taxi                    = "taxi",
+  Trainer                 = "trainer",
+  QuestReward             = "quest-reward",
+  Loot                    = "loot",
+  Mission                 = "mission",
+  TradingPost             = "trading-post",
+  CraftingOrderPlaced     = "crafting-order-placed",
+  CraftingOrderFulfilled  = "crafting-order-fulfilled",
 }
 
 -- ============================================================================
@@ -175,15 +193,27 @@ function Ledger:Stats(filter)
 end
 
 -- Returns +1 for income kinds, -1 for expense kinds, 0 for neutral tracking.
+--
+-- Income (+1):  sale, vendor-sell, mail-receive, refund, quest-reward,
+--               loot, mission, crafting-order-fulfilled.
+-- Expense (-1): purchase, vendor-buy, mail-send, repair, ah-fee, taxi,
+--               trainer, trading-post, crafting-order-placed.
+-- Neutral (0):  ah-cancel, ah-expire, ah-deposit, trade.
+--   ah-deposit is paired with the eventual sale/expire/cancel at view time
+--   (Lifecycle module) — gross deposit + outcome together yield the realized
+--   loss/recovery. Counting deposit as a live expense would double-count
+--   when the sale completes and TSM/Native attribute the cut.
 function Ledger:KindSign(kind)
   if kind == "sale" or kind == "vendor-sell" or kind == "mail-receive"
-     or kind == "refund" then
+     or kind == "refund" or kind == "quest-reward" or kind == "loot"
+     or kind == "mission" or kind == "crafting-order-fulfilled" then
     return 1
   elseif kind == "purchase" or kind == "vendor-buy" or kind == "mail-send"
-         or kind == "repair" or kind == "ah-fee" then
+         or kind == "repair" or kind == "ah-fee" or kind == "taxi"
+         or kind == "trainer" or kind == "trading-post"
+         or kind == "crafting-order-placed" then
     return -1
   end
-  -- ah-cancel, ah-expire, trade, ... are neutral (informational only).
   return 0
 end
 
@@ -195,11 +225,17 @@ local sources = {}     -- name → { name, label, importFn, isAvailableFn }
 local sourceOrder = {}
 
 -- Register an adapter. opts:
---   label        — UI display name (default: name)
---   importFn     — function() that pulls from the source and calls
---                  Ledger:InsertMany. Returns (insertedCount, skippedCount).
---   isAvailable  — function() returning true if the source can be imported now
---                  (e.g., the underlying addon is loaded with data). Optional.
+--   label         — UI display name (default: name)
+--   importFn      — function() that pulls from the source and calls
+--                   Ledger:InsertMany. Returns (insertedCount, skippedCount).
+--                   Legacy synchronous path; called by ImportFromAllSources.
+--   getEntriesFn  — function() that returns (entries[], skippedAtParse).
+--                   Used by ImportFromAllSourcesChunked so the driver can
+--                   batch the insert phase with yields. Adapters that don't
+--                   provide this fall back to importFn (synchronous).
+--   isAvailable   — function() returning true if the source can be imported
+--                   now (e.g., the underlying addon is loaded with data).
+--                   Optional.
 function Ledger:RegisterSource(name, opts)
   if type(name) ~= "string" or name == "" then return end
   opts = opts or {}
@@ -210,6 +246,7 @@ function Ledger:RegisterSource(name, opts)
     name = name,
     label = opts.label or name,
     importFn = opts.importFn,
+    getEntriesFn = opts.getEntriesFn,
     isAvailableFn = opts.isAvailable,
   }
 end
@@ -223,9 +260,33 @@ end
 function Ledger:IsSourceAvailable(name)
   local s = sources[name]
   if not s then return false end
+  -- User-level opt-out (set by the setup wizard or Settings panel) wins
+  -- over runtime detection: even if TSM is loaded, a user who unchecked
+  -- it in the wizard expects no rows to flow in.
+  if TallyDB and TallyDB.disabledSources and TallyDB.disabledSources[name] then
+    return false
+  end
   if not s.isAvailableFn then return true end
   local ok, available = pcall(s.isAvailableFn)
   return ok and available or false
+end
+
+-- User-level enablement. The runtime availability check (sibling addon
+-- loaded?) stays separate; this is the user's preference.
+function Ledger:SetSourceEnabled(name, enabled)
+  TallyDB.disabledSources = TallyDB.disabledSources or {}
+  if enabled then
+    TallyDB.disabledSources[name] = nil
+  else
+    TallyDB.disabledSources[name] = true
+  end
+end
+
+function Ledger:IsSourceEnabled(name)
+  if TallyDB and TallyDB.disabledSources and TallyDB.disabledSources[name] then
+    return false
+  end
+  return true
 end
 
 -- Run a single source's import. Returns (inserted, skipped, err).
@@ -254,6 +315,291 @@ function Ledger:ImportFromAllSources()
     }
   end
   return results
+end
+
+-- ============================================================================
+-- Chunked import (TLY-25)
+-- ============================================================================
+--
+-- Yield-aware batch insert. Inserts at most opts.chunkSize entries per tick,
+-- waiting opts.delaySec between ticks via C_Timer.After. Callbacks fire after
+-- each chunk so the wizard's progress widget can update live. Drives via
+-- tail-call chain (no coroutine needed; the addon thread yields naturally
+-- between C_Timer.After invocations).
+--
+-- opts:
+--   chunkSize   default 500 — entries inserted per tick. Larger = faster
+--               wall-clock import; smaller = friendlier framerate.
+--   delaySec    default 0.05 — gap between ticks. 0.05s ≈ 3 frames at 60fps.
+--   onProgress  function(insertedSoFar, totalAttempted, skippedSoFar)
+--   onDone      function(inserted, skipped)
+function Ledger:InsertManyChunked(entries, opts)
+  opts = opts or {}
+  local chunkSize = opts.chunkSize or 500
+  local delaySec = opts.delaySec or 0.05
+
+  if type(entries) ~= "table" or #entries == 0 then
+    if opts.onDone then pcall(opts.onDone, 0, 0) end
+    return
+  end
+
+  local d = db()
+  local total = #entries
+  local idx = 0
+  local inserted = 0
+  local skipped = 0
+
+  local function step()
+    local stop = math.min(idx + chunkSize, total)
+    while idx < stop do
+      idx = idx + 1
+      local e = entries[idx]
+      if isValidEntry(e) and not d.byId[e.id] then
+        d.byId[e.id] = true
+        d.entries[#d.entries + 1] = e
+        inserted = inserted + 1
+      else
+        skipped = skipped + 1
+      end
+    end
+    if opts.onProgress then pcall(opts.onProgress, inserted, total, skipped) end
+    if idx < total and C_Timer and C_Timer.After then
+      C_Timer.After(delaySec, step)
+    else
+      if opts.onDone then pcall(opts.onDone, inserted, skipped) end
+    end
+  end
+
+  step()
+end
+
+-- Multi-source chunked driver. Walks registered sources in order, awaiting
+-- each source's parse + chunked insert before starting the next. Designed to
+-- be called from the setup wizard's onComplete; surfaces per-source progress
+-- to a UI/ProgressBar.lua widget via callbacks.
+--
+-- Sources that expose getEntriesFn use the chunked-insert path. Sources with
+-- only the legacy importFn (Native — event-driven, near-zero rows) run
+-- synchronously between chunked sources.
+--
+-- opts:
+--   chunkSize    forwarded to InsertManyChunked
+--   delaySec     forwarded to InsertManyChunked
+--   sourceDelay  default 0.5 — pause between sources so the input thread
+--                doesn't stay starved across an entire import.
+--   onSourceStart    function(name, label, parsedCount)
+--   onSourceProgress function(name, insertedSoFar, total, skippedSoFar)
+--   onSourceDone     function(name, inserted, skipped)
+--   onComplete       function(results) — results = list of per-source rows
+function Ledger:ImportFromAllSourcesChunked(opts)
+  opts = opts or {}
+  local sourceDelay = opts.sourceDelay or 0.5
+
+  local results = {}
+  local sourceIdx = 0
+
+  local function nextSource()
+    sourceIdx = sourceIdx + 1
+    if sourceIdx > #sourceOrder then
+      if opts.onComplete then pcall(opts.onComplete, results) end
+      return
+    end
+
+    local name = sourceOrder[sourceIdx]
+    local s = sources[name]
+    if not s then return nextSource() end
+    if s.isAvailableFn then
+      local ok, available = pcall(s.isAvailableFn)
+      if not ok or not available then
+        results[#results + 1] = { source = name, inserted = 0, skipped = 0, skippedSource = true }
+        return nextSource()
+      end
+    end
+
+    -- Prefer the chunkable getEntriesFn path. Falls back to importFn for
+    -- adapters that haven't been migrated (e.g., Native, where the import
+    -- is event-driven and produces ~0 rows per call anyway).
+    if s.getEntriesFn then
+      local ok, entries, parseSkipped = pcall(s.getEntriesFn)
+      if not ok then
+        results[#results + 1] = { source = name, inserted = 0, skipped = 0, error = tostring(entries) }
+        return nextSource()
+      end
+      entries = entries or {}
+      parseSkipped = parseSkipped or 0
+      if opts.onSourceStart then pcall(opts.onSourceStart, name, s.label, #entries) end
+
+      self:InsertManyChunked(entries, {
+        chunkSize = opts.chunkSize,
+        delaySec = opts.delaySec,
+        onProgress = function(inserted, total, skipped)
+          if opts.onSourceProgress then pcall(opts.onSourceProgress, name, inserted, total, skipped) end
+        end,
+        onDone = function(inserted, skipped)
+          results[#results + 1] = {
+            source = name,
+            inserted = inserted,
+            skipped = skipped + parseSkipped,
+          }
+          if opts.onSourceDone then pcall(opts.onSourceDone, name, inserted, skipped + parseSkipped) end
+          if C_Timer and C_Timer.After then
+            C_Timer.After(sourceDelay, nextSource)
+          else
+            nextSource()
+          end
+        end,
+      })
+    else
+      -- Legacy path: synchronous. Native lives here (0-N invoice rows from
+      -- the open inbox; cheap regardless).
+      if opts.onSourceStart then pcall(opts.onSourceStart, name, s.label, nil) end
+      local ok, inserted, skipped = pcall(s.importFn or function() return 0, 0 end)
+      if not ok then
+        results[#results + 1] = { source = name, inserted = 0, skipped = 0, error = tostring(inserted) }
+      else
+        results[#results + 1] = { source = name, inserted = inserted or 0, skipped = skipped or 0 }
+        if opts.onSourceDone then pcall(opts.onSourceDone, name, inserted or 0, skipped or 0) end
+      end
+      if C_Timer and C_Timer.After then
+        C_Timer.After(sourceDelay, nextSource)
+      else
+        nextSource()
+      end
+    end
+  end
+
+  nextSource()
+end
+
+-- ============================================================================
+-- Source comparison (TLY-27)
+-- ============================================================================
+--
+-- Aligns rows from two sources into one row-by-row diff view. Match tiers,
+-- in fall-through order:
+--   strict — same (charKey, itemID, count, copper) within ±60s
+--   loose  — same (charKey, itemID, count) within ±5min (ignores copper)
+--   fuzzy  — same (charKey, itemID) within ±1h (ignores count + copper)
+--
+-- Returns a list of pairs:
+--   { a = entryA|nil, b = entryB|nil, tier = "strict"|"loose"|"fuzzy"|"unique" }
+--
+-- Rows present in only one source render with the other side nil and
+-- tier = "unique". Same source appearing in both A and B (sourceA ==
+-- sourceB) is a no-op self-pair — we early-return empty.
+
+local STRICT_WINDOW = 60
+local LOOSE_WINDOW = 5 * 60
+local FUZZY_WINDOW = 60 * 60
+
+-- Index a row list for O(1) match lookups. Keyed by (charKey, itemID); each
+-- bucket holds the chronologically-ordered rows.
+local function indexByCharItem(rows)
+  local idx = {}
+  for _, e in ipairs(rows) do
+    if e.charKey and e.itemID then
+      local key = e.charKey .. "|" .. tostring(e.itemID)
+      idx[key] = idx[key] or {}
+      table.insert(idx[key], e)
+    end
+  end
+  for _, list in pairs(idx) do
+    table.sort(list, function(a, b) return (a.atTime or 0) < (b.atTime or 0) end)
+  end
+  return idx
+end
+
+-- Find a match for entry `a` in `bucket` (B-side rows for the same charKey
+-- + itemID). Returns (entry, tier) or nil. Skips entries in `consumed`.
+local function findMatch(a, bucket, consumed)
+  if not bucket then return nil end
+  local aT = a.atTime or 0
+  local aCount = a.count or 1
+  local aCopper = a.copper or 0
+
+  -- Pass 1: strict.
+  for _, b in ipairs(bucket) do
+    if not consumed[b]
+       and math.abs((b.atTime or 0) - aT) <= STRICT_WINDOW
+       and (b.count or 1) == aCount
+       and (b.copper or 0) == aCopper then
+      return b, "strict"
+    end
+  end
+  -- Pass 2: loose.
+  for _, b in ipairs(bucket) do
+    if not consumed[b]
+       and math.abs((b.atTime or 0) - aT) <= LOOSE_WINDOW
+       and (b.count or 1) == aCount then
+      return b, "loose"
+    end
+  end
+  -- Pass 3: fuzzy.
+  for _, b in ipairs(bucket) do
+    if not consumed[b]
+       and math.abs((b.atTime or 0) - aT) <= FUZZY_WINDOW then
+      return b, "fuzzy"
+    end
+  end
+  return nil
+end
+
+function Ledger:Compare(sourceA, sourceB, filter)
+  if not sourceA or not sourceB then return {}, {} end
+  if sourceA == sourceB then return {}, {} end
+
+  filter = filter or {}
+  local rowsA = self:Query(setmetatable({ source = sourceA }, { __index = filter }))
+  local rowsB = self:Query(setmetatable({ source = sourceB }, { __index = filter }))
+
+  local indexB = indexByCharItem(rowsB)
+  local consumed = {}
+  local pairs_out = {}
+
+  -- Walk A in chronological order.
+  table.sort(rowsA, function(a, b) return (a.atTime or 0) < (b.atTime or 0) end)
+
+  for _, a in ipairs(rowsA) do
+    local key = (a.charKey or "?") .. "|" .. tostring(a.itemID or 0)
+    local bucket = indexB[key]
+    local match, tier = findMatch(a, bucket, consumed)
+    if match then
+      consumed[match] = true
+      pairs_out[#pairs_out + 1] = { a = a, b = match, tier = tier }
+    else
+      pairs_out[#pairs_out + 1] = { a = a, b = nil, tier = "unique" }
+    end
+  end
+
+  -- B-side leftovers: rows that nothing in A matched.
+  for _, b in ipairs(rowsB) do
+    if not consumed[b] then
+      pairs_out[#pairs_out + 1] = { a = nil, b = b, tier = "unique" }
+    end
+  end
+
+  -- Summary stats.
+  local stats = {
+    aCount = #rowsA, bCount = #rowsB,
+    strict = 0, loose = 0, fuzzy = 0,
+    aOnly = 0, bOnly = 0,
+    aCopper = 0, bCopper = 0,
+    deltaCopper = 0,
+  }
+  for _, e in ipairs(rowsA) do stats.aCopper = stats.aCopper + (e.copper or 0) end
+  for _, e in ipairs(rowsB) do stats.bCopper = stats.bCopper + (e.copper or 0) end
+  stats.deltaCopper = stats.aCopper - stats.bCopper
+  for _, p in ipairs(pairs_out) do
+    if p.tier == "strict" then stats.strict = stats.strict + 1
+    elseif p.tier == "loose" then stats.loose = stats.loose + 1
+    elseif p.tier == "fuzzy" then stats.fuzzy = stats.fuzzy + 1
+    elseif p.tier == "unique" then
+      if p.a and not p.b then stats.aOnly = stats.aOnly + 1
+      elseif p.b and not p.a then stats.bOnly = stats.bOnly + 1 end
+    end
+  end
+
+  return pairs_out, stats
 end
 
 -- ============================================================================

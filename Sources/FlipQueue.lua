@@ -172,14 +172,22 @@ end
 -- Import
 -- ============================================================================
 
-local function importAll()
-  if not isAvailable() then return 0, 0 end
+-- Parse phase only — returns entries that would be inserted. Used by the
+-- chunked driver (Ledger:ImportFromAllSourcesChunked) for the wizard
+-- backfill flow.
+local function getEntries()
+  if not isAvailable() then return {}, 0 end
   local entries = {}
   for _, fqEntry in ipairs(_G.FlipQueueDB.log) do
     for _, ledgerEntry in ipairs(mapEntry(fqEntry)) do
       entries[#entries + 1] = ledgerEntry
     end
   end
+  return entries, 0
+end
+
+local function importAll()
+  local entries = getEntries()
   return ns.Ledger:InsertMany(entries)
 end
 
@@ -192,6 +200,7 @@ function FQ:Register()
   ns.Ledger:RegisterSource(SOURCE_NAME, {
     label = "FlipQueue",
     importFn = importAll,
+    getEntriesFn = getEntries,
     isAvailable = isAvailable,
   })
 end
@@ -199,3 +208,4 @@ end
 -- Exposed for testing / direct invocation.
 FQ.MapEntry = mapEntry
 FQ.IsAvailable = isAvailable
+FQ.GetEntries = getEntries
