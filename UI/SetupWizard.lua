@@ -751,17 +751,11 @@ end
 -- PLAYER_LOGIN handler shortly after Sources are registered.
 function ns.UI.ShouldShowSetupWizard()
   TallyDB = TallyDB or {}
+  -- Setup-complete (either user finished it, or grandfather flipped it
+  -- on for a returning upgrader). Either way, no auto-open.
   if TallyDB.setup and TallyDB.setup.completed then return false end
-  if TallyDB.inventoryRollup and TallyDB.inventoryRollup.lastFullScan then
-    -- User has data already — they're probably an upgrader. Don't surprise
-    -- them with a wizard. They can still re-run from Settings.
-    return false
-  end
-  if not (ns.Ledger and ns.Ledger.GetSources) then return false end
-  for _, s in ipairs(ns.Ledger:GetSources()) do
-    if s.name ~= "tally-native" and ns.Ledger:IsSourceAvailable(s.name) then
-      return true
-    end
-  end
-  return false
+  -- Fresh install or post-reset: both have an empty ledger and no
+  -- setup-complete flag. Auto-open the wizard so the user lands in the
+  -- onboarding flow without having to find /tally setup.
+  return true
 end

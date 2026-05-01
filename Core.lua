@@ -69,11 +69,18 @@ function ns:PLAYER_LOGIN()
     if ns.Sources.TSM         then ns.Sources.TSM:Register()         end
     if ns.Sources.Journalator then ns.Sources.Journalator:Register() end
   end
-  -- Pre-wizard upgrader grandfather: anyone who has inventory data already
+  -- Pre-wizard upgrader grandfather: anyone who already has ledger entries
   -- (i.e., an existing Tally user installing this build) gets the setup
   -- flag flipped true so their imports keep flowing. Only fresh installs
   -- and post-`/tally reset` users go through the wizard gate.
-  if TallyDB.inventoryRollup and TallyDB.inventoryRollup.lastFullScan
+  --
+  -- The signal here is deliberately the ledger row count, not the
+  -- inventory rollup. Inventory:Rebuild repopulates rollup the moment
+  -- /tally reset finishes, so keying off that incorrectly identified a
+  -- just-reset user on their next login as a returning upgrader and
+  -- silently re-opened the gate. Ledger rows survive nothing except a
+  -- legitimate prior Tally session.
+  if TallyDB.ledger and TallyDB.ledger.entries and #TallyDB.ledger.entries > 0
      and not (TallyDB.setup and TallyDB.setup.completed) then
     TallyDB.setup = TallyDB.setup or {}
     TallyDB.setup.completed = true
