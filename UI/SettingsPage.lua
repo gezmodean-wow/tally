@@ -129,7 +129,14 @@ local function makeNumericField(parent, opts)
   return row, load
 end
 
+-- Themed button via Cogworks. The library returns a button with hover/press
+-- visuals matching the rest of the suite chrome; falls back to WoW's
+-- UIPanelButtonTemplate when Cogworks isn't loaded.
 local function makeButton(parent, label, w, onClick)
+  local cw = getCogworks()
+  if cw and cw.CreateButton then
+    return cw:CreateButton(parent, label, w or 120, 22, onClick)
+  end
   local btn = CreateFrame("Button", nil, parent, "UIPanelButtonTemplate")
   btn:SetSize(w or 120, 22)
   btn:SetText(label)

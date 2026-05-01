@@ -72,16 +72,16 @@ local function db()
   return TallyDB.ledger
 end
 
-local function sortEntries()
-  table.sort(db().entries, function(a, b)
-    if a.atTime ~= b.atTime then return a.atTime < b.atTime end
-    return (a.id or "") < (b.id or "")
-  end)
-end
-
 -- ============================================================================
 -- Insert
 -- ============================================================================
+--
+-- Performance note (TLY-21): entries are append-only. We deliberately do NOT
+-- maintain a sorted invariant on the storage list — sorting on every insert
+-- was O(N log N) per row, which made bulk imports of TSM Accounting CSVs
+-- (often tens of thousands of rows) burn seconds at PLAYER_LOGIN. Callers
+-- that care about chronological order sort the result of Query(); the
+-- ScrollTable UI sorts at render time anyway.
 
 local function isValidEntry(e)
   if type(e) ~= "table" then return false end
@@ -101,12 +101,10 @@ function Ledger:Insert(entry)
   if d.byId[entry.id] then return false, "duplicate" end
   d.byId[entry.id] = true
   d.entries[#d.entries + 1] = entry
-  -- Single inserts re-sort; for bulk imports, prefer InsertMany below.
-  sortEntries()
   return true, entry
 end
 
--- Batch insert. Sorts once at the end. Returns (insertedCount, skippedCount).
+-- Batch insert. Returns (insertedCount, skippedCount).
 function Ledger:InsertMany(entries)
   if type(entries) ~= "table" then return 0, 0 end
   local d = db()
@@ -120,7 +118,6 @@ function Ledger:InsertMany(entries)
       skipped = skipped + 1
     end
   end
-  if inserted > 0 then sortEntries() end
   return inserted, skipped
 end
 

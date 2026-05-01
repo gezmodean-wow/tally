@@ -84,15 +84,21 @@ When the user mentions a bug, regression, feature idea, or improvement during no
 
 Commit messages referencing a tracked issue should use `<type>(<ID>): <subject>` — e.g. `fix(TLY-004): guard LDB registration against missing minimap lib`.
 
-### Player-facing close summaries
+### Player-facing standards (canonical source)
 
-When closing a player-visible issue, add a `## Player summary` section to the issue body before clicking close. One short sentence, plain language — what changed for the player, not what code changed.
+Conventions for `## Player summary` (issue body), `## Player update` (issue comments), and player-facing release copy live in the SCRIBE repo. This file is the single source of truth — do not restate the rules here.
 
-Scribe pulls this text into:
-- The close announcement posted into the linked Discord thread.
-- The bulleted "What changed" list in the next release announcement.
+**Required:** `WebFetch` the canonical doc before any of the following:
 
-If you forgot before closing, you can put a fenced `release-notes` code block in the closing comment instead — same convention, first paragraph wins. Issues with no summary in either place render as `⚠️ no summary written` in the staff release draft; fix by editing the issue body and re-running `/release-redraft`.
+- Closing a player-visible issue
+- Writing a GitHub comment that wants a player response
+- Tagging a release or writing a `CHANGELOG.md` entry
+
+URL: https://raw.githubusercontent.com/gezmodean-wow/scribe/main/docs/PLAYER_FACING_CONVENTIONS.md
+
+The doc has a `## Changelog` section at the top. Compare its most recent entry code to the line below. If newer entries exist, prefix your first response with `Standards updated:` plus a one-line summary of each new entry, then update the code below in this file.
+
+**Last acknowledged:** 2026-04-30e
 
 ## Cross-cog feature requests
 

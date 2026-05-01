@@ -20,7 +20,14 @@ local Cogworks
 if LibStub then
   Cogworks = LibStub("Cogworks-1.0", true)
   if Cogworks and Cogworks.RegisterAddon then
-    Cogworks:RegisterAddon(addonName, ns)
+    -- Register with the canonical capitalized name so the suite roster /
+    -- gear assembly recognises Tally as installed. The folder name
+    -- (`addonName` here) is "tally" lowercase and would miss the
+    -- "Tally" entry in `lib.SuiteRoster`.
+    Cogworks:RegisterAddon("Tally", {
+      prefix  = "|cff8b5cf6[Tally]|r ",
+      website = "https://github.com/gezmodean-wow/tally",
+    })
   end
 end
 ns.Cogworks = Cogworks
@@ -45,6 +52,12 @@ frame:SetScript("OnEvent", function(_, event, ...)
 end)
 
 function ns:PLAYER_LOGIN()
+  -- TLY-21: force a one-shot history prune on login so users coming from the
+  -- pre-fix legacy defaults (365d retention) immediately reclaim memory once
+  -- the migration in History.db() trims their config to 90d.
+  if ns.History and ns.History.Prune then
+    pcall(ns.History.Prune, ns.History)
+  end
   if ns.Inventory and ns.Inventory.RegisterSyndicatorCallbacks then
     ns.Inventory:RegisterSyndicatorCallbacks()
   end
@@ -55,8 +68,12 @@ function ns:PLAYER_LOGIN()
     if ns.Sources.FlipQueue then ns.Sources.FlipQueue:Register() end
     if ns.Sources.TSM       then ns.Sources.TSM:Register()       end
   end
-  if ns.Ledger and ns.Ledger.ImportFromAllSources then
-    ns.Ledger:ImportFromAllSources()
+  -- TLY-21: defer the initial sibling-source backfill 5s after login so
+  -- character-select / first-zone-load isn't fighting a multi-MB TSM CSV
+  -- parse for the player's input thread. Native source is event-driven
+  -- and doesn't need this timer.
+  if ns.Ledger and ns.Ledger.ImportFromAllSources and C_Timer and C_Timer.After then
+    C_Timer.After(5, function() ns.Ledger:ImportFromAllSources() end)
   end
   -- Register UI pages with the main frame. Page bodies are lazy-created on
   -- first ShowPage so login cost is zero for users who never open the UI.
@@ -76,25 +93,33 @@ function ns:PLAYER_LOGIN()
   end
   -- Invalidate research cache on inventory updates so consumers always see
   -- fresh ownership/valuation. Cogworks event bus is the broadcast channel.
+  --
+  -- Performance note (TLY-21): InventoryChanged fires for every Syndicator
+  -- cache event — every bag slot change, every auction posted, every mail
+  -- received. We deliberately do NOT re-import sibling-addon ledgers here:
+  -- TSM CSVs and FlipQueue logs are megabytes of data, parsing them on every
+  -- bag-slot change burns frames and grows the ledger unboundedly. Source
+  -- adapters re-run only at PLAYER_LOGIN, on user-pressed "Import now" in
+  -- the Settings panel, or on a long-period timer.
   if Cogworks and Cogworks.RegisterCallback and Cogworks.Events then
     Cogworks.RegisterCallback(addonName, Cogworks.Events.InventoryChanged, function()
       if ns.Research then ns.Research:Invalidate() end
-      -- First-of-session opportunity to take a price snapshot once Syndicator
-      -- + TSM are loaded. History:MaybeSnapshot is gated on min-interval, so
-      -- subsequent inventory churn won't spam snapshots.
+      -- History:MaybeSnapshot is gated on min-interval (default 6h), so
+      -- this is cheap unless a snapshot is genuinely due.
       if ns.History then ns.History:MaybeSnapshot() end
-      -- Re-import from registered sources. Dedupe by entry id keeps this
-      -- O(N) on the source's data without producing duplicates, so picking
-      -- up new FlipQueue / TSM activity mid-session is essentially free.
-      if ns.Ledger and ns.Ledger.ImportFromAllSources then
-        ns.Ledger:ImportFromAllSources()
-      end
       -- Refresh open UI so live values stay current.
       if ns.UI and ns.UI.MainFrame and ns.UI.MainFrame:IsShown() then
-        local active = ns.UI.MainFrame:GetActivePage()
-        if active then ns.UI.MainFrame:ShowPage(active) end
+        ns.UI.MainFrame:RefreshActivePage()
       end
     end)
+  end
+
+  -- Periodic ledger backfill from sibling-addon adapters. 5-minute timer is
+  -- well below the cadence at which TSM Accounting / FlipQueue write new
+  -- rows, while staying far away from the per-bag-event hot path. Native
+  -- source is event-driven (MAIL_INBOX_UPDATE) so it never relies on this.
+  if ns.Ledger and ns.Ledger.ImportFromAllSources and C_Timer and C_Timer.NewTicker then
+    C_Timer.NewTicker(300, function() ns.Ledger:ImportFromAllSources() end)
   end
 end
 

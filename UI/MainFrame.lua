@@ -1,9 +1,8 @@
 -- Tally — UI/MainFrame.lua
 --
 -- Tally's top-level frame. Singleton, lazy-created on first Show. Title bar
--- with close button, body region for the active page. Pages register
--- themselves via ns.UI.MainFrame:RegisterPage(name, createFn). The first
--- registered page is the default; future passes will add a tab strip.
+-- with close button, then a Cogworks tab panel (lazy-builds each page on
+-- first activation).
 --
 -- Public surface:
 --   ns.UI.MainFrame:Get()           — singleton, creates on first call
@@ -12,6 +11,13 @@
 --   ns.UI.MainFrame:Toggle()
 --   ns.UI.MainFrame:RegisterPage(name, createFn)  — createFn(parent) -> page Frame
 --   ns.UI.MainFrame:ShowPage(name)
+--   ns.UI.MainFrame:GetPage(name)
+--   ns.UI.MainFrame:GetActivePage()
+--
+-- Pages register at PLAYER_LOGIN; the tab panel is built on first :Show()
+-- using the pages registered up to that point. Late-arriving pages (after
+-- the panel is built) get a warning and are dropped — fix by registering
+-- earlier or by filing a Cogworks issue for incremental tab addition.
 
 local addonName, ns = ...
 ns.UI = ns.UI or {}
@@ -37,6 +43,7 @@ local frame -- singleton
 local pages = {}        -- { [name] = { create = fn, instance = frame|nil } }
 local pageOrder = {}    -- registration order
 local activePage
+local tabPanel          -- cw:CreateTabPanel instance, lazy-built on first :Show()
 
 local DEFAULT_WIDTH = 720
 local DEFAULT_HEIGHT = 460
@@ -122,17 +129,10 @@ local function build()
   close:SetPoint("RIGHT", titleBar, "RIGHT", 4, 0)
   close:SetScript("OnClick", function() frame:Hide() end)
 
-  -- Tab strip — horizontal row of buttons under the title bar, one per
-  -- registered page. Layout is rebuilt on RegisterPage / ShowPage.
-  local tabStrip = CreateFrame("Frame", nil, frame)
-  tabStrip:SetPoint("TOPLEFT", titleBar, "BOTTOMLEFT", 8, -6)
-  tabStrip:SetPoint("TOPRIGHT", titleBar, "BOTTOMRIGHT", -8, -6)
-  tabStrip:SetHeight(24)
-  frame.tabStrip = tabStrip
-
-  -- Body — hosts the active page.
+  -- Body — fills the area below the title bar. The Cogworks tab panel
+  -- lives inside this body once :Show() is called and pages are known.
   local body = CreateFrame("Frame", nil, frame)
-  body:SetPoint("TOPLEFT", tabStrip, "BOTTOMLEFT", -8, -4)
+  body:SetPoint("TOPLEFT", titleBar, "BOTTOMLEFT", 0, -2)
   body:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", -1, 1)
   frame.body = body
 
@@ -142,18 +142,84 @@ local function build()
   return frame
 end
 
+-- ============================================================================
+-- Tab panel (Cogworks primitive)
+-- ============================================================================
+-- Builds the tab panel from the currently registered pages. Each tab's
+-- `build` callback creates the page lazily on first activation and stores
+-- the resulting frame back into pages[name].instance so subsequent
+-- ShowPage calls can find it for Refresh.
+
+local function buildTabPanel()
+  if tabPanel then return tabPanel end
+  if #pageOrder == 0 then return nil end
+  build()
+
+  local cw = getCogworks()
+  if not (cw and cw.CreateTabPanel) then
+    -- Cogworks unavailable — render a stub message so the user knows what
+    -- went wrong rather than seeing an empty body.
+    local fs = frame.body:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    fs:SetPoint("CENTER")
+    fs:SetText("Tally requires Cogworks-1.0 with CreateTabPanel.")
+    return nil
+  end
+
+  local tabs = {}
+  for _, name in ipairs(pageOrder) do
+    local entry = pages[name]
+    tabs[#tabs + 1] = {
+      key   = name,
+      label = name,
+      build = function(content)
+        if entry.instance then return entry.instance end
+        local page = entry.create(content)
+        if not page then return nil end
+        page:ClearAllPoints()
+        page:SetPoint("TOPLEFT",     content, "TOPLEFT",     8, -8)
+        page:SetPoint("BOTTOMRIGHT", content, "BOTTOMRIGHT", -8, 8)
+        entry.instance = page
+        return page
+      end,
+    }
+  end
+
+  -- Initial tab = saved last tab if it's still registered, else first.
+  local saved = uiDB().lastTab
+  local initial = (saved and pages[saved]) and saved or pageOrder[1]
+
+  tabPanel = cw:CreateTabPanel(frame.body, {
+    tabs        = tabs,
+    initialTab  = initial,
+    tabHeight   = 26,
+    onTabChange = function(key)
+      activePage = key
+      uiDB().lastTab = key
+      if frame.subtitle then frame.subtitle:SetText("— " .. key) end
+      local entry = pages[key]
+      if entry and entry.instance and entry.instance.Refresh then
+        entry.instance:Refresh()
+      end
+    end,
+  })
+  tabPanel:SetPoint("TOPLEFT",     frame.body, "TOPLEFT",     8, -2)
+  tabPanel:SetPoint("BOTTOMRIGHT", frame.body, "BOTTOMRIGHT", -8, 2)
+
+  return tabPanel
+end
+
+-- ============================================================================
+-- Public API
+-- ============================================================================
+
 function MainFrame:Get()
   return build()
 end
 
 function MainFrame:Show()
-  build():Show()
-  -- Restore the last-active tab, falling back to the first registered.
-  if not activePage then
-    local saved = uiDB().lastTab
-    local target = (saved and pages[saved]) and saved or pageOrder[1]
-    if target then self:ShowPage(target) end
-  end
+  build()
+  buildTabPanel()
+  frame:Show()
 end
 
 function MainFrame:Hide()
@@ -172,76 +238,19 @@ function MainFrame:GetActivePage()
   return activePage
 end
 
-local tabButtons = {}
-
-local function makeTabButton(parent)
-  local btn = CreateFrame("Button", nil, parent, "BackdropTemplate")
-  btn:SetSize(96, 22)
-  btn:SetBackdrop({
-    bgFile = "Interface\\Buttons\\WHITE8x8",
-    edgeFile = "Interface\\Buttons\\WHITE8x8",
-    edgeSize = 1,
-  })
-  btn:SetBackdropColor(themeColor("bgLight", { 0.12, 0.12, 0.16, 0.8 }))
-  btn:SetBackdropBorderColor(themeColor("border", { 0.30, 0.30, 0.40, 1 }))
-
-  local text = btn:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-  text:SetPoint("CENTER")
-  text:SetTextColor(themeColor("text", { 0.9, 0.9, 0.92, 1 }))
-  btn.text = text
-
-  btn:SetScript("OnEnter", function(self)
-    if not self.selected then
-      self:SetBackdropColor(themeColor("rowHover", { 1, 1, 1, 0.08 }))
-    end
-  end)
-  btn:SetScript("OnLeave", function(self)
-    if not self.selected then
-      self:SetBackdropColor(themeColor("bgLight", { 0.12, 0.12, 0.16, 0.8 }))
-    end
-  end)
-
-  function btn:SetSelected(on)
-    self.selected = on
-    if on then
-      self:SetBackdropColor(themeColor("brass", { 0.83, 0.63, 0.09, 0.7 }))
-      self.text:SetTextColor(1, 1, 1, 1)
-    else
-      self:SetBackdropColor(themeColor("bgLight", { 0.12, 0.12, 0.16, 0.8 }))
-      self.text:SetTextColor(themeColor("text", { 0.9, 0.9, 0.92, 1 }))
-    end
-  end
-
-  return btn
-end
-
-local function rebuildTabStrip()
-  if not frame or not frame.tabStrip then return end
-  -- Hide existing tabs we won't reuse.
-  for i = #pageOrder + 1, #tabButtons do
-    tabButtons[i]:Hide()
-  end
-  -- Create/update one tab per page.
-  for i, name in ipairs(pageOrder) do
-    local btn = tabButtons[i] or makeTabButton(frame.tabStrip)
-    tabButtons[i] = btn
-    btn.pageName = name
-    btn.text:SetText(name)
-    btn:ClearAllPoints()
-    btn:SetPoint("LEFT", frame.tabStrip, "LEFT", (i - 1) * 100, 0)
-    btn:SetScript("OnClick", function(self)
-      MainFrame:ShowPage(self.pageName)
-    end)
-    btn:SetSelected(name == activePage)
-    btn:Show()
-  end
-end
-
 function MainFrame:RegisterPage(name, createFn)
   if pages[name] then return end
+  if tabPanel then
+    -- Tab panel already constructed; CreateTabPanel doesn't currently
+    -- support post-construction tab addition. Surface a warning so the
+    -- developer notices and shifts registration earlier (or files a
+    -- Cogworks issue for incremental tab support).
+    print(string.format("|cffff8000Tally:|r late page registration ignored — '%s' "
+      .. "registered after main frame was first shown.", name))
+    return
+  end
   pages[name] = { create = createFn, instance = nil }
   pageOrder[#pageOrder + 1] = name
-  rebuildTabStrip()
 end
 
 function MainFrame:GetPage(name)
@@ -251,30 +260,36 @@ end
 
 function MainFrame:ShowPage(name)
   build()
-  local entry = pages[name]
-  if not entry then return end
-
-  -- Hide previous.
-  for _, other in pairs(pages) do
-    if other.instance and other ~= entry then other.instance:Hide() end
+  buildTabPanel()
+  if not pages[name] then return end
+  if tabPanel and tabPanel.SetActiveTab then
+    -- Showing the frame and setting the tab can race when called in either
+    -- order; doing the show first ensures CreateTabPanel's build callback
+    -- has a visible host (some pages measure parent width on creation).
+    if not frame:IsShown() then frame:Show() end
+    -- CreateTabPanel:SetActiveTab is a no-op when the requested tab is
+    -- already active. If the caller asked for the active page (a common
+    -- case after an inventory-changed refresh fires while the user is on
+    -- that page already), still drive the page's :Refresh() so live data
+    -- updates surface.
+    if activePage == name then
+      local entry = pages[name]
+      if entry and entry.instance and entry.instance.Refresh then
+        entry.instance:Refresh()
+      end
+    else
+      tabPanel:SetActiveTab(name)
+    end
   end
+end
 
-  -- Lazy-create the page.
-  if not entry.instance then
-    local page = entry.create(frame.body)
-    if not page then return end
-    page:ClearAllPoints()
-    page:SetPoint("TOPLEFT", frame.body, "TOPLEFT", 8, -8)
-    page:SetPoint("BOTTOMRIGHT", frame.body, "BOTTOMRIGHT", -8, 8)
-    entry.instance = page
+-- Fire :Refresh on the currently active page if it has one. Used by
+-- inventory / ledger callbacks that want the open page to re-pull data
+-- without the user clicking around.
+function MainFrame:RefreshActivePage()
+  if not activePage then return end
+  local entry = pages[activePage]
+  if entry and entry.instance and entry.instance.Refresh then
+    entry.instance:Refresh()
   end
-
-  entry.instance:Show()
-  activePage = name
-  uiDB().lastTab = name
-  if frame.subtitle then frame.subtitle:SetText("— " .. name) end
-  rebuildTabStrip()
-
-  -- Pages may opt-in to OnShow refresh by exposing a Refresh method.
-  if entry.instance.Refresh then entry.instance:Refresh() end
 end

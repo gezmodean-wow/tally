@@ -224,104 +224,81 @@ function ns.UI.CreateResearchPage(parent)
   invPanel.title:SetText("INVENTORY HISTORY")
   invPanel.spark:SetYFormatter(function(n) return tostring(math.floor(n)) end)
 
-  -- Two scroll panels side by side: ownership on the left, per-realm
-  -- P&L breakdown on the right. Each gets ~half the page width, with the
-  -- right column slightly wider to accommodate the realm breakdown columns.
+  -- Two scroll tables side by side: ownership on the left, per-realm
+  -- P&L breakdown on the right. Both powered by Cogworks' CreateScrollTable
+  -- so columns are sortable + drag-resizable.
+
+  local cw = getCogworks()
+  local hasScrollTable = cw and cw.CreateScrollTable
 
   local ownerHdr = page:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
   ownerHdr:SetPoint("TOPLEFT", sparkRow, "BOTTOMLEFT", 0, -10)
   ownerHdr:SetText("WHERE IT LIVES")
   ownerHdr:SetTextColor(themeColor("brass", { 0.83, 0.63, 0.09, 1 }))
 
-  local ownerScroll = CreateFrame("ScrollFrame", nil, page, "UIPanelScrollFrameTemplate")
-  ownerScroll:SetPoint("TOPLEFT", ownerHdr, "BOTTOMLEFT", 0, -4)
-  ownerScroll:SetWidth(300)
-  ownerScroll:SetPoint("BOTTOM", page, "BOTTOM", 0, 56)
-  local ownerContent = CreateFrame("Frame", nil, ownerScroll)
-  ownerContent:SetSize(280, 1)
-  ownerScroll:SetScrollChild(ownerContent)
+  local ownerHost = CreateFrame("Frame", nil, page)
+  ownerHost:SetPoint("TOPLEFT", ownerHdr, "BOTTOMLEFT", 0, -4)
+  ownerHost:SetWidth(300)
+  ownerHost:SetPoint("BOTTOM", page, "BOTTOM", 0, 56)
 
   local realmHdr = page:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
-  realmHdr:SetPoint("TOPLEFT", ownerScroll, "TOPRIGHT", 24, 14)
+  realmHdr:SetPoint("TOPLEFT", ownerHost, "TOPRIGHT", 24, 14)
   realmHdr:SetText("PER REALM (P&L)")
   realmHdr:SetTextColor(themeColor("brass", { 0.83, 0.63, 0.09, 1 }))
 
-  local realmScroll = CreateFrame("ScrollFrame", nil, page, "UIPanelScrollFrameTemplate")
-  realmScroll:SetPoint("TOPLEFT", realmHdr, "BOTTOMLEFT", 0, -4)
-  realmScroll:SetPoint("BOTTOMRIGHT", page, "BOTTOMRIGHT", -22, 56)
-  local realmContent = CreateFrame("Frame", nil, realmScroll)
-  realmContent:SetSize(320, 1)
-  realmScroll:SetScrollChild(realmContent)
+  local realmHost = CreateFrame("Frame", nil, page)
+  realmHost:SetPoint("TOPLEFT", realmHdr, "BOTTOMLEFT", 0, -4)
+  realmHost:SetPoint("BOTTOMRIGHT", page, "BOTTOMRIGHT", 0, 56)
 
-  -- Column headers for the realm table (rendered as a fixed first row).
-  local realmHeaderRow = CreateFrame("Frame", nil, realmContent)
-  realmHeaderRow:SetPoint("TOPLEFT", realmContent, "TOPLEFT", 0, 0)
-  realmHeaderRow:SetPoint("RIGHT", realmContent, "RIGHT", 0, 0)
-  realmHeaderRow:SetHeight(14)
-  local function makeRealmHdrCol(parent, x, w, text)
-    local fs = parent:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
-    fs:SetPoint("LEFT", parent, "LEFT", x, 0)
-    fs:SetWidth(w); fs:SetJustifyH(x == 0 and "LEFT" or "RIGHT")
-    fs:SetText(text)
-    fs:SetTextColor(themeColor("textDim", { 0.6, 0.6, 0.6, 1 }))
-  end
-  --   Realm 0..120 | Sold 120..150 | Bought 150..180 | Net 180..end
-  makeRealmHdrCol(realmHeaderRow, 0,   120, "REALM")
-  makeRealmHdrCol(realmHeaderRow, 120, 50,  "SOLD")
-  makeRealmHdrCol(realmHeaderRow, 170, 60,  "BOUGHT")
-  local netHdr = realmHeaderRow:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
-  netHdr:SetPoint("RIGHT", realmHeaderRow, "RIGHT", -2, 0)
-  netHdr:SetText("NET")
-  netHdr:SetTextColor(themeColor("textDim", { 0.6, 0.6, 0.6, 1 }))
-
-  local realmRows = {}
-  local function getRealmRow(i)
-    local r = realmRows[i]
-    if not r then
-      r = CreateFrame("Frame", nil, realmContent)
-      r:SetHeight(16)
-      r:SetPoint("LEFT", realmContent, "LEFT", 0, 0)
-      r:SetPoint("RIGHT", realmContent, "RIGHT", 0, 0)
-      r.realm = r:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-      r.realm:SetPoint("LEFT", r, "LEFT", 0, 0)
-      r.realm:SetWidth(120); r.realm:SetJustifyH("LEFT")
-      r.sold = r:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-      r.sold:SetPoint("LEFT", r, "LEFT", 120, 0)
-      r.sold:SetWidth(50); r.sold:SetJustifyH("RIGHT")
-      r.bought = r:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-      r.bought:SetPoint("LEFT", r, "LEFT", 170, 0)
-      r.bought:SetWidth(60); r.bought:SetJustifyH("RIGHT")
-      r.net = r:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-      r.net:SetPoint("RIGHT", r, "RIGHT", -2, 0)
-      r.net:SetJustifyH("RIGHT")
-      realmRows[i] = r
+  -- Per-realm net-profit cell: signed gold with color based on sign.
+  local function formatRealmNet(v)
+    if not v or v == 0 then
+      return "|cff999999—|r"
+    elseif v > 0 then
+      return "|cff4cd64c+" .. formatGoldShort(v) .. "|r"
+    else
+      return "|cffff6666-" .. formatGoldShort(-v) .. "|r"
     end
-    return r
   end
 
-  local ownerRows = {}
-  local function getOwnerRow(i)
-    local row = ownerRows[i]
-    if not row then
-      row = CreateFrame("Frame", nil, ownerContent)
-      row:SetHeight(18)
-      row:SetPoint("LEFT", ownerContent, "LEFT", 0, 0)
-      row:SetPoint("RIGHT", ownerContent, "RIGHT", 0, 0)
-      row.charKey = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-      row.charKey:SetPoint("LEFT", row, "LEFT", 0, 0)
-      row.charKey:SetWidth(180)
-      row.charKey:SetJustifyH("LEFT")
-      row.qty = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-      row.qty:SetPoint("LEFT", row.charKey, "RIGHT", 0, 0)
-      row.qty:SetWidth(80)
-      row.qty:SetJustifyH("RIGHT")
-      row.locs = row:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
-      row.locs:SetPoint("LEFT", row.qty, "RIGHT", 12, 0)
-      row.locs:SetPoint("RIGHT", row, "RIGHT", -4, 0)
-      row.locs:SetJustifyH("LEFT")
-      ownerRows[i] = row
+  -- Ownership-row quantity cell: total with parenthesized saleable when
+  -- they differ. The displayed `qty` value is the numeric total and drives
+  -- the sort directly; the formatter only adds the saleable suffix.
+  local function formatOwnerQty(_, rowData)
+    if not rowData then return "" end
+    local total, saleable = rowData._totalCount or 0, rowData._saleableCount or 0
+    if saleable < total then
+      return string.format("×%d (%d saleable)", total, saleable)
     end
-    return row
+    return "×" .. total
+  end
+
+  local ownerTable, realmTable
+  if hasScrollTable then
+    ownerTable = cw:CreateScrollTable(ownerHost, {
+      { key = "charKey", label = "CHARACTER", width = 140, sortable = true },
+      { key = "qty",     label = "QTY",       width = 80,  sortable = true,
+        align = "RIGHT", format = formatOwnerQty },
+      { key = "locs",    label = "LOCATIONS", width = 80,  sortable = true },
+    })
+    ownerTable:SetSort("qty", false)
+
+    realmTable = cw:CreateScrollTable(realmHost, {
+      { key = "realm",  label = "REALM",  width = 120, sortable = true },
+      { key = "sold",   label = "SOLD",   width = 50,  sortable = true, align = "RIGHT" },
+      { key = "bought", label = "BOUGHT", width = 60,  sortable = true, align = "RIGHT" },
+      { key = "net",    label = "NET",    width = 80,  sortable = true,
+        align = "RIGHT", format = formatRealmNet },
+    })
+    realmTable:SetSort("net", false)
+  else
+    -- Cogworks ScrollTable unavailable — render a stub message under each header.
+    local function stub(host)
+      local fs = host:CreateFontString(nil, "OVERLAY", "GameFontDisable")
+      fs:SetPoint("CENTER")
+      fs:SetText("(requires Cogworks-1.0 ScrollTable)")
+    end
+    stub(ownerHost); stub(realmHost)
   end
 
   -- Sales + P&L footer --------------------------------------------------------
@@ -354,12 +331,6 @@ function ns.UI.CreateResearchPage(parent)
 
   local currentRecord = nil
 
-  local function clearOwnerRows(usedCount)
-    for i = usedCount + 1, #ownerRows do
-      ownerRows[i]:Hide()
-    end
-  end
-
   local function applyRecord(record)
     currentRecord = record
     if not record then
@@ -378,8 +349,8 @@ function ns.UI.CreateResearchPage(parent)
       invPanel.spark:SetData({})
       invPanel.d7:SetText("7d —")
       invPanel.d30:SetText("30d —")
-      clearOwnerRows(0)
-      for i = 1, #realmRows do realmRows[i]:Hide() end
+      if ownerTable then ownerTable:SetData({}) end
+      if realmTable then realmTable:SetData({}) end
       salesLbl:SetText("")
       salesVal:SetText("")
       pnlLbl:SetText("")
@@ -487,59 +458,41 @@ function ns.UI.CreateResearchPage(parent)
       invPanel.d30:SetTextColor(themeColor("textDim", { 0.6, 0.6, 0.6, 1 }))
     end
 
-    -- Ownership table
-    local rows = {}
-    for _, inv in ipairs(record.inventory or {}) do
-      rows[#rows + 1] = inv
-    end
-    table.sort(rows, function(a, b) return (a.quantity or 0) > (b.quantity or 0) end)
-
-    for i, inv in ipairs(rows) do
-      local r = getOwnerRow(i)
-      r:SetPoint("TOPLEFT", ownerContent, "TOPLEFT", 0, -(i - 1) * 18)
-      r.charKey:SetText(inv.charKey)
-      local qtyText
-      if inv.saleable and inv.saleable < inv.quantity then
-        qtyText = string.format("×%d (%d saleable)", inv.quantity, inv.saleable)
-      else
-        qtyText = "×" .. inv.quantity
+    -- Ownership table — feed into Cogworks ScrollTable. `qty` is the numeric
+    -- total (drives sort); the formatter uses _totalCount / _saleableCount
+    -- for the "(N saleable)" suffix when those differ.
+    if ownerTable then
+      local ownerRowsData = {}
+      for _, inv in ipairs(record.inventory or {}) do
+        local total = inv.quantity or 0
+        local saleable = inv.saleable or total
+        ownerRowsData[#ownerRowsData + 1] = {
+          charKey         = inv.charKey,
+          qty             = total,
+          locs            = formatLocations(inv.locations),
+          _totalCount     = total,
+          _saleableCount  = saleable,
+        }
       end
-      r.qty:SetText(qtyText)
-      r.locs:SetText(formatLocations(inv.locations))
-      r:Show()
+      ownerTable:SetData(ownerRowsData)
     end
-    clearOwnerRows(#rows)
-    ownerContent:SetHeight(math.max(1, #rows * 18))
 
-    -- Per-realm P&L table.
-    local realmList = {}
-    if record.profitByRealm then
-      for realm, data in pairs(record.profitByRealm) do
-        realmList[#realmList + 1] = { realm = realm, data = data }
+    -- Per-realm P&L table. `net` is signed copper, sort numeric. Default
+    -- descending = biggest profit first; ascending = biggest loss first.
+    if realmTable then
+      local realmRowsData = {}
+      if record.profitByRealm then
+        for realm, data in pairs(record.profitByRealm) do
+          realmRowsData[#realmRowsData + 1] = {
+            realm  = realm,
+            sold   = data.salesCount    or 0,
+            bought = data.purchaseCount or 0,
+            net    = data.netProfit     or 0,
+          }
+        end
       end
+      realmTable:SetData(realmRowsData)
     end
-    table.sort(realmList, function(a, b) return math.abs(a.data.netProfit) > math.abs(b.data.netProfit) end)
-
-    local sR, sG, sB = themeColor("success", { 0.30, 0.85, 0.30, 1 })
-    local eR, eG, eB = themeColor("error",   { 1.00, 0.40, 0.40, 1 })
-    local nR, nG, nB = themeColor("textDim", { 0.6,  0.6,  0.6,  1 })
-
-    for i, item in ipairs(realmList) do
-      local row = getRealmRow(i)
-      row:SetPoint("TOPLEFT", realmContent, "TOPLEFT", 0, -14 - (i - 1) * 16)
-      row.realm:SetText(item.realm)
-      row.sold:SetText(item.data.salesCount > 0 and tostring(item.data.salesCount) or "")
-      row.bought:SetText(item.data.purchaseCount > 0 and tostring(item.data.purchaseCount) or "")
-      local n = item.data.netProfit
-      local sign = n >= 0 and "+" or "-"
-      row.net:SetText(sign .. formatGoldShort(math.abs(n)))
-      if n > 0 then row.net:SetTextColor(sR, sG, sB)
-      elseif n < 0 then row.net:SetTextColor(eR, eG, eB)
-      else row.net:SetTextColor(nR, nG, nB) end
-      row:Show()
-    end
-    for i = #realmList + 1, #realmRows do realmRows[i]:Hide() end
-    realmContent:SetHeight(math.max(1, 14 + #realmList * 16))
 
     -- Sales
     if record.salesSummary and record.salesSummary.count and record.salesSummary.count > 0 then

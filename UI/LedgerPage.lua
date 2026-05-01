@@ -2,10 +2,10 @@
 --
 -- Transaction ledger view. Filter chips at top (All / Sales / Purchases /
 -- AH Activity / Other), totals row (income / expense / net / count), and a
--- scrollable list of recent ledger entries with date, character, kind,
--- item, source, and signed amount.
+-- sortable, column-resizable transaction table powered by Cogworks'
+-- CreateScrollTable primitive.
 --
--- Reads via ns.Ledger:Query and Ns.Ledger:Stats. Source-agnostic — every
+-- Reads via ns.Ledger:Query and ns.Ledger:Stats. Source-agnostic — every
 -- registered source's entries appear here, identified by the `source`
 -- column.
 
@@ -34,9 +34,8 @@ local function formatGoldShort(copper)
   return ns.NetWorth.FormatGold(copper)
 end
 
--- Filter chip definitions. `match(entry)` predicates run per-entry when the
--- chip is active; `kind`-only chips set a Ledger:Query filter directly so
--- counts come from Ledger:Stats rather than UI-side filtering.
+-- Filter chip definitions. Each chip's `kinds` is fed directly into
+-- Ledger:Query so counts come from the ledger, not UI-side filtering.
 local FILTERS = {
   { label = "All",          kinds = nil },
   { label = "Sales",        kinds = { "sale" } },
@@ -48,6 +47,28 @@ local FILTERS = {
 
 local MAX_ROWS = 500
 
+-- Color escape strings for the kind column. Each entry produces a
+-- "|cffRRGGBBkind|r" wrapping at format time. Hex literals are pre-baked
+-- once instead of building them on every cell render.
+local function buildKindColors()
+  local cw = getCogworks()
+  local function hex(key, r, g, b)
+    if cw and cw.Theme and cw.Theme[key] then
+      r, g, b = cw.Theme[key][1], cw.Theme[key][2], cw.Theme[key][3]
+    end
+    return string.format("|cff%02x%02x%02x", math.floor(r * 255 + 0.5),
+      math.floor(g * 255 + 0.5), math.floor(b * 255 + 0.5))
+  end
+  return {
+    sale          = hex("success", 0.30, 0.85, 0.30),
+    purchase      = hex("error",   1.00, 0.40, 0.40),
+    ["ah-fee"]    = hex("error",   1.00, 0.40, 0.40),
+    ["ah-cancel"] = hex("warning", 1.00, 0.78, 0.10),
+    ["ah-expire"] = hex("warning", 1.00, 0.78, 0.10),
+  }
+end
+
+-- Hand-rolled chip — replace once cogworks#19 (segmented control) ships.
 local function makeChip(parent, label, onClick)
   local btn = CreateFrame("Button", nil, parent, "BackdropTemplate")
   btn:SetSize(96, 22)
@@ -88,8 +109,20 @@ local function makeChip(parent, label, onClick)
 end
 
 function ns.UI.CreateLedgerPage(parent)
+  local cw = getCogworks()
+  if not (cw and cw.CreateScrollTable) then
+    -- Cogworks ScrollTable isn't available. Render a stub so the tab still
+    -- opens; surface the missing-primitive state to chat for diagnostics.
+    local page = CreateFrame("Frame", nil, parent)
+    local fs = page:CreateFontString(nil, "OVERLAY", "GameFontDisable")
+    fs:SetPoint("CENTER")
+    fs:SetText("Ledger requires Cogworks-1.0 with ScrollTable.")
+    return page
+  end
+
   local page = CreateFrame("Frame", nil, parent)
   local state = { filterIdx = 1 }
+  local kindColors = buildKindColors()
 
   -- ============================================================================
   -- Top: filter chips + entry count
@@ -153,95 +186,40 @@ function ns.UI.CreateLedgerPage(parent)
   local valCount   = makeStat(totalsRow, 480, "ENTRIES")
 
   -- ============================================================================
-  -- Header row + scrollable transaction list
+  -- Cogworks ScrollTable — sortable, drag-resizable columns
   -- ============================================================================
 
-  local headerRow = CreateFrame("Frame", nil, page)
-  headerRow:SetPoint("TOPLEFT", totalsRow, "BOTTOMLEFT", 0, -10)
-  headerRow:SetPoint("TOPRIGHT", totalsRow, "BOTTOMRIGHT", 0, -10)
-  headerRow:SetHeight(16)
-
-  local function makeHeader(parent, x, w, text)
-    local fs = parent:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
-    fs:SetPoint("LEFT", parent, "LEFT", x, 0)
-    fs:SetWidth(w)
-    fs:SetJustifyH("LEFT")
-    fs:SetText(text)
-    fs:SetTextColor(themeColor("brass", { 0.83, 0.63, 0.09, 1 }))
-    return fs
+  -- Column formatters. ScrollTable calls `format(value, rowData)` per cell.
+  local function formatKind(v)
+    if not v or v == "" then return "" end
+    local color = kindColors[v]
+    return color and (color .. v .. "|r") or v
   end
 
-  -- Column layout (matched in row creation below).
-  --   Date     0   100
-  --   Char   100   140
-  --   Kind   240    80
-  --   Item   320   220
-  --   Source 540    60
-  --   Amount 600   →end (right-justified)
-  makeHeader(headerRow, 0,   100, "DATE")
-  makeHeader(headerRow, 100, 140, "CHARACTER")
-  makeHeader(headerRow, 240, 80,  "KIND")
-  makeHeader(headerRow, 320, 220, "ITEM")
-  makeHeader(headerRow, 540, 60,  "SRC")
-  local amountHdr = page:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
-  amountHdr:SetPoint("RIGHT", headerRow, "RIGHT", -4, 0)
-  amountHdr:SetText("AMOUNT")
-  amountHdr:SetTextColor(themeColor("brass", { 0.83, 0.63, 0.09, 1 }))
-
-  local scroll = CreateFrame("ScrollFrame", nil, page, "UIPanelScrollFrameTemplate")
-  scroll:SetPoint("TOPLEFT", headerRow, "BOTTOMLEFT", 0, -2)
-  scroll:SetPoint("BOTTOMRIGHT", page, "BOTTOMRIGHT", -22, 0)
-  local content = CreateFrame("Frame", nil, scroll)
-  content:SetSize(640, 1)
-  scroll:SetScrollChild(content)
-
-  local rowPool = {}
-
-  local function getRow(i)
-    local r = rowPool[i]
-    if not r then
-      r = CreateFrame("Frame", nil, content)
-      r:SetHeight(16)
-      r:SetPoint("LEFT", content, "LEFT", 0, 0)
-      r:SetPoint("RIGHT", content, "RIGHT", 0, 0)
-
-      r.date = r:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-      r.date:SetPoint("LEFT", r, "LEFT", 0, 0)
-      r.date:SetWidth(100); r.date:SetJustifyH("LEFT")
-
-      r.char = r:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-      r.char:SetPoint("LEFT", r, "LEFT", 100, 0)
-      r.char:SetWidth(140); r.char:SetJustifyH("LEFT")
-
-      r.kind = r:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-      r.kind:SetPoint("LEFT", r, "LEFT", 240, 0)
-      r.kind:SetWidth(80); r.kind:SetJustifyH("LEFT")
-
-      r.item = r:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-      r.item:SetPoint("LEFT", r, "LEFT", 320, 0)
-      r.item:SetWidth(220); r.item:SetJustifyH("LEFT")
-
-      r.source = r:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
-      r.source:SetPoint("LEFT", r, "LEFT", 540, 0)
-      r.source:SetWidth(60); r.source:SetJustifyH("LEFT")
-
-      r.amount = r:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-      r.amount:SetPoint("RIGHT", r, "RIGHT", -4, 0)
-      r.amount:SetJustifyH("RIGHT")
-
-      rowPool[i] = r
+  local function formatAmount(v)
+    if not v or v == 0 then
+      return "|cff999999—|r"
+    elseif v > 0 then
+      return "|cff4cd64c+" .. formatGoldShort(v) .. "|r"
+    else
+      return "|cffff6666-" .. formatGoldShort(-v) .. "|r"
     end
-    return r
   end
 
-  -- Color hint for kind labels.
-  local KIND_COLORS = {
-    sale         = function() return themeColor("success", { 0.30, 0.85, 0.30, 1 }) end,
-    purchase     = function() return themeColor("error",   { 1.00, 0.40, 0.40, 1 }) end,
-    ["ah-fee"]   = function() return themeColor("error",   { 1.00, 0.40, 0.40, 1 }) end,
-    ["ah-cancel"]= function() return themeColor("warning", { 1.00, 0.78, 0.10, 1 }) end,
-    ["ah-expire"]= function() return themeColor("warning", { 1.00, 0.78, 0.10, 1 }) end,
-  }
+  local tableHost = CreateFrame("Frame", nil, page)
+  tableHost:SetPoint("TOPLEFT", totalsRow, "BOTTOMLEFT", 0, -10)
+  tableHost:SetPoint("BOTTOMRIGHT", page, "BOTTOMRIGHT", 0, 0)
+
+  local scrollTable = cw:CreateScrollTable(tableHost, {
+    { key = "date",   label = "DATE",      width = 100, sortable = true },
+    { key = "char",   label = "CHARACTER", width = 140, sortable = true },
+    { key = "kind",   label = "KIND",      width = 80,  sortable = true, format = formatKind },
+    { key = "item",   label = "ITEM",      width = 220, sortable = true },
+    { key = "source", label = "SRC",       width = 60,  sortable = true },
+    { key = "amount", label = "AMOUNT",    width = 110, sortable = true, align = "RIGHT", format = formatAmount },
+  })
+  -- Default sort: newest first.
+  scrollTable:SetSort("date", false)
 
   -- ============================================================================
   -- Refresh
@@ -268,51 +246,43 @@ function ns.UI.CreateLedgerPage(parent)
     end
     valCount:SetText(tostring(stats.count))
 
-    -- Newest first; cap to MAX_ROWS for render perf.
     local entries = ns.Ledger:Query(query)
     local total = #entries
     countText:SetText(string.format("%d entries (showing latest %d)",
       total, math.min(total, MAX_ROWS)))
 
-    -- Display from newest backwards.
-    local rendered = 0
-    for i = #entries, 1, -1 do
-      if rendered >= MAX_ROWS then break end
+    -- Storage is append-only and unordered (TLY-21); sort by atTime descending
+    -- so we can take the most-recent MAX_ROWS slice. ScrollTable will re-sort
+    -- on its own when the user clicks a header, but the row cap itself needs
+    -- chronological order.
+    table.sort(entries, function(a, b) return (a.atTime or 0) > (b.atTime or 0) end)
+
+    -- Build row data from the most recent MAX_ROWS entries.
+    local rows = {}
+    local cap = math.min(total, MAX_ROWS)
+    for i = 1, cap do
       local e = entries[i]
-      local row = getRow(rendered + 1)
-      row:SetPoint("TOPLEFT", content, "TOPLEFT", 0, -rendered * 16)
-
-      row.date:SetText(date("%m/%d %H:%M", e.atTime or 0))
-      row.char:SetText(e.charKey or "")
-      row.kind:SetText(e.kind or "")
-      local kc = KIND_COLORS[e.kind]
-      if kc then row.kind:SetTextColor(kc())
-      else row.kind:SetTextColor(themeColor("text", { 0.9, 0.9, 0.92, 1 })) end
-
-      local itemLabel = (e.meta and e.meta.name) or (e.itemID and ("item:" .. e.itemID)) or ""
-      if e.count and e.count > 1 then itemLabel = itemLabel .. " ×" .. e.count end
-      row.item:SetText(itemLabel)
-
-      row.source:SetText(e.source or "")
-
       local sign = ns.Ledger:KindSign(e.kind)
       local copper = e.copper or 0
-      if sign == 0 or copper == 0 then
-        row.amount:SetText("—")
-        row.amount:SetTextColor(themeColor("textDim", { 0.6, 0.6, 0.6, 1 }))
-      elseif sign > 0 then
-        row.amount:SetText("+" .. formatGoldShort(copper))
-        row.amount:SetTextColor(themeColor("success", { 0.30, 0.85, 0.30, 1 }))
-      else
-        row.amount:SetText("-" .. formatGoldShort(copper))
-        row.amount:SetTextColor(themeColor("error", { 1.00, 0.40, 0.40, 1 }))
-      end
+      local signedAmount = sign * copper
+      local itemLabel = (e.meta and e.meta.name) or (e.itemID and ("item:" .. e.itemID)) or ""
+      if e.count and e.count > 1 then itemLabel = itemLabel .. " ×" .. e.count end
 
-      row:Show()
-      rendered = rendered + 1
+      rows[#rows + 1] = {
+        date         = date("%m/%d %H:%M", e.atTime or 0),
+        char         = e.charKey or "",
+        kind         = e.kind or "",
+        item         = itemLabel,
+        source       = e.source or "",
+        amount       = signedAmount,
+        -- Sort overrides: ScrollTable picks up `_sort<Key>` in preference to
+        -- the displayed value, so date sorts numerically by epoch and amount
+        -- sorts by signed copper (not the formatted "+/-1.2k" string).
+        _sortDate    = e.atTime or 0,
+        _sortAmount  = signedAmount,
+      }
     end
-    for i = rendered + 1, #rowPool do rowPool[i]:Hide() end
-    content:SetHeight(math.max(1, rendered * 16))
+    scrollTable:SetData(rows)
   end
 
   return page

@@ -49,16 +49,38 @@ local addonName, ns = ...
 local History = {}
 ns.History = History
 
+-- TLY-21 defaults: capped to keep in-memory snapshot count bounded for the
+-- common case. Heavy users with thousands of owned items can blow past 1GB
+-- of SavedVariables under the previous (365d / 30d-rollup) defaults — each
+-- snapshot's full per-char per-item map is several hundred KB. The new
+-- defaults give ~14 hi-fi snapshots + ~83 daily-rollup snapshots ≈ 100 total.
+-- Users who want longer history can extend retention via /tally history
+-- retention.
 local DEFAULT_CONFIG = {
-  minIntervalSec = 6 * 60 * 60,        -- snapshots no closer than 6h apart
-  retentionSec   = 365 * 24 * 60 * 60, -- 1 year max age
-  rollupAfterSec = 30 * 24 * 60 * 60,  -- collapse to one-per-day past 30d
+  minIntervalSec = 12 * 60 * 60,       -- snapshots no closer than 12h apart
+  retentionSec   = 90 * 24 * 60 * 60,  -- 90d max age
+  rollupAfterSec = 7 * 24 * 60 * 60,   -- collapse to one-per-day past 7d
 }
 
 local LOCATION_KEYS = {
   "bags", "reagent", "bank", "mail",
   "equipped", "void", "auctions", "warbank",
 }
+
+-- Previous DEFAULT_CONFIG values. Used to detect users still at the
+-- pre-TLY-21 defaults and migrate them to the lighter new ones; users who
+-- explicitly set their own retention/cadence keep what they had.
+local LEGACY_DEFAULT = {
+  minIntervalSec = 6 * 60 * 60,
+  retentionSec   = 365 * 24 * 60 * 60,
+  rollupAfterSec = 30 * 24 * 60 * 60,
+}
+
+local function configMatchesLegacyDefault(cfg)
+  return cfg.minIntervalSec == LEGACY_DEFAULT.minIntervalSec
+     and cfg.retentionSec   == LEGACY_DEFAULT.retentionSec
+     and cfg.rollupAfterSec == LEGACY_DEFAULT.rollupAfterSec
+end
 
 local function db()
   -- Migrate v1.0 pricing-only schema if it's still around from earlier dev.
@@ -72,6 +94,13 @@ local function db()
 
   TallyDB.history = TallyDB.history or {}
   TallyDB.history.config = TallyDB.history.config or {}
+  -- TLY-21: bump anyone still at the legacy 365d / 30d-rollup defaults to
+  -- the new lighter defaults. Users who hand-set their cadence keep theirs.
+  if configMatchesLegacyDefault(TallyDB.history.config) then
+    TallyDB.history.config.minIntervalSec = DEFAULT_CONFIG.minIntervalSec
+    TallyDB.history.config.retentionSec   = DEFAULT_CONFIG.retentionSec
+    TallyDB.history.config.rollupAfterSec = DEFAULT_CONFIG.rollupAfterSec
+  end
   for k, v in pairs(DEFAULT_CONFIG) do
     if TallyDB.history.config[k] == nil then
       TallyDB.history.config[k] = v

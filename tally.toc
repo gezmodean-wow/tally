@@ -3,7 +3,7 @@
 ## Notes: Personal Capital for WoW — ledger, net-worth, and per-item research across all your characters and accounts.
 ## Author: Gezmodean
 ## Version: @project-version@
-## SavedVariables: TallyDB
+## SavedVariables: TallyDB, CogworksSharedDB
 ## SavedVariablesPerCharacter: TallyCharDB
 ## Dependencies: Syndicator
 ## X-Category: Miscellaneous
