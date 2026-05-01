@@ -266,6 +266,12 @@ local function resetData()
          and ns.UI.MainFrame:IsShown() then
         ns.UI.MainFrame:Hide()
       end
+      -- Blow away the existing wizard singleton so the rebuild starts
+      -- from a clean state — fresh source-enable checkboxes, fresh
+      -- strategy radio, fresh pace selection. Without this the user
+      -- lands on whatever they had selected last run.
+      if ns.UI and ns.UI.ResetSetupWizard then ns.UI.ResetSetupWizard() end
+      if ns.RefreshLDB then pcall(ns.RefreshLDB) end
       if ns.UI and ns.UI.ShowSetupWizard then
         ns.UI.ShowSetupWizard()
         print(prefix .. " setup wizard reopened — your data will be re-imported when you finish it.")

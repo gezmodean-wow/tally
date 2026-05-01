@@ -659,6 +659,9 @@ end
 -- ============================================================================
 
 -- Singleton: only one wizard instance at a time. Re-shown on demand.
+-- Cleared by ResetSetupWizard() so /tally reset gets a fresh state
+-- (otherwise the user lands on the same checkbox / radio choices they
+-- already made before the reset).
 local wizardFrame, wizardWidget
 
 local function createWizardFrame()
@@ -671,7 +674,10 @@ local function createWizardFrame()
     return nil
   end
 
-  wizardFrame = CreateFrame("Frame", "TallySetupWizardFrame", UIParent, "BackdropTemplate")
+  -- No global frame name — letting the previous frame fall out of scope
+  -- on ResetSetupWizard means a new instance can be built without
+  -- colliding on the WoW global namespace.
+  wizardFrame = CreateFrame("Frame", nil, UIParent, "BackdropTemplate")
   wizardFrame:SetSize(640, 480)
   wizardFrame:SetPoint("CENTER")
   wizardFrame:SetFrameStrata("DIALOG")
@@ -723,6 +729,20 @@ end
 function ns.UI.ShowSetupWizard()
   local frame = createWizardFrame()
   if frame then frame:Show() end
+end
+
+-- Clear the singleton so the next ShowSetupWizard rebuilds from scratch
+-- with a fresh state table. Used by /tally reset — the user's previous
+-- source-checkbox choices, strategy radio, and pace selection should
+-- not carry over into the next wizard run.
+function ns.UI.ResetSetupWizard()
+  if wizardFrame then
+    wizardFrame:Hide()
+    wizardFrame:SetParent(nil)
+    wizardFrame:ClearAllPoints()
+    wizardFrame = nil
+    wizardWidget = nil
+  end
 end
 
 -- Returns true on the first session where the user hasn't completed setup
