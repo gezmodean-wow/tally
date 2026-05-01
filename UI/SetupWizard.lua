@@ -367,7 +367,9 @@ local function buildStrategyStep(parent, state)
     val:SetJustifyH("LEFT")
     if ns.Pricing and ns.Pricing:HasTSM() then
       local copper = valueUnder(expr)
-      val:SetText("→ " .. formatGoldShort(copper))
+      -- Plain ASCII arrow — one tester reported the "→" (U+2192) glyph
+      -- rendered as a missing-character box on their fonts/locale.
+      val:SetText("=> " .. formatGoldShort(copper))
       val:SetTextColor(themeColor("brass", { 0.83, 0.63, 0.09, 1 }))
     else
       val:SetText("(TSM not detected)")

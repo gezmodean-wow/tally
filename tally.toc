@@ -33,6 +33,7 @@ UI\Chart.lua
 UI\ProgressBar.lua
 UI\MainFrame.lua
 UI\NetWorthPage.lua
+UI\InventoryPage.lua
 UI\ResearchPage.lua
 UI\LifecyclePage.lua
 UI\LedgerPage.lua

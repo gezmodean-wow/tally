@@ -186,17 +186,47 @@ function ns.UI.CreateNetWorthPage(parent)
   local function getCharRow(i)
     local row = charRows[i]
     if not row then
-      row = CreateFrame("Frame", nil, charContent)
-      row:SetHeight(16)
+      -- Use a Button so the whole row is clickable. Clicking a row drills
+      -- into the Inventory tab filtered to that character — the user's
+      -- "I have one char with most of my net worth, why?" question.
+      row = CreateFrame("Button", nil, charContent)
+      row:SetHeight(28)
       row:SetPoint("LEFT", charContent, "LEFT", 4, 0)
       row:SetPoint("RIGHT", charContent, "RIGHT", -4, 0)
+
+      row.bg = row:CreateTexture(nil, "BACKGROUND")
+      row.bg:SetAllPoints()
+      row.bg:SetColorTexture(1, 1, 1, 0)
+
       row.name = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-      row.name:SetPoint("LEFT", row, "LEFT", 0, 0)
+      row.name:SetPoint("TOPLEFT", row, "TOPLEFT", 0, 0)
       row.name:SetWidth(120)
       row.name:SetJustifyH("LEFT")
+
       row.value = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-      row.value:SetPoint("RIGHT", row, "RIGHT", 0, 0)
+      row.value:SetPoint("TOPRIGHT", row, "TOPRIGHT", 0, 0)
       row.value:SetJustifyH("RIGHT")
+
+      -- Sub-line: gold vs items + share of total. Answers "why is this
+      -- char dominant" at-a-glance; full answer lives in the Inventory
+      -- drill-down (click row).
+      row.sub = row:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+      row.sub:SetPoint("TOPLEFT", row.name, "BOTTOMLEFT", 0, -2)
+      row.sub:SetPoint("RIGHT", row, "RIGHT", 0, 0)
+      row.sub:SetJustifyH("LEFT")
+
+      row:SetScript("OnEnter", function(self)
+        self.bg:SetColorTexture(1, 1, 1, 0.06)
+      end)
+      row:SetScript("OnLeave", function(self)
+        self.bg:SetColorTexture(1, 1, 1, 0)
+      end)
+      row:SetScript("OnClick", function(self)
+        if self._charKey and ns.UI.ShowInventory then
+          ns.UI.ShowInventory(self._charKey)
+        end
+      end)
+
       charRows[i] = row
     end
     return row
@@ -277,25 +307,39 @@ function ns.UI.CreateNetWorthPage(parent)
     valSnaps:SetText(tostring(#series))
 
     -- Per-character table (sorted by total descending). Warband row appears
-    -- as a synthetic entry when its total is non-zero.
+    -- as a synthetic entry when its total is non-zero. Sub-line shows
+    -- gold-vs-items split + share of total — answers "why is this char
+    -- dominant" at a glance (a flipper's hoard reads "5% gold + 95% items
+    -- = 32% of total"). For the full per-item view, the Inventory tab.
     local rows = {}
     for charKey, data in pairs(current.byCharacter or {}) do
-      rows[#rows + 1] = { key = charKey, total = data.total }
+      rows[#rows + 1] = { key = charKey, total = data.total, gold = data.gold or 0, items = data.items or 0 }
     end
     if current.warband and current.warband.total and current.warband.total > 0 then
-      rows[#rows + 1] = { key = "Warband", total = current.warband.total }
+      rows[#rows + 1] = {
+        key = "Warband",
+        total = current.warband.total,
+        gold = current.warband.gold or 0,
+        items = current.warband.items or 0,
+      }
     end
     table.sort(rows, function(a, b) return a.total > b.total end)
 
+    local rowHeight = 28
     for i, r in ipairs(rows) do
       local row = getCharRow(i)
-      row:SetPoint("TOP", charContent, "TOP", 0, -(i - 1) * 16)
+      row:SetPoint("TOP", charContent, "TOP", 0, -(i - 1) * rowHeight)
+      row._charKey = r.key
       row.name:SetText(r.key)
       row.value:SetText(formatGoldShort(r.total))
+      local pctOfTotal = current.total > 0 and (r.total / current.total * 100) or 0
+      local goldPct = r.total > 0 and (r.gold / r.total * 100) or 0
+      row.sub:SetText(string.format("|cff999999%.0f%% of net  -  %.0f%% gold / %.0f%% items  -  click for items|r",
+        pctOfTotal, goldPct, 100 - goldPct))
       row:Show()
     end
     for i = #rows + 1, #charRows do charRows[i]:Hide() end
-    charContent:SetHeight(math.max(1, #rows * 16))
+    charContent:SetHeight(math.max(1, #rows * rowHeight))
   end
 
   return page

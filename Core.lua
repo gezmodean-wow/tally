@@ -82,6 +82,9 @@ function ns:PLAYER_LOGIN()
     if ns.UI.CreateNetWorthPage then
       ns.UI.MainFrame:RegisterPage("Net Worth", ns.UI.CreateNetWorthPage)
     end
+    if ns.UI.CreateInventoryPage then
+      ns.UI.MainFrame:RegisterPage("Inventory", ns.UI.CreateInventoryPage)
+    end
     if ns.UI.CreateResearchPage then
       ns.UI.MainFrame:RegisterPage("Research", ns.UI.CreateResearchPage)
     end
@@ -197,6 +200,7 @@ local function printHelp()
   print("  /tally setup — re-run the first-time setup wizard")
   print("  /tally lifecycle <itemlink-or-id> — open per-item lifecycle drill-down")
   print("  /tally compare — open the multi-source ledger comparison view")
+  print("  /tally inventory [charKey] — open the per-character inventory drill-down")
 end
 
 -- Wipes the data stores Tally accumulates at runtime — ledger, history,
@@ -492,6 +496,12 @@ local function handleSlash(msg)
       ns.UI.ShowLifecycle(rest)
     else
       print("|cffff4040Tally:|r lifecycle UI unavailable.")
+    end
+  elseif cmd == "inventory" or cmd == "inv" then
+    if ns.UI and ns.UI.ShowInventory then
+      ns.UI.ShowInventory(rest ~= "" and rest or nil)
+    else
+      print("|cffff4040Tally:|r inventory page unavailable.")
     end
   elseif cmd == "compare" then
     if ns.UI and ns.UI.MainFrame and ns.UI.CreateCompareLedgersPage then
