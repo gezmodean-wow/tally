@@ -4,6 +4,8 @@ All notable changes to Tally will be documented in this file.
 
 ## [Unreleased]
 
+## [v0.1.0-alpha4]
+
 - TLY-24 immediate wins ahead of the larger superset reframe (TLY-29 / TLY-30 / TLY-31):
   - **Bonus-ID price fallback** in `Pricing:GetUnitValue`. When TSM returns nil for a bonus-ID-bearing itemString (typical for crafted gear, catalysts, anything not at commodity scale), retry with the bare `i:<id>`. Previously these items fell through to vendor price, dropping per-unit value 100x+ and silently undercounting net worth. Closes part of Toeknee's "owned items value lower than TSM with same strategy" gap.
   - **Per-source skip counters** (TLY-29 first slice). Every adapter now declares a `skipCounters` table and increments named reasons at every early-return: TSM (`no_item_or_player_or_time`, `unknown_kind`), Native (`no_item_name`, `zero_revenue`, `bad_invoice_type`), FlipQueue (`bad_entry`, `active_skipped`, `unknown_status`), Journalator (`bad_row_or_no_time`, `no_char_key`, `unknown_failure_type`, `unknown_vendor_type`). Reset on each `:Register()` so the values reflect the current session.

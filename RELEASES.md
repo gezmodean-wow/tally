@@ -8,6 +8,10 @@ The engineering-detail companion lives in `CHANGELOG.md` (commit-readerese — f
 
 ## Unreleased
 
+_Notes for the next tagged release will be distilled here. Pull from `CHANGELOG.md` and any closed issues' `## Player summary` sections, then organize into themed prose for players._
+
+## v0.1.0-alpha4
+
 ### More accurate item valuation
 
 When TSM doesn't have market data for an exact item variant (typical for crafted gear, catalysts, and anything with bonus IDs attached), Tally now retries the lookup against the base item ID before falling through to vendor price. Previously these items showed up at vendor value — often 100x lower than reality — silently undercounting your net worth by potentially huge margins. If you've been seeing a gap between Tally's number and TSM's, this closes part of it.
