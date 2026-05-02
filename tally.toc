@@ -24,6 +24,11 @@ NetWorth\Calculator.lua
 History.lua
 Ledger.lua
 Sources\Native.lua
+Sources\Native\AHInvoice.lua
+Sources\Native\AHPosting.lua
+Sources\Native\Vendor.lua
+Sources\Native\Repair.lua
+Sources\Native\Mail.lua
 Sources\FlipQueue.lua
 Sources\TSM.lua
 Sources\Journalator.lua

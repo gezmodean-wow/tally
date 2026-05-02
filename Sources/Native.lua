@@ -1,25 +1,24 @@
 -- Tally — Sources/Native.lua
 --
--- Tally's own observer of WoW transactions. Subscribes to game events that
--- carry transaction information and writes ledger entries directly. Makes
--- Tally functional with zero sibling-addon dependencies.
+-- Orchestrator for Tally's own native event-capture pipeline. Each transaction
+-- bucket (AH invoices, AH posting, vendor activity, repair, personal mail)
+-- lives in its own `Sources/Native/<Bucket>.lua` file and registers itself
+-- via `Native:RegisterBucket(spec)` at file-load time. This file owns:
 --
--- Pass 1 of this source covers AH mail invoices (sales + purchases) — the
--- highest-value native target since AH activity dominates the txn flow for
--- most auctioneers. Future passes can add merchant (vendor buy/sell),
--- repair (player money out at vendor), trade, and direct mail attachments.
+--   * The `tally-native` ledger source registration with Ledger
+--   * A shared skip-counter table keyed by bucket prefix (TLY-29)
+--   * Shared helpers (`Native.CurrentCharKey`, `Native.SafeNum`)
+--   * The `importAll` dispatcher that fans out to every bucket's optional
+--     `scan()` function (used by Ledger:ImportFromAllSources)
 --
--- Mail invoice scan only runs while the mail UI is open. Blizzard's
--- GetInboxInvoiceInfo is only valid after MAIL_INBOX_UPDATE arrives in an
--- open inbox. A mail invoice is one of two flavours:
---   "seller" — auction sold; payload includes buyout, deposit returned, AH cut
---   "buyer"  — auction won; payload includes amount paid
+-- The capture path itself is event-driven inside each bucket — buckets hook
+-- WoW APIs and write entries via `ns.Ledger:Insert(entry)` as activity
+-- happens. `scan()` exists for buckets that can re-derive state from open UI
+-- (e.g. AHInvoice's open-mailbox sweep) so the manual "Import now" button
+-- and login backfill keep working.
 --
--- Stable hash across `(charKey, invoiceType, itemName, otherPlayer, bid,
--- buyout)` provides cross-session dedupe; identical invoices with the same
--- counter-party and amount collapse. Trade-off: unrecoverable if the same
--- player legitimately sells the same item to the same buyer at the same
--- price twice. Acceptable for V1.
+-- TLY-31 Phase A: Tally as source of truth, sibling adapters demoting to
+-- backfill-only once Native parity is proven.
 
 local addonName, ns = ...
 
@@ -27,23 +26,22 @@ local Native = {}
 ns.Sources = ns.Sources or {}
 ns.Sources.Native = Native
 
-local SOURCE_NAME = "tally-native"
+-- Stable identifier for ledger entries originating from native capture.
+-- Buckets use it as a prefix when constructing entry IDs.
+Native.SOURCE_NAME = "tally-native"
 
--- Loss counters surfaced by /tally diag (TLY-29).
-Native.skipCounters = {
-  no_item_name = 0,
-  zero_revenue = 0,
-  bad_invoice_type = 0,
-}
-
-local frame = CreateFrame("Frame")
-local isMailOpen = false
+-- Shared skip-counter table. Each bucket pre-creates its own counter slots
+-- (with a bucket-prefixed name like "posting_no_link") at file-load time so
+-- /tally diag's SkipCounters inspector sees stable keys regardless of
+-- whether activity has fired yet. Reset to zero on each :Register() so the
+-- values reflect the current session.
+Native.skipCounters = {}
 
 -- ============================================================================
--- Helpers
+-- Shared helpers
 -- ============================================================================
 
-local function currentCharKey()
+function Native.CurrentCharKey()
   local Cogworks = LibStub and LibStub("Cogworks-1.0", true)
   if Cogworks and Cogworks.GetCharacterKey then
     local ok, key = pcall(Cogworks.GetCharacterKey, Cogworks)
@@ -54,176 +52,58 @@ local function currentCharKey()
   return name .. "-" .. realm
 end
 
-local function safeNum(n) return tonumber(n) or 0 end
+function Native.SafeNum(n) return tonumber(n) or 0 end
 
--- ============================================================================
--- Mail invoice scanning
--- ============================================================================
-
--- Build a ledger entry from a single inbox invoice. Returns a ledger-shape
--- table (or nil if the invoice can't be classified). hash is the stable
--- per-row identifier; sourceId carries hash so dedupe works across sessions.
-local function entryFromInvoice(charKey, invoiceType, itemName, otherPlayer,
-                                bid, buyout, deposit, consignment)
-  if not invoiceType or not itemName or itemName == "" then
-    Native.skipCounters.no_item_name = Native.skipCounters.no_item_name + 1
-    return nil
-  end
-
-  local hash = string.format("mail|%s|%s|%s|%s|%d|%d",
-    charKey, invoiceType, itemName, otherPlayer or "",
-    safeNum(bid), safeNum(buyout))
-
-  local meta = {
-    name = itemName,
-    invoiceType = invoiceType,
-    otherPlayer = otherPlayer,
-    bid = bid,
-    buyout = buyout,
-    deposit = deposit,
-    consignment = consignment,
-  }
-
-  if invoiceType == "seller" then
-    local revenue = (buyout and buyout > 0) and buyout or (bid or 0)
-    if revenue <= 0 then
-      Native.skipCounters.zero_revenue = Native.skipCounters.zero_revenue + 1
-      return nil
-    end
-    return {
-      id = SOURCE_NAME .. ":sale:" .. hash,
-      atTime = time(),
-      kind = "sale",
-      itemKey = nil,
-      itemID = nil,
-      charKey = charKey,
-      copper = revenue,
-      count = 1,
-      source = SOURCE_NAME,
-      sourceId = "sale:" .. hash,
-      meta = meta,
-    }
-  elseif invoiceType == "buyer" then
-    local cost = (buyout and buyout > 0) and buyout or (bid or 0)
-    if cost <= 0 then
-      Native.skipCounters.zero_revenue = Native.skipCounters.zero_revenue + 1
-      return nil
-    end
-    return {
-      id = SOURCE_NAME .. ":buy:" .. hash,
-      atTime = time(),
-      kind = "purchase",
-      itemKey = nil,
-      itemID = nil,
-      charKey = charKey,
-      copper = cost,
-      count = 1,
-      source = SOURCE_NAME,
-      sourceId = "buy:" .. hash,
-      meta = meta,
-    }
-  end
-
-  return nil
+-- Setup-gate predicate. Buckets call this before writing any ledger entry
+-- so a player who installs Tally and immediately opens the AH / mail / a
+-- vendor doesn't get rows written before the first-run wizard finishes.
+function Native.IsCaptureLive()
+  if not (ns.Ledger and ns.Ledger.IsSetupComplete) then return true end
+  return ns.Ledger:IsSetupComplete()
 end
 
--- Companion entry for the AH cut on seller invoices. Recorded as a separate
--- ah-fee ledger entry so income / expense totals reflect the gross sale
--- and the cut as distinct flows.
-local function feeEntryFromInvoice(charKey, itemName, otherPlayer, bid, buyout, consignment)
-  if not consignment or consignment <= 0 then return nil end
-  local hash = string.format("mail-fee|%s|%s|%s|%d|%d",
-    charKey, itemName, otherPlayer or "", safeNum(bid), safeNum(buyout))
-  return {
-    id = SOURCE_NAME .. ":ah-fee:" .. hash,
-    atTime = time(),
-    kind = "ah-fee",
-    itemKey = nil,
-    itemID = nil,
-    charKey = charKey,
-    copper = consignment,
-    count = 1,
-    source = SOURCE_NAME,
-    sourceId = "ah-fee:" .. hash,
-    meta = { name = itemName, ahCut = consignment },
-  }
+-- ============================================================================
+-- Bucket registration
+-- ============================================================================
+
+Native._buckets = {}
+
+-- spec = { name = string, scan = function() -> insertedN, skippedN }
+-- `scan` is optional; pure event-driven buckets (e.g. AHPosting) leave it
+-- unset because there's nothing to re-derive from open UI.
+function Native:RegisterBucket(spec)
+  assert(type(spec) == "table" and type(spec.name) == "string",
+    "Native:RegisterBucket — spec.name required")
+  self._buckets[#self._buckets + 1] = spec
 end
 
--- Scan the open mailbox for invoices and emit ledger entries for any that
--- aren't already recorded. Safe to call repeatedly — dedupe handles re-runs.
--- Returns (insertedCount, skippedCount) for parity with the source-import API.
-local function scanInbox()
-  if not isMailOpen then return 0, 0 end
-  -- TLY-25: respect the setup gate. Mailbox scans are event-driven —
-  -- the user could open mail seconds after install, before any wizard
-  -- has run, and we'd silently start writing rows. Wait for the wizard.
-  if ns.Ledger and ns.Ledger.IsSetupComplete and not ns.Ledger:IsSetupComplete() then
-    return 0, 0
-  end
-  if not GetInboxNumItems then return 0, 0 end
-  local n = GetInboxNumItems() or 0
-  if n <= 0 then return 0, 0 end
+-- ============================================================================
+-- Source registration with Ledger
+-- ============================================================================
 
-  local charKey = currentCharKey()
-  local entries = {}
-
-  for i = 1, n do
-    local okI, invoiceType, itemName, otherPlayer, bid, buyout, deposit, consignment
-      = pcall(GetInboxInvoiceInfo, i)
-    if okI and invoiceType and (invoiceType == "seller" or invoiceType == "buyer") then
-      local main = entryFromInvoice(charKey, invoiceType, itemName, otherPlayer,
-                                    bid, buyout, deposit, consignment)
-      if main then entries[#entries + 1] = main end
-      if invoiceType == "seller" then
-        local fee = feeEntryFromInvoice(charKey, itemName, otherPlayer, bid, buyout, consignment)
-        if fee then entries[#entries + 1] = fee end
+-- Generic ImportFromAllSources path: fan out to every bucket's optional
+-- `scan` function, summing inserted/skipped. Event-driven buckets contribute
+-- 0/0 (their entries arrive in real time, not on demand).
+local function importAll()
+  local inserted, skipped = 0, 0
+  for _, bucket in ipairs(Native._buckets) do
+    if type(bucket.scan) == "function" then
+      local ok, i, s = pcall(bucket.scan)
+      if ok then
+        inserted = inserted + (i or 0)
+        skipped  = skipped  + (s or 0)
       end
     end
   end
-
-  if #entries == 0 then return 0, 0 end
-  return ns.Ledger:InsertMany(entries)
+  return inserted, skipped
 end
 
--- ============================================================================
--- Event wiring
--- ============================================================================
-
-frame:SetScript("OnEvent", function(_, event, ...)
-  if event == "MAIL_SHOW" then
-    isMailOpen = true
-    -- Inbox data isn't necessarily fresh on MAIL_SHOW; the next
-    -- MAIL_INBOX_UPDATE will trigger the actual scan.
-  elseif event == "MAIL_CLOSED" then
-    isMailOpen = false
-  elseif event == "MAIL_INBOX_UPDATE" then
-    if isMailOpen then
-      pcall(scanInbox)
-    end
-  end
-end)
-frame:RegisterEvent("MAIL_SHOW")
-frame:RegisterEvent("MAIL_CLOSED")
-frame:RegisterEvent("MAIL_INBOX_UPDATE")
-
--- ============================================================================
--- Source registration
--- ============================================================================
-
--- Native source isn't "imported" the way a sibling-addon adapter is — it
--- writes entries inline as events fire. The import function exists so the
--- generic ImportFromAllSources flow doesn't skip it; it returns 0 unless
--- mail is currently open (in which case it does a fresh scan).
 function Native:Register()
   if not ns.Ledger or not ns.Ledger.RegisterSource then return end
   for k in pairs(self.skipCounters) do self.skipCounters[k] = 0 end
-  ns.Ledger:RegisterSource(SOURCE_NAME, {
+  ns.Ledger:RegisterSource(self.SOURCE_NAME, {
     label = "Tally (native events)",
-    importFn = scanInbox,
+    importFn = importAll,
     isAvailable = function() return true end,
   })
 end
-
--- Exposed for testing.
-Native.ScanInbox = scanInbox
-Native.EntryFromInvoice = entryFromInvoice
