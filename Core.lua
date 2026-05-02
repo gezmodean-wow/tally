@@ -33,6 +33,19 @@ end
 ns.Cogworks = Cogworks
 ns.cw = Cogworks
 
+-- Per-cog debug logger. Cogworks v0.13's debug toolkit gives us a ring
+-- buffer + chat echo gated by an enabled flag, plus the live console at
+-- `/tally debug`. Modules call `ns.dbg:PrintDebug(...)` to trace event
+-- flow during testing; in production the enabled flag stays false and
+-- the calls are essentially no-ops (the ring buffer captures them but
+-- nothing reaches chat).
+TallyDB = TallyDB or {}
+if Cogworks and Cogworks.RegisterDebugLogger then
+  ns.dbg = Cogworks:RegisterDebugLogger("Tally", {
+    enabled = TallyDB.debug and true or false,
+  })
+end
+
 -- ============================================================================
 -- SavedVariables
 -- ============================================================================
@@ -103,6 +116,11 @@ function ns:PLAYER_LOGIN()
       end
     end)
   end
+  -- Register diagnostic inspectors with Cogworks's debug toolkit so the
+  -- dev console + DumpDebugState read the same per-section state that
+  -- /tally diag prints to chat.
+  if ns.RegisterDiagInspectors then ns.RegisterDiagInspectors() end
+
   -- Register UI pages with the main frame. Page bodies are lazy-created on
   -- first ShowPage so login cost is zero for users who never open the UI.
   if ns.UI and ns.UI.MainFrame then
@@ -210,32 +228,11 @@ _G.TallyAPI = {
 -- ============================================================================
 -- Slash commands
 -- ============================================================================
-local function printHelp()
-  local prefix = "|cff7fbfffTally|r"
-  print(prefix .. " — Personal Capital for WoW.")
-  print("  /tally show — open the Tally main frame")
-  print("  /tally networth (or /tly nw) — print current net worth (saleable items only)")
-  print("  /tally networth at -<duration> — reconstruct net worth at a past time (e.g. -7d, -1h)")
-  print("  /tally ownedworth (or /tly ow) — print owned worth (includes bound items)")
-  print("  /tally ownedworth at -<duration> — historical owned-worth view")
-  print("  /tally research <itemlink-or-id> — open the research panel for an item")
-  print("  /tally research-chat <itemlink-or-id> (or /tly rc) — print research record to chat")
-  print("  /tally rescan — force inventory rescan via Syndicator")
-  print("  /tally strategy — print current price strategy")
-  print("  /tally strategy <expression> — set price strategy (any TSM-valid expression)")
-  print("  /tally history — show pricing-history summary and config")
-  print("  /tally history snapshot — force a price snapshot now")
-  print("  /tally history interval <hours> — set min hours between auto-snapshots (0 = disable)")
-  print("  /tally history retention <days> — set max age of recorded snapshots")
-  print("  /tally history rollup <days> — collapse snapshots older than this to one per day")
-  print("  /tally history clear [strategy] — wipe history (all strategies, or one)")
-  print("  /tally reset confirm — wipe ledger + history + inventory rollup, then re-init")
-  print("  /tally setup — re-run the first-time setup wizard")
-  print("  /tally lifecycle <itemlink-or-id> — open per-item lifecycle drill-down")
-  print("  /tally compare — open the multi-source ledger comparison view")
-  print("  /tally inventory [charKey] — open the per-character inventory drill-down")
-  print("  /tally diag — print a diagnostic dump (paste into bug reports)")
-end
+-- The actual SLASH_<X>1 / SlashCmdList wiring + auto-help rendering happens
+-- via cw:RegisterSlashCommands at the bottom of this file. Per-command run
+-- handlers are defined inline there; the multi-line helpers below
+-- (handleNetWorth, handleHistory, resetData) stay here because they're
+-- substantial and benefit from named scope.
 
 -- Wipes the data stores Tally accumulates at runtime — ledger, history,
 -- inventory rollup, the setup-completed flag, and any user source opt-outs
@@ -305,18 +302,12 @@ ns.Reset = resetData
 -- /tally diag — one-shot diagnostic dump
 -- ============================================================================
 --
--- Prints a structured snapshot of Tally state to chat: addon versions,
--- Syndicator detection, character roster, inventory rollup health, ledger
--- counts per source, history snapshot stats, setup state, memory usage,
--- and the sibling-addon detection map. Designed to be copy-pasted into
--- a GitHub issue when a tester reports a problem like "I can't see my
--- inventory" — the dump immediately answers most "is X working?" questions
--- without round-tripping more questions.
---
--- Tally-local for now; folds onto cw:CreateDebug's :Diag() builder when
--- Cogworks v0.13's debug primitive lands.
-
-local function diagPrint(text) print(text) end
+-- Each diagnostic section is an inspector function returning a Lua value
+-- (table / string / nil). They're registered with Cogworks's debug toolkit
+-- so the dev console (`/tally debug`) and `cw:DumpDebugState("Tally")` can
+-- read them too — `/tally diag` is the chat-friendly dump that walks the
+-- same inspectors and pretty-prints the result. Single source of truth for
+-- the diagnostic surface.
 
 local function describeBoolean(v)
   if v == nil then return "nil"
@@ -324,7 +315,7 @@ local function describeBoolean(v)
   else return "no" end
 end
 
-local function describeAge(seconds)
+local function describeAgeAgo(seconds)
   if not seconds or seconds <= 0 then return "—" end
   local d = math.floor(seconds / 86400)
   if d > 0 then return d .. "d ago" end
@@ -335,194 +326,382 @@ local function describeAge(seconds)
   return seconds .. "s ago"
 end
 
-local function diagDump()
-  local now = time()
-  diagPrint("|cff7fbfff== Tally diagnostic ==|r")
-  diagPrint("|cff999999(copy these lines into a GitHub issue if you're reporting a bug)|r")
+-- Inspector functions. Pure of side effects — call them anywhere, anytime.
 
-  -- Versions ----------------------------------------------------------------
+local function inspectVersions()
   local tocVer = (C_AddOns and C_AddOns.GetAddOnMetadata and C_AddOns.GetAddOnMetadata("Tally", "Version"))
               or (GetAddOnMetadata and GetAddOnMetadata("Tally", "Version"))
               or "?"
   local cw = LibStub and LibStub("Cogworks-1.0", true) or nil
-  local cwVer = (cw and cw.version) or "(not loaded)"
-  diagPrint(string.format("Tally: %s  |  Cogworks: %s  |  Interface: %s",
-    tostring(tocVer), tostring(cwVer), tostring(select(4, GetBuildInfo()))))
+  return {
+    tally     = tostring(tocVer),
+    cogworks  = (cw and cw.version) or "(not loaded)",
+    interface = tostring(select(4, GetBuildInfo())),
+  }
+end
 
-  -- Setup state -------------------------------------------------------------
-  local setupCompleted = TallyDB and TallyDB.setup and TallyDB.setup.completed
-  local grandfathered = TallyDB and TallyDB.setup and TallyDB.setup.grandfathered
-  diagPrint(string.format("Setup: completed=%s  grandfathered=%s",
-    describeBoolean(setupCompleted), describeBoolean(grandfathered)))
+local function inspectSetup()
+  return {
+    completed     = TallyDB and TallyDB.setup and TallyDB.setup.completed and true or false,
+    grandfathered = TallyDB and TallyDB.setup and TallyDB.setup.grandfathered and true or false,
+  }
+end
 
-  -- Syndicator detection ----------------------------------------------------
-  local synAvailable = type(_G.Syndicator) == "table" and type(_G.Syndicator.API) == "table"
-  diagPrint(string.format("Syndicator: loaded=%s  API.GetAllCharacters=%s",
-    describeBoolean(synAvailable),
-    describeBoolean(synAvailable and type(_G.Syndicator.API.GetAllCharacters) == "function")))
-  if synAvailable and _G.Syndicator.API.GetAllCharacters then
+local function inspectSyndicator()
+  local available = type(_G.Syndicator) == "table" and type(_G.Syndicator.API) == "table"
+  local out = {
+    loaded              = available,
+    hasGetAllCharacters = available and type(_G.Syndicator.API.GetAllCharacters) == "function" or false,
+  }
+  if available and _G.Syndicator.API.GetAllCharacters then
     local ok, chars = pcall(_G.Syndicator.API.GetAllCharacters)
     if ok and type(chars) == "table" then
-      diagPrint(string.format("  Syndicator chars (%d):", #chars))
-      for i, ck in ipairs(chars) do
-        if i > 10 then
-          diagPrint(string.format("    … and %d more", #chars - 10))
-          break
-        end
-        diagPrint("    - " .. tostring(ck))
-      end
+      out.characters     = chars
+      out.characterCount = #chars
     else
-      diagPrint("  Syndicator GetAllCharacters() failed: " .. tostring(chars))
+      out.characterError = tostring(chars)
     end
   end
+  return out
+end
 
-  -- Inventory rollup --------------------------------------------------------
+local function inspectInventory()
+  local now = time()
   local rollup = TallyDB and TallyDB.inventoryRollup
-  if not rollup then
-    diagPrint("Inventory rollup: |cffff8080missing|r — never built. Try /tally rescan.")
-  else
-    local lastScan = rollup.lastFullScan
-    local charCount = 0
-    local totalItems = 0
-    local emptyChars = {}
-    for ck, char in pairs(rollup.characters or {}) do
-      charCount = charCount + 1
-      local n = 0
-      for _ in pairs(char.items or {}) do n = n + 1 end
-      totalItems = totalItems + n
-      if n == 0 then emptyChars[#emptyChars + 1] = ck end
-    end
-    diagPrint(string.format("Inventory rollup: %d chars, %d distinct items, last scan %s",
-      charCount, totalItems, describeAge(lastScan and (now - lastScan))))
-    if rollup.warband then
-      local wbItems = 0
-      for _ in pairs(rollup.warband.items or {}) do wbItems = wbItems + 1 end
-      diagPrint(string.format("  Warband: gold=%s, distinct items=%d",
-        ns.NetWorth.FormatGold(rollup.warband.gold or 0), wbItems))
-    end
-    if #emptyChars > 0 then
-      diagPrint("  |cffffd070Chars with 0 items in rollup:|r " ..
-        table.concat(emptyChars, ", "))
-    end
+  if not rollup then return { missing = true } end
+  local charCount, totalItems = 0, 0
+  local emptyChars = {}
+  for ck, char in pairs(rollup.characters or {}) do
+    charCount = charCount + 1
+    local n = 0
+    for _ in pairs(char.items or {}) do n = n + 1 end
+    totalItems = totalItems + n
+    if n == 0 then emptyChars[#emptyChars + 1] = ck end
   end
+  local out = {
+    charCount     = charCount,
+    distinctItems = totalItems,
+    lastScanAge   = rollup.lastFullScan and (now - rollup.lastFullScan) or nil,
+    emptyChars    = emptyChars,
+  }
+  if rollup.warband then
+    local wbItems = 0
+    for _ in pairs(rollup.warband.items or {}) do wbItems = wbItems + 1 end
+    out.warband = {
+      gold          = rollup.warband.gold or 0,
+      distinctItems = wbItems,
+    }
+  end
+  return out
+end
 
-  -- Active player char vs Syndicator ---------------------------------------
-  -- Probes the raw Syndicator field names too (TLY-24 + Toeknee's report
-  -- of wrong warband/per-char gold) so we can validate whether `data.money`
-  -- is the right field without assuming. If Syndicator returns gold under
-  -- a different key, the probe lines below will surface nil for `.money`
-  -- but a number for one of the alternates, immediately telling us what
-  -- to fix.
+-- Probes the raw Syndicator field names (TLY-24 — Toeknee's wrong warband /
+-- per-char gold report). If Syndicator returns gold under a different key
+-- than `.money`, this surfaces nil for the field we read versus a number
+-- for one of the alternates, telling us exactly what to fix.
+local function inspectCurrentChar()
   local me = (UnitName and UnitName("player") or "?") .. "-" .. (GetRealmName and GetRealmName() or "?")
-  if synAvailable and _G.Syndicator.API.GetByCharacterFullName then
+  local out = { charKey = me }
+  local available = type(_G.Syndicator) == "table" and type(_G.Syndicator.API) == "table"
+  if available and _G.Syndicator.API.GetByCharacterFullName then
     local ok, data = pcall(_G.Syndicator.API.GetByCharacterFullName, me)
-    local seen = (ok and type(data) == "table")
-    diagPrint(string.format("Current char (%s): seen by Syndicator=%s", me, describeBoolean(seen)))
-    if seen and data then
-      diagPrint(string.format("  Syndicator gold fields: money=%s gold=%s copper=%s",
-        tostring(data.money), tostring(data.gold), tostring(data.copper)))
-    end
-    if seen and rollup and rollup.characters then
-      local entry = rollup.characters[me]
-      local n = 0
-      if entry then for _ in pairs(entry.items or {}) do n = n + 1 end end
-      diagPrint(string.format("  In rollup: %s (%d distinct items, gold=%s)",
-        entry and "yes" or "|cffff8080NO|r", n,
-        entry and ns.NetWorth.FormatGold(entry.gold or 0) or "—"))
-    end
-  end
-
-  -- Warband Syndicator probe (TLY-24): same probe for the warband bucket
-  -- since Toeknee specifically reported warband gold being wrong.
-  if synAvailable and _G.Syndicator.API.GetWarband then
-    local ok, wb = pcall(_G.Syndicator.API.GetWarband, 1)
-    if ok and type(wb) == "table" then
-      diagPrint(string.format("Warband (idx=1): money=%s gold=%s copper=%s",
-        tostring(wb.money), tostring(wb.gold), tostring(wb.copper)))
+    if ok and type(data) == "table" then
+      out.seenBySyndicator    = true
+      out.syndicatorGoldFields = {
+        money  = data.money,
+        gold   = data.gold,
+        copper = data.copper,
+      }
     else
-      diagPrint("Warband: GetWarband(1) returned " .. tostring(wb))
+      out.seenBySyndicator = false
     end
   end
-
-  -- Ledger ------------------------------------------------------------------
-  if ns.Ledger and ns.Ledger.Stats then
-    local stats = ns.Ledger:Stats({})
-    diagPrint(string.format("Ledger: %d rows", stats.count))
-    if next(stats.bySource or {}) then
-      for src, n in pairs(stats.bySource) do
-        diagPrint(string.format("  %s: %d", src, n))
-      end
+  local rollup = TallyDB and TallyDB.inventoryRollup
+  if rollup and rollup.characters then
+    local entry = rollup.characters[me]
+    out.inRollup = entry ~= nil
+    if entry then
+      local n = 0
+      for _ in pairs(entry.items or {}) do n = n + 1 end
+      out.rollupItems = n
+      out.rollupGold  = entry.gold or 0
     end
   end
+  return out
+end
 
-  -- Per-source skip counters (TLY-29 capture-layer rigor). Each adapter
-  -- registers a `skipCounters` table on its module and increments named
-  -- reasons at every early-return. Surfaces silent data loss — the
-  -- "TSM importer dropped 47 rows for these reasons" view.
-  local function dumpSkipCounters(label, mod)
+local function inspectWarbandProbe()
+  local available = type(_G.Syndicator) == "table" and type(_G.Syndicator.API) == "table"
+  if not (available and _G.Syndicator.API.GetWarband) then return nil end
+  local ok, wb = pcall(_G.Syndicator.API.GetWarband, 1)
+  if ok and type(wb) == "table" then
+    return { money = wb.money, gold = wb.gold, copper = wb.copper }
+  end
+  return { error = tostring(wb) }
+end
+
+local function inspectLedger()
+  if not (ns.Ledger and ns.Ledger.Stats) then return nil end
+  local stats = ns.Ledger:Stats({})
+  return { rowCount = stats.count, bySource = stats.bySource }
+end
+
+-- Per-source skip counters (TLY-29 capture-layer rigor). Each adapter
+-- registers a `skipCounters` table on its module and increments named
+-- reasons at every early-return. Surfaces silent data loss.
+local function inspectSkipCounters()
+  local out = {}
+  local function dump(label, mod)
     if type(mod) ~= "table" or type(mod.skipCounters) ~= "table" then return end
     local total = 0
-    local lines = {}
+    local reasons = {}
     for reason, n in pairs(mod.skipCounters) do
       if n > 0 then
         total = total + n
-        lines[#lines + 1] = string.format("    %s: %d", reason, n)
+        reasons[reason] = n
       end
     end
-    if total > 0 then
-      diagPrint(string.format("  %s skipped %d rows since last load:", label, total))
-      table.sort(lines)
-      for _, l in ipairs(lines) do diagPrint(l) end
-    end
+    if total > 0 then out[label] = { total = total, reasons = reasons } end
   end
   if ns.Sources then
-    dumpSkipCounters("TSM",         ns.Sources.TSM)
-    dumpSkipCounters("FlipQueue",   ns.Sources.FlipQueue)
-    dumpSkipCounters("Journalator", ns.Sources.Journalator)
-    dumpSkipCounters("Native",      ns.Sources.Native)
+    dump("TSM",         ns.Sources.TSM)
+    dump("FlipQueue",   ns.Sources.FlipQueue)
+    dump("Journalator", ns.Sources.Journalator)
+    dump("Native",      ns.Sources.Native)
+  end
+  return out
+end
+
+local function inspectHistory()
+  if not (ns.History and ns.History.GetSummary) then return nil end
+  local sum = ns.History:GetSummary()
+  local out = { inventorySnapshots = sum.inventory.snapshotCount or 0, pricing = {} }
+  for _, p in ipairs(sum.pricing or {}) do
+    out.pricing[#out.pricing + 1] = { strategy = p.strategy, snapshots = p.snapshotCount }
+  end
+  return out
+end
+
+local function inspectDisabledSources()
+  if not (TallyDB.disabledSources and next(TallyDB.disabledSources)) then return nil end
+  local out = {}
+  for name in pairs(TallyDB.disabledSources) do out[#out + 1] = name end
+  table.sort(out)
+  return out
+end
+
+local function inspectSiblings()
+  return {
+    TSM         = type(_G.TSM_API) == "table",
+    FlipQueue   = type(_G.FlipQueueDB) == "table",
+    Journalator = type(_G.JOURNALATOR_ARCHIVE_TIMES) == "table",
+    Auctionator = type(_G.AUCTIONATOR_SHOPPING_LISTS) == "table" or type(_G.Auctionator) == "table",
+  }
+end
+
+local function inspectMemory()
+  if not (UpdateAddOnMemoryUsage and GetAddOnMemoryUsage) then return nil end
+  UpdateAddOnMemoryUsage()
+  return { kb = GetAddOnMemoryUsage("Tally") or 0 }
+end
+
+local DIAG_INSPECTORS = {
+  { name = "Versions",        fn = inspectVersions },
+  { name = "Setup",           fn = inspectSetup },
+  { name = "Syndicator",      fn = inspectSyndicator },
+  { name = "Inventory",       fn = inspectInventory },
+  { name = "CurrentChar",     fn = inspectCurrentChar },
+  { name = "WarbandProbe",    fn = inspectWarbandProbe },
+  { name = "Ledger",          fn = inspectLedger },
+  { name = "SkipCounters",    fn = inspectSkipCounters },
+  { name = "History",         fn = inspectHistory },
+  { name = "DisabledSources", fn = inspectDisabledSources },
+  { name = "Siblings",        fn = inspectSiblings },
+  { name = "Memory",          fn = inspectMemory },
+}
+
+-- Cogworks `RegisterDebugInspector` appends without dedupe — call once.
+local diagInspectorsRegistered = false
+local function registerDiagInspectors()
+  if diagInspectorsRegistered then return end
+  if not (Cogworks and Cogworks.RegisterDebugInspector) then return end
+  for _, ins in ipairs(DIAG_INSPECTORS) do
+    Cogworks:RegisterDebugInspector("Tally", ins.name, ins.fn)
+  end
+  diagInspectorsRegistered = true
+end
+
+-- Chat-friendly formatted dump. Walks each inspector and pretty-prints its
+-- output with colors / human-friendly sizes. Same data as DumpDebugState,
+-- shaped for inline reading + paste-into-issue.
+local function diagPrintChat()
+  print("|cff7fbfff== Tally diagnostic ==|r")
+  print("|cff999999(copy these lines into a GitHub issue if you're reporting a bug)|r")
+
+  local v = inspectVersions()
+  print(string.format("Tally: %s  |  Cogworks: %s  |  Interface: %s",
+    v.tally, v.cogworks, v.interface))
+
+  local s = inspectSetup()
+  print(string.format("Setup: completed=%s  grandfathered=%s",
+    describeBoolean(s.completed), describeBoolean(s.grandfathered)))
+
+  local syn = inspectSyndicator()
+  print(string.format("Syndicator: loaded=%s  API.GetAllCharacters=%s",
+    describeBoolean(syn.loaded), describeBoolean(syn.hasGetAllCharacters)))
+  if syn.characters then
+    print(string.format("  Syndicator chars (%d):", syn.characterCount))
+    for i, ck in ipairs(syn.characters) do
+      if i > 10 then
+        print(string.format("    … and %d more", syn.characterCount - 10))
+        break
+      end
+      print("    - " .. tostring(ck))
+    end
+  elseif syn.characterError then
+    print("  Syndicator GetAllCharacters() failed: " .. syn.characterError)
   end
 
-  -- History -----------------------------------------------------------------
-  if ns.History and ns.History.GetSummary then
-    local sum = ns.History:GetSummary()
-    diagPrint(string.format("History inventory: %d snapshots", sum.inventory.snapshotCount or 0))
-    for _, p in ipairs(sum.pricing or {}) do
-      diagPrint(string.format("  Pricing [%s]: %d snapshots", p.strategy, p.snapshotCount))
+  local inv = inspectInventory()
+  if inv.missing then
+    print("Inventory rollup: |cffff8080missing|r — never built. Try /tally rescan.")
+  else
+    print(string.format("Inventory rollup: %d chars, %d distinct items, last scan %s",
+      inv.charCount, inv.distinctItems, describeAgeAgo(inv.lastScanAge)))
+    if inv.warband then
+      print(string.format("  Warband: gold=%s, distinct items=%d",
+        ns.NetWorth.FormatGold(inv.warband.gold), inv.warband.distinctItems))
+    end
+    if #inv.emptyChars > 0 then
+      print("  |cffffd070Chars with 0 items in rollup:|r " ..
+        table.concat(inv.emptyChars, ", "))
     end
   end
 
-  -- Disabled sources --------------------------------------------------------
-  if TallyDB.disabledSources and next(TallyDB.disabledSources) then
-    local disabled = {}
-    for name in pairs(TallyDB.disabledSources) do disabled[#disabled + 1] = name end
-    diagPrint("Disabled sources: " .. table.concat(disabled, ", "))
+  local cur = inspectCurrentChar()
+  if cur.seenBySyndicator ~= nil then
+    print(string.format("Current char (%s): seen by Syndicator=%s",
+      cur.charKey, describeBoolean(cur.seenBySyndicator)))
+  end
+  if cur.syndicatorGoldFields then
+    print(string.format("  Syndicator gold fields: money=%s gold=%s copper=%s",
+      tostring(cur.syndicatorGoldFields.money),
+      tostring(cur.syndicatorGoldFields.gold),
+      tostring(cur.syndicatorGoldFields.copper)))
+  end
+  if cur.inRollup ~= nil then
+    print(string.format("  In rollup: %s (%d distinct items, gold=%s)",
+      cur.inRollup and "yes" or "|cffff8080NO|r",
+      cur.rollupItems or 0,
+      cur.rollupGold and ns.NetWorth.FormatGold(cur.rollupGold) or "—"))
   end
 
-  -- Sibling-addon detection ------------------------------------------------
-  local siblings = {
-    { name = "TSM",         present = type(_G.TSM_API) == "table" },
-    { name = "FlipQueue",   present = type(_G.FlipQueueDB) == "table" },
-    { name = "Journalator", present = type(_G.JOURNALATOR_ARCHIVE_TIMES) == "table" },
-    { name = "Auctionator", present = type(_G.AUCTIONATOR_SHOPPING_LISTS) == "table" or type(_G.Auctionator) == "table" },
-  }
+  local wb = inspectWarbandProbe()
+  if wb then
+    if wb.error then
+      print("Warband: GetWarband(1) returned " .. wb.error)
+    else
+      print(string.format("Warband (idx=1): money=%s gold=%s copper=%s",
+        tostring(wb.money), tostring(wb.gold), tostring(wb.copper)))
+    end
+  end
+
+  local lg = inspectLedger()
+  if lg then
+    print(string.format("Ledger: %d rows", lg.rowCount))
+    if next(lg.bySource or {}) then
+      for src, n in pairs(lg.bySource) do
+        print(string.format("  %s: %d", src, n))
+      end
+    end
+  end
+
+  local sk = inspectSkipCounters()
+  if sk and next(sk) then
+    local labels = {}
+    for k in pairs(sk) do labels[#labels + 1] = k end
+    table.sort(labels)
+    for _, label in ipairs(labels) do
+      local entry = sk[label]
+      print(string.format("  %s skipped %d rows since last load:", label, entry.total))
+      local rs = {}
+      for r, n in pairs(entry.reasons) do rs[#rs + 1] = string.format("    %s: %d", r, n) end
+      table.sort(rs)
+      for _, line in ipairs(rs) do print(line) end
+    end
+  end
+
+  local h = inspectHistory()
+  if h then
+    print(string.format("History inventory: %d snapshots", h.inventorySnapshots))
+    for _, p in ipairs(h.pricing) do
+      print(string.format("  Pricing [%s]: %d snapshots", p.strategy, p.snapshots))
+    end
+  end
+
+  local ds = inspectDisabledSources()
+  if ds then
+    print("Disabled sources: " .. table.concat(ds, ", "))
+  end
+
+  local sib = inspectSiblings()
+  local sibOrder = { "TSM", "FlipQueue", "Journalator", "Auctionator" }
   local sibLine = "Siblings: "
-  for i, s in ipairs(siblings) do
+  for i, name in ipairs(sibOrder) do
     if i > 1 then sibLine = sibLine .. "  " end
-    sibLine = sibLine .. s.name .. "=" .. (s.present and "|cff7fffaeyes|r" or "|cff888888no|r")
+    sibLine = sibLine .. name .. "=" .. (sib[name] and "|cff7fffaeyes|r" or "|cff888888no|r")
   end
-  diagPrint(sibLine)
+  print(sibLine)
 
-  -- Memory ------------------------------------------------------------------
-  if UpdateAddOnMemoryUsage and GetAddOnMemoryUsage then
-    UpdateAddOnMemoryUsage()
-    local mem = GetAddOnMemoryUsage("Tally") or 0
-    diagPrint(string.format("Memory: %.1f KB", mem))
+  local m = inspectMemory()
+  if m then
+    print(string.format("Memory: %.1f KB", m.kb))
   end
 
-  diagPrint("|cff7fbfff== end diagnostic ==|r")
+  print("|cff7fbfff== end diagnostic ==|r")
 end
 
-ns.Diag = diagDump
+-- Paste-friendly variant: opens Cogworks's CreateCopyDialog with the
+-- DumpDebugState output (Lua-table format, structured, easy to diff
+-- between testers). Falls back to chat dump if Cogworks debug toolkit
+-- is unavailable for any reason.
+local function diagOpenCopyDialog()
+  if not (Cogworks and Cogworks.DumpDebugState and Cogworks.CreateCopyDialog) then
+    diagPrintChat()
+    return
+  end
+  registerDiagInspectors()
+  local dump = Cogworks:DumpDebugState("Tally")
+  Cogworks:CreateCopyDialog(dump, "Paste this into a GitHub issue when reporting a bug.")
+end
+
+-- Sibling cogs hold a reference to ns.Diag — preserve the contract.
+ns.Diag = diagPrintChat
+ns.DiagCopyDialog = diagOpenCopyDialog
+ns.RegisterDiagInspectors = registerDiagInspectors
+
+-- Live debug console — opens Cogworks's CreateDebugConsole({ cog = "Tally" }).
+-- Singleton: one console instance reused across slash invocations. Position,
+-- size, and pinned state persist into TallyDB.ui.debugConsole.
+local debugConsole
+local function toggleDebugConsole()
+  if not (Cogworks and Cogworks.CreateDebugConsole) then
+    print("|cffff4040Tally:|r debug console requires Cogworks v0.13+. Update Cogworks-1.0.")
+    return
+  end
+  registerDiagInspectors()
+  if not debugConsole then
+    TallyDB.ui = TallyDB.ui or {}
+    TallyDB.ui.debugConsole = TallyDB.ui.debugConsole or {}
+    debugConsole = Cogworks:CreateDebugConsole({
+      cog       = "Tally",
+      savedvars = TallyDB.ui.debugConsole,
+    })
+  end
+  if debugConsole:IsShown() then debugConsole:Hide() else debugConsole:Show() end
+end
+
+ns.ToggleDebugConsole = toggleDebugConsole
 
 local function describeAge(seconds)
   if not seconds or seconds <= 0 then return "—" end
@@ -693,103 +872,167 @@ local function handleHistory(args)
   print(err .. " unknown history subcommand '" .. sub .. "'. Try /tally history.")
 end
 
-local function handleSlash(msg)
-  msg = (msg or ""):match("^%s*(.-)%s*$") -- trim
-  if msg == "" or msg == "help" then
-    printHelp()
-    return
-  end
-  local cmd, rest = msg:match("^(%S+)%s*(.*)$")
-  cmd = cmd:lower()
-  if cmd == "show" or cmd == "ui" then
-    if ns.UI and ns.UI.MainFrame then
-      ns.UI.MainFrame:Toggle()
-    else
-      print("|cffff4040Tally:|r UI module unavailable.")
-    end
-  elseif cmd == "networth" or cmd == "nw" then
-    handleNetWorth(rest, false)
-  elseif cmd == "ownedworth" or cmd == "ow" then
-    handleNetWorth(rest, true)
-  elseif cmd == "research" or cmd == "r" then
-    if rest == "" then
-      -- Open the Research panel without an item; user can type into the input.
-      if ns.UI and ns.UI.ShowResearch then ns.UI.ShowResearch(nil)
-      else print("|cff7fbfffTally:|r usage — /tally research <itemlink-or-id>") end
-    else
-      if ns.UI and ns.UI.ShowResearch then ns.UI.ShowResearch(rest)
-      else ns.Research:Print(rest) end
-    end
-  elseif cmd == "research-chat" or cmd == "rc" then
-    -- Preserved chat-only printout for power users / debugging.
-    if rest == "" then
-      print("|cff7fbfffTally:|r usage — /tally research-chat <itemlink-or-id>")
-    else
-      ns.Research:Print(rest)
-    end
-  elseif cmd == "rescan" then
-    local ok, err = ns.Inventory:Rebuild()
-    if ok then print("|cff7fbfffTally:|r inventory rescanned.")
-    else print("|cffff4040Tally:|r rescan failed — " .. tostring(err)) end
-  elseif cmd == "history" or cmd == "h" then
-    handleHistory(rest)
-  elseif cmd == "strategy" then
-    if rest == "" then
-      print("|cff7fbfffTally:|r price strategy = " .. ns.NetWorth:GetStrategy())
-    else
-      local ok, err = ns.NetWorth:SetStrategy(rest)
-      if ok then print("|cff7fbfffTally:|r price strategy set to '" .. rest .. "'.")
-      else print("|cffff4040Tally:|r " .. tostring(err)) end
-    end
-  elseif cmd == "reset" then
-    if rest == "confirm" then
-      resetData()
-    else
-      print("|cffff4040Tally:|r `/tally reset confirm` will wipe ledger, history, and inventory rollup.")
-      print("|cffff4040Tally:|r Config (strategy, history cadence, minimap, UI prefs) is preserved. Sibling-source import re-runs after.")
-    end
-  elseif cmd == "setup" or cmd == "wizard" then
-    if ns.UI and ns.UI.ShowSetupWizard then
-      ns.UI.ShowSetupWizard()
-    else
-      print("|cffff4040Tally:|r setup wizard unavailable.")
-    end
-  elseif cmd == "lifecycle" or cmd == "lc" then
-    if ns.UI and ns.UI.ShowLifecycle then
-      ns.UI.ShowLifecycle(rest)
-    else
-      print("|cffff4040Tally:|r lifecycle UI unavailable.")
-    end
-  elseif cmd == "inventory" or cmd == "inv" then
-    if ns.UI and ns.UI.ShowInventory then
-      ns.UI.ShowInventory(rest ~= "" and rest or nil)
-    else
-      print("|cffff4040Tally:|r inventory page unavailable.")
-    end
-  elseif cmd == "diag" or cmd == "diagnostic" then
-    diagDump()
-  elseif cmd == "compare" then
-    if ns.UI and ns.UI.MainFrame and ns.UI.CreateCompareLedgersPage then
-      -- If the Compare tab isn't currently registered (toggle off), turn
-      -- it on for this session so the slash command works regardless.
-      TallyDB.ui = TallyDB.ui or {}
-      if not TallyDB.ui.showCompareTab then
-        TallyDB.ui.showCompareTab = true
-        ns.UI.MainFrame:RegisterPage("Compare", ns.UI.CreateCompareLedgersPage)
-      end
-      ns.UI.MainFrame:Show()
-      ns.UI.MainFrame:ShowPage("Compare")
-    else
-      print("|cffff4040Tally:|r compare view unavailable.")
-    end
-  else
-    printHelp()
-  end
+if Cogworks and Cogworks.RegisterSlashCommands then
+  Cogworks:RegisterSlashCommands("Tally", {
+    globals   = { "/tally", "/tly" },
+    helpStyle = "chat",
+    commands = {
+      {
+        name = "show", aliases = { "ui" },
+        help = "Open the Tally main frame",
+        run = function()
+          if ns.UI and ns.UI.MainFrame then ns.UI.MainFrame:Toggle()
+          else print("|cffff4040Tally:|r UI module unavailable.") end
+        end,
+      },
+      {
+        name = "networth", aliases = { "nw" },
+        args = "[at -<duration>]",
+        help = "Print current net worth (saleable items only)",
+        run = function(rest) handleNetWorth(rest, false) end,
+      },
+      {
+        name = "ownedworth", aliases = { "ow" },
+        args = "[at -<duration>]",
+        help = "Print owned worth (includes bound items)",
+        run = function(rest) handleNetWorth(rest, true) end,
+      },
+      {
+        name = "research", aliases = { "r" },
+        args = "<itemlink-or-id>",
+        help = "Open the research panel for an item",
+        run = function(rest)
+          if rest == "" then
+            if ns.UI and ns.UI.ShowResearch then ns.UI.ShowResearch(nil)
+            else print("|cff7fbfffTally:|r usage — /tally research <itemlink-or-id>") end
+          else
+            if ns.UI and ns.UI.ShowResearch then ns.UI.ShowResearch(rest)
+            else ns.Research:Print(rest) end
+          end
+        end,
+      },
+      {
+        name = "research-chat", aliases = { "rc" },
+        args = "<itemlink-or-id>",
+        help = "Print research record to chat (power-user / debug)",
+        run = function(rest)
+          if rest == "" then
+            print("|cff7fbfffTally:|r usage — /tally research-chat <itemlink-or-id>")
+          else
+            ns.Research:Print(rest)
+          end
+        end,
+      },
+      {
+        name = "rescan",
+        help = "Force inventory rescan via Syndicator",
+        run = function()
+          local ok, err = ns.Inventory:Rebuild()
+          if ok then print("|cff7fbfffTally:|r inventory rescanned.")
+          else print("|cffff4040Tally:|r rescan failed — " .. tostring(err)) end
+        end,
+      },
+      {
+        name = "history", aliases = { "h" },
+        args = "[snapshot|interval|retention|rollup|clear]",
+        help = "Show pricing-history config / take snapshot / set retention",
+        run = function(rest) handleHistory(rest) end,
+      },
+      {
+        name = "strategy",
+        args = "[<expression>]",
+        help = "Print or set price strategy",
+        run = function(rest)
+          rest = rest or ""
+          if rest == "" then
+            print("|cff7fbfffTally:|r price strategy = " .. ns.NetWorth:GetStrategy())
+          else
+            local ok, err = ns.NetWorth:SetStrategy(rest)
+            if ok then print("|cff7fbfffTally:|r price strategy set to '" .. rest .. "'.")
+            else print("|cffff4040Tally:|r " .. tostring(err)) end
+          end
+        end,
+      },
+      {
+        name = "reset",
+        args = "confirm",
+        help = "Wipe ledger + history + inventory rollup, then re-init",
+        run = function(rest)
+          if rest == "confirm" then
+            resetData()
+          else
+            print("|cffff4040Tally:|r `/tally reset confirm` will wipe ledger, history, and inventory rollup.")
+            print("|cffff4040Tally:|r Config (strategy, history cadence, minimap, UI prefs) is preserved. Sibling-source import re-runs after.")
+          end
+        end,
+      },
+      {
+        name = "setup", aliases = { "wizard" },
+        help = "Re-run the first-time setup wizard",
+        run = function()
+          if ns.UI and ns.UI.ShowSetupWizard then ns.UI.ShowSetupWizard()
+          else print("|cffff4040Tally:|r setup wizard unavailable.") end
+        end,
+      },
+      {
+        name = "lifecycle", aliases = { "lc" },
+        args = "<itemlink-or-id>",
+        help = "Open per-item lifecycle drill-down",
+        run = function(rest)
+          if ns.UI and ns.UI.ShowLifecycle then ns.UI.ShowLifecycle(rest)
+          else print("|cffff4040Tally:|r lifecycle UI unavailable.") end
+        end,
+      },
+      {
+        name = "inventory", aliases = { "inv" },
+        args = "[charKey]",
+        help = "Open the per-character inventory drill-down",
+        run = function(rest)
+          if ns.UI and ns.UI.ShowInventory then
+            ns.UI.ShowInventory((rest and rest ~= "") and rest or nil)
+          else
+            print("|cffff4040Tally:|r inventory page unavailable.")
+          end
+        end,
+      },
+      {
+        name = "compare",
+        help = "Open the multi-source ledger comparison view",
+        run = function()
+          if ns.UI and ns.UI.MainFrame and ns.UI.CreateCompareLedgersPage then
+            TallyDB.ui = TallyDB.ui or {}
+            if not TallyDB.ui.showCompareTab then
+              TallyDB.ui.showCompareTab = true
+              ns.UI.MainFrame:RegisterPage("Compare", ns.UI.CreateCompareLedgersPage)
+            end
+            ns.UI.MainFrame:Show()
+            ns.UI.MainFrame:ShowPage("Compare")
+          else
+            print("|cffff4040Tally:|r compare view unavailable.")
+          end
+        end,
+      },
+      {
+        name = "diag", aliases = { "diagnostic" },
+        args = "[copy]",
+        help = "Print diagnostic dump (or open the structured copy dialog)",
+        run = function(rest)
+          if rest and rest:lower() == "copy" then diagOpenCopyDialog()
+          else diagPrintChat() end
+        end,
+      },
+      {
+        name = "debug",
+        help = "Toggle the live debug console",
+        run = function() toggleDebugConsole() end,
+      },
+    },
+  })
+else
+  -- Cogworks v0.13+ is required for slash registration. Surface the failure
+  -- explicitly so it doesn't masquerade as "slash silently broken".
+  print("|cffff4040Tally:|r slash registration skipped — Cogworks v0.13+ required.")
 end
-
-SLASH_TALLY1 = "/tally"
-SLASH_TALLY2 = "/tly"
-SlashCmdList["TALLY"] = handleSlash
 
 -- ============================================================================
 -- LibDataBroker launcher + minimap icon
