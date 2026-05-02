@@ -38,6 +38,16 @@ ns.Sources.Journalator = Journalator
 
 local SOURCE_NAME = "journalator"
 
+-- Loss counters surfaced by /tally diag (TLY-29). Per-mapper buckets
+-- aggregated under shared reasons so the diag output stays compact.
+Journalator.skipCounters = {
+  bad_row_or_no_time = 0,
+  no_char_key = 0,
+  unknown_failure_type = 0,
+  unknown_vendor_type = 0,
+  zero_or_missing_value = 0,
+}
+
 -- ============================================================================
 -- Availability
 -- ============================================================================
@@ -111,8 +121,17 @@ local function mapInvoice(row)
   -- — the Posting bucket already wrote the original ah-deposit; the sale
   -- row pairs with it at view time (Lifecycle).
   local out = {}
-  if type(row) ~= "table" or not row.time then return out end
-  local charKey = charKeyFromSource(row.source); if not charKey then return out end
+  if type(row) ~= "table" or not row.time then
+    Journalator.skipCounters.bad_row_or_no_time =
+      Journalator.skipCounters.bad_row_or_no_time + 1
+    return out
+  end
+  local charKey = charKeyFromSource(row.source)
+  if not charKey then
+    Journalator.skipCounters.no_char_key =
+      Journalator.skipCounters.no_char_key + 1
+    return out
+  end
   local itemID = itemIDFromLink(row.itemLink)
   local count = safeNum(row.count) > 0 and row.count or 1
   local invoiceType = row.invoiceType or row.type
@@ -182,12 +201,25 @@ end
 local function mapFailure(row)
   -- AH expire / cancel from mail. failedType discriminates.
   local out = {}
-  if type(row) ~= "table" or not row.time then return out end
-  local charKey = charKeyFromSource(row.source); if not charKey then return out end
+  if type(row) ~= "table" or not row.time then
+    Journalator.skipCounters.bad_row_or_no_time =
+      Journalator.skipCounters.bad_row_or_no_time + 1
+    return out
+  end
+  local charKey = charKeyFromSource(row.source)
+  if not charKey then
+    Journalator.skipCounters.no_char_key =
+      Journalator.skipCounters.no_char_key + 1
+    return out
+  end
   local kind
   if row.failedType == "expired" then kind = "ah-expire"
   elseif row.failedType == "cancelled" then kind = "ah-cancel"
-  else return out end
+  else
+    Journalator.skipCounters.unknown_failure_type =
+      Journalator.skipCounters.unknown_failure_type + 1
+    return out
+  end
   local count = safeNum(row.count) > 0 and row.count or 1
   local salt = string.format("%s|%s|%d", kind, row.itemName or "?", count)
   local hash = rowHash("Failures", salt, row.source, row.time)
@@ -211,8 +243,17 @@ local function mapPosting(row)
   -- on this listing is the deposit (negative if it expires/cancels) +
   -- eventual sale value (paired at view time with an Invoices row).
   local out = {}
-  if type(row) ~= "table" or not row.time then return out end
-  local charKey = charKeyFromSource(row.source); if not charKey then return out end
+  if type(row) ~= "table" or not row.time then
+    Journalator.skipCounters.bad_row_or_no_time =
+      Journalator.skipCounters.bad_row_or_no_time + 1
+    return out
+  end
+  local charKey = charKeyFromSource(row.source)
+  if not charKey then
+    Journalator.skipCounters.no_char_key =
+      Journalator.skipCounters.no_char_key + 1
+    return out
+  end
   local count = safeNum(row.count) > 0 and row.count or 1
   local salt = string.format("post|%s|%d|%d|%d",
     row.itemName or "?",
@@ -245,12 +286,25 @@ local function mapVendoring(row)
   -- Vendor sell or buy. vendorType = "sell" / "buy". value is total copper,
   -- count is stack size.
   local out = {}
-  if type(row) ~= "table" or not row.time then return out end
-  local charKey = charKeyFromSource(row.source); if not charKey then return out end
+  if type(row) ~= "table" or not row.time then
+    Journalator.skipCounters.bad_row_or_no_time =
+      Journalator.skipCounters.bad_row_or_no_time + 1
+    return out
+  end
+  local charKey = charKeyFromSource(row.source)
+  if not charKey then
+    Journalator.skipCounters.no_char_key =
+      Journalator.skipCounters.no_char_key + 1
+    return out
+  end
   local kind
   if row.vendorType == "sell" then kind = "vendor-sell"
   elseif row.vendorType == "buy" then kind = "vendor-buy"
-  else return out end
+  else
+    Journalator.skipCounters.unknown_vendor_type =
+      Journalator.skipCounters.unknown_vendor_type + 1
+    return out
+  end
   local count = safeNum(row.count) > 0 and row.count or 1
   local salt = string.format("%s|%s|%d|%d", kind, row.itemName or "?", safeNum(row.value), count)
   local hash = rowHash("Vendoring", salt, row.source, row.time)
@@ -271,8 +325,17 @@ end
 
 local function mapVendorRepair(row)
   local out = {}
-  if type(row) ~= "table" or not row.time then return out end
-  local charKey = charKeyFromSource(row.source); if not charKey then return out end
+  if type(row) ~= "table" or not row.time then
+    Journalator.skipCounters.bad_row_or_no_time =
+      Journalator.skipCounters.bad_row_or_no_time + 1
+    return out
+  end
+  local charKey = charKeyFromSource(row.source)
+  if not charKey then
+    Journalator.skipCounters.no_char_key =
+      Journalator.skipCounters.no_char_key + 1
+    return out
+  end
   local copper = safeNum(row.copperValue or row.value)
   if copper <= 0 then return out end
   local hash = rowHash("VendorRepairs", tostring(copper), row.source, row.time)
@@ -295,8 +358,17 @@ local function mapTrade(row)
   -- gross flow in either direction; itemized fanning-out is too noisy for
   -- a ledger view and the trade meta carries the full payload for drill-down.
   local out = {}
-  if type(row) ~= "table" or not row.time then return out end
-  local charKey = charKeyFromSource(row.source); if not charKey then return out end
+  if type(row) ~= "table" or not row.time then
+    Journalator.skipCounters.bad_row_or_no_time =
+      Journalator.skipCounters.bad_row_or_no_time + 1
+    return out
+  end
+  local charKey = charKeyFromSource(row.source)
+  if not charKey then
+    Journalator.skipCounters.no_char_key =
+      Journalator.skipCounters.no_char_key + 1
+    return out
+  end
   local moneyIn = safeNum(row.moneyIn)
   local moneyOut = safeNum(row.moneyOut)
   local salt = string.format("trade|%s|%d|%d", row.recipient or row.partner or "?", moneyIn, moneyOut)
@@ -325,8 +397,17 @@ local function mapBasicMail(row, kind)
   -- Mail send/receive (non-AH, non-CO). Money-only mails are easy; mail
   -- with items attached records as the meta item list.
   local out = {}
-  if type(row) ~= "table" or not row.time then return out end
-  local charKey = charKeyFromSource(row.source); if not charKey then return out end
+  if type(row) ~= "table" or not row.time then
+    Journalator.skipCounters.bad_row_or_no_time =
+      Journalator.skipCounters.bad_row_or_no_time + 1
+    return out
+  end
+  local charKey = charKeyFromSource(row.source)
+  if not charKey then
+    Journalator.skipCounters.no_char_key =
+      Journalator.skipCounters.no_char_key + 1
+    return out
+  end
   local money = safeNum(row.money)
   local salt = string.format("%s|%s|%d", kind, row.recipient or row.sender or "?", money)
   local hash = rowHash(kind == "mail-receive" and "BasicMailReceived" or "BasicMailSent",
@@ -347,8 +428,17 @@ end
 
 local function mapTaxi(row)
   local out = {}
-  if type(row) ~= "table" or not row.time then return out end
-  local charKey = charKeyFromSource(row.source); if not charKey then return out end
+  if type(row) ~= "table" or not row.time then
+    Journalator.skipCounters.bad_row_or_no_time =
+      Journalator.skipCounters.bad_row_or_no_time + 1
+    return out
+  end
+  local charKey = charKeyFromSource(row.source)
+  if not charKey then
+    Journalator.skipCounters.no_char_key =
+      Journalator.skipCounters.no_char_key + 1
+    return out
+  end
   local copper = safeNum(row.copperValue or row.value)
   if copper <= 0 then return out end
   local salt = string.format("taxi|%d|%s", copper, row.target or row.destination or "?")
@@ -369,8 +459,17 @@ end
 
 local function mapTrainer(row)
   local out = {}
-  if type(row) ~= "table" or not row.time then return out end
-  local charKey = charKeyFromSource(row.source); if not charKey then return out end
+  if type(row) ~= "table" or not row.time then
+    Journalator.skipCounters.bad_row_or_no_time =
+      Journalator.skipCounters.bad_row_or_no_time + 1
+    return out
+  end
+  local charKey = charKeyFromSource(row.source)
+  if not charKey then
+    Journalator.skipCounters.no_char_key =
+      Journalator.skipCounters.no_char_key + 1
+    return out
+  end
   local copper = safeNum(row.copperValue or row.value)
   if copper <= 0 then return out end
   local hash = rowHash("TrainingCosts", tostring(copper), row.source, row.time)
@@ -393,8 +492,17 @@ local function mapQuesting(row)
   -- record one quest-reward row carrying the full payload. Item-level
   -- attribution lives in meta for downstream consumers.
   local out = {}
-  if type(row) ~= "table" or not row.time then return out end
-  local charKey = charKeyFromSource(row.source); if not charKey then return out end
+  if type(row) ~= "table" or not row.time then
+    Journalator.skipCounters.bad_row_or_no_time =
+      Journalator.skipCounters.bad_row_or_no_time + 1
+    return out
+  end
+  local charKey = charKeyFromSource(row.source)
+  if not charKey then
+    Journalator.skipCounters.no_char_key =
+      Journalator.skipCounters.no_char_key + 1
+    return out
+  end
   local copper = safeNum(row.copperValue or row.money or row.value)
   local salt = string.format("quest|%s|%d", row.questName or row.questID or "?", copper)
   local hash = rowHash("Questing", salt, row.source, row.time)
@@ -419,8 +527,17 @@ end
 
 local function mapMission(row)
   local out = {}
-  if type(row) ~= "table" or not row.time then return out end
-  local charKey = charKeyFromSource(row.source); if not charKey then return out end
+  if type(row) ~= "table" or not row.time then
+    Journalator.skipCounters.bad_row_or_no_time =
+      Journalator.skipCounters.bad_row_or_no_time + 1
+    return out
+  end
+  local charKey = charKeyFromSource(row.source)
+  if not charKey then
+    Journalator.skipCounters.no_char_key =
+      Journalator.skipCounters.no_char_key + 1
+    return out
+  end
   local copper = safeNum(row.copperValue or row.money or row.value)
   local salt = string.format("mission|%s|%d", row.missionName or row.missionID or "?", copper)
   local hash = rowHash("MissionTables", salt, row.source, row.time)
@@ -443,8 +560,17 @@ local function mapLootContainer(row)
   -- items + currencies. We emit one neutral loot row per container; the
   -- per-item attribution lives in meta.
   local out = {}
-  if type(row) ~= "table" or not row.time then return out end
-  local charKey = charKeyFromSource(row.source); if not charKey then return out end
+  if type(row) ~= "table" or not row.time then
+    Journalator.skipCounters.bad_row_or_no_time =
+      Journalator.skipCounters.bad_row_or_no_time + 1
+    return out
+  end
+  local charKey = charKeyFromSource(row.source)
+  if not charKey then
+    Journalator.skipCounters.no_char_key =
+      Journalator.skipCounters.no_char_key + 1
+    return out
+  end
   local copper = safeNum(row.copperValue or row.money or row.value)
   local salt = string.format("loot|%s|%d", row.sourceMob or row.sourceContainer or "?", copper)
   local hash = rowHash("LootContainers", salt, row.source, row.time)
@@ -469,8 +595,17 @@ end
 
 local function mapTradingPost(row)
   local out = {}
-  if type(row) ~= "table" or not row.time then return out end
-  local charKey = charKeyFromSource(row.source); if not charKey then return out end
+  if type(row) ~= "table" or not row.time then
+    Journalator.skipCounters.bad_row_or_no_time =
+      Journalator.skipCounters.bad_row_or_no_time + 1
+    return out
+  end
+  local charKey = charKeyFromSource(row.source)
+  if not charKey then
+    Journalator.skipCounters.no_char_key =
+      Journalator.skipCounters.no_char_key + 1
+    return out
+  end
   local salt = string.format("tp|%s|%d|%d",
     row.itemName or "?", safeNum(row.currencyCost), safeNum(row.count))
   local hash = rowHash("TradingPostVendoring", salt, row.source, row.time)
@@ -491,8 +626,17 @@ end
 
 local function mapCraftingOrderPlaced(row)
   local out = {}
-  if type(row) ~= "table" or not row.time then return out end
-  local charKey = charKeyFromSource(row.source); if not charKey then return out end
+  if type(row) ~= "table" or not row.time then
+    Journalator.skipCounters.bad_row_or_no_time =
+      Journalator.skipCounters.bad_row_or_no_time + 1
+    return out
+  end
+  local charKey = charKeyFromSource(row.source)
+  if not charKey then
+    Journalator.skipCounters.no_char_key =
+      Journalator.skipCounters.no_char_key + 1
+    return out
+  end
   local commission = safeNum(row.commission or row.tip)
   local salt = string.format("co-place|%s|%d", row.recipeName or row.itemName or "?", commission)
   local hash = rowHash("CraftingOrdersPlaced", salt, row.source, row.time)
@@ -518,8 +662,17 @@ end
 
 local function mapCraftingOrderFulfilled(row)
   local out = {}
-  if type(row) ~= "table" or not row.time then return out end
-  local charKey = charKeyFromSource(row.source); if not charKey then return out end
+  if type(row) ~= "table" or not row.time then
+    Journalator.skipCounters.bad_row_or_no_time =
+      Journalator.skipCounters.bad_row_or_no_time + 1
+    return out
+  end
+  local charKey = charKeyFromSource(row.source)
+  if not charKey then
+    Journalator.skipCounters.no_char_key =
+      Journalator.skipCounters.no_char_key + 1
+    return out
+  end
   local commission = safeNum(row.commission or row.tip)
   local salt = string.format("co-fulfill|%s|%d", row.itemName or row.recipeName or "?", commission)
   local hash = rowHash("Fulfilling", salt, row.source, row.time)
@@ -637,6 +790,7 @@ end
 
 function Journalator:Register()
   if not ns.Ledger or not ns.Ledger.RegisterSource then return end
+  for k in pairs(self.skipCounters) do self.skipCounters[k] = 0 end
   ns.Ledger:RegisterSource(SOURCE_NAME, {
     label = "Journalator",
     importFn = importAll,

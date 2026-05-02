@@ -407,17 +407,40 @@ local function diagDump()
   end
 
   -- Active player char vs Syndicator ---------------------------------------
+  -- Probes the raw Syndicator field names too (TLY-24 + Toeknee's report
+  -- of wrong warband/per-char gold) so we can validate whether `data.money`
+  -- is the right field without assuming. If Syndicator returns gold under
+  -- a different key, the probe lines below will surface nil for `.money`
+  -- but a number for one of the alternates, immediately telling us what
+  -- to fix.
   local me = (UnitName and UnitName("player") or "?") .. "-" .. (GetRealmName and GetRealmName() or "?")
   if synAvailable and _G.Syndicator.API.GetByCharacterFullName then
     local ok, data = pcall(_G.Syndicator.API.GetByCharacterFullName, me)
     local seen = (ok and type(data) == "table")
     diagPrint(string.format("Current char (%s): seen by Syndicator=%s", me, describeBoolean(seen)))
+    if seen and data then
+      diagPrint(string.format("  Syndicator gold fields: money=%s gold=%s copper=%s",
+        tostring(data.money), tostring(data.gold), tostring(data.copper)))
+    end
     if seen and rollup and rollup.characters then
       local entry = rollup.characters[me]
       local n = 0
       if entry then for _ in pairs(entry.items or {}) do n = n + 1 end end
-      diagPrint(string.format("  In rollup: %s (%d distinct items)",
-        entry and "yes" or "|cffff8080NO|r", n))
+      diagPrint(string.format("  In rollup: %s (%d distinct items, gold=%s)",
+        entry and "yes" or "|cffff8080NO|r", n,
+        entry and ns.NetWorth.FormatGold(entry.gold or 0) or "—"))
+    end
+  end
+
+  -- Warband Syndicator probe (TLY-24): same probe for the warband bucket
+  -- since Toeknee specifically reported warband gold being wrong.
+  if synAvailable and _G.Syndicator.API.GetWarband then
+    local ok, wb = pcall(_G.Syndicator.API.GetWarband, 1)
+    if ok and type(wb) == "table" then
+      diagPrint(string.format("Warband (idx=1): money=%s gold=%s copper=%s",
+        tostring(wb.money), tostring(wb.gold), tostring(wb.copper)))
+    else
+      diagPrint("Warband: GetWarband(1) returned " .. tostring(wb))
     end
   end
 
@@ -430,6 +453,33 @@ local function diagDump()
         diagPrint(string.format("  %s: %d", src, n))
       end
     end
+  end
+
+  -- Per-source skip counters (TLY-29 capture-layer rigor). Each adapter
+  -- registers a `skipCounters` table on its module and increments named
+  -- reasons at every early-return. Surfaces silent data loss — the
+  -- "TSM importer dropped 47 rows for these reasons" view.
+  local function dumpSkipCounters(label, mod)
+    if type(mod) ~= "table" or type(mod.skipCounters) ~= "table" then return end
+    local total = 0
+    local lines = {}
+    for reason, n in pairs(mod.skipCounters) do
+      if n > 0 then
+        total = total + n
+        lines[#lines + 1] = string.format("    %s: %d", reason, n)
+      end
+    end
+    if total > 0 then
+      diagPrint(string.format("  %s skipped %d rows since last load:", label, total))
+      table.sort(lines)
+      for _, l in ipairs(lines) do diagPrint(l) end
+    end
+  end
+  if ns.Sources then
+    dumpSkipCounters("TSM",         ns.Sources.TSM)
+    dumpSkipCounters("FlipQueue",   ns.Sources.FlipQueue)
+    dumpSkipCounters("Journalator", ns.Sources.Journalator)
+    dumpSkipCounters("Native",      ns.Sources.Native)
   end
 
   -- History -----------------------------------------------------------------

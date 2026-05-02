@@ -26,6 +26,13 @@ ns.Sources.FlipQueue = FQ
 
 local SOURCE_NAME = "flipqueue"
 
+-- Loss counters surfaced by /tally diag (TLY-29).
+FQ.skipCounters = {
+  bad_entry = 0,
+  active_skipped = 0,
+  unknown_status = 0,
+}
+
 -- ============================================================================
 -- Helpers
 -- ============================================================================
@@ -71,7 +78,10 @@ end
 -- Translate one FlipQueue log entry into 0-N ledger entries. Returns a list.
 local function mapEntry(entry)
   local out = {}
-  if type(entry) ~= "table" then return out end
+  if type(entry) ~= "table" then
+    FQ.skipCounters.bad_entry = FQ.skipCounters.bad_entry + 1
+    return out
+  end
 
   local itemKey = entry.itemKey
   local itemID = itemIDFromKey(itemKey)
@@ -140,6 +150,13 @@ local function mapEntry(entry)
       sourceId = "cancel:" .. hash,
       meta = meta,
     }
+  elseif status == "active" then
+    -- In-flight; not a completed transaction. Counted for visibility
+    -- (a user with thousands of active rows on a fresh import will
+    -- want to know they're being skipped on purpose).
+    FQ.skipCounters.active_skipped = FQ.skipCounters.active_skipped + 1
+  elseif status ~= "" and not entry.buyPrice then
+    FQ.skipCounters.unknown_status = FQ.skipCounters.unknown_status + 1
   end
   -- "active" entries are in-flight; no completed transaction yet, skip.
 
@@ -197,6 +214,7 @@ end
 
 function FQ:Register()
   if not ns.Ledger or not ns.Ledger.RegisterSource then return end
+  for k in pairs(self.skipCounters) do self.skipCounters[k] = 0 end
   ns.Ledger:RegisterSource(SOURCE_NAME, {
     label = "FlipQueue",
     importFn = importAll,

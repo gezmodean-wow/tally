@@ -29,6 +29,13 @@ ns.Sources.Native = Native
 
 local SOURCE_NAME = "tally-native"
 
+-- Loss counters surfaced by /tally diag (TLY-29).
+Native.skipCounters = {
+  no_item_name = 0,
+  zero_revenue = 0,
+  bad_invoice_type = 0,
+}
+
 local frame = CreateFrame("Frame")
 local isMailOpen = false
 
@@ -58,7 +65,10 @@ local function safeNum(n) return tonumber(n) or 0 end
 -- per-row identifier; sourceId carries hash so dedupe works across sessions.
 local function entryFromInvoice(charKey, invoiceType, itemName, otherPlayer,
                                 bid, buyout, deposit, consignment)
-  if not invoiceType or not itemName or itemName == "" then return nil end
+  if not invoiceType or not itemName or itemName == "" then
+    Native.skipCounters.no_item_name = Native.skipCounters.no_item_name + 1
+    return nil
+  end
 
   local hash = string.format("mail|%s|%s|%s|%s|%d|%d",
     charKey, invoiceType, itemName, otherPlayer or "",
@@ -76,7 +86,10 @@ local function entryFromInvoice(charKey, invoiceType, itemName, otherPlayer,
 
   if invoiceType == "seller" then
     local revenue = (buyout and buyout > 0) and buyout or (bid or 0)
-    if revenue <= 0 then return nil end
+    if revenue <= 0 then
+      Native.skipCounters.zero_revenue = Native.skipCounters.zero_revenue + 1
+      return nil
+    end
     return {
       id = SOURCE_NAME .. ":sale:" .. hash,
       atTime = time(),
@@ -92,7 +105,10 @@ local function entryFromInvoice(charKey, invoiceType, itemName, otherPlayer,
     }
   elseif invoiceType == "buyer" then
     local cost = (buyout and buyout > 0) and buyout or (bid or 0)
-    if cost <= 0 then return nil end
+    if cost <= 0 then
+      Native.skipCounters.zero_revenue = Native.skipCounters.zero_revenue + 1
+      return nil
+    end
     return {
       id = SOURCE_NAME .. ":buy:" .. hash,
       atTime = time(),
@@ -200,6 +216,7 @@ frame:RegisterEvent("MAIL_INBOX_UPDATE")
 -- mail is currently open (in which case it does a fresh scan).
 function Native:Register()
   if not ns.Ledger or not ns.Ledger.RegisterSource then return end
+  for k in pairs(self.skipCounters) do self.skipCounters[k] = 0 end
   ns.Ledger:RegisterSource(SOURCE_NAME, {
     label = "Tally (native events)",
     importFn = scanInbox,

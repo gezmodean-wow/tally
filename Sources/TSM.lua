@@ -28,6 +28,14 @@ ns.Sources.TSM = TSMSrc
 
 local SOURCE_NAME = "tsm"
 
+-- Named loss counters surfaced by /tally diag (TLY-29). Every early-return
+-- in the parse path increments one of these so we can see what's being
+-- dropped silently. Reset on Register() so each load measures from zero.
+TSMSrc.skipCounters = {
+  no_item_or_player_or_time = 0,
+  unknown_kind = 0,
+}
+
 -- ============================================================================
 -- Availability
 -- ============================================================================
@@ -131,10 +139,17 @@ local function importCSV(realm, value, csvName, kindResolver)
     local t      = tonumber(fields[cols.time or 0])
     local src    = (cols.source and fields[cols.source]) or nil
 
-    if not (item and player and t and t > 0) then return end
+    if not (item and player and t and t > 0) then
+      TSMSrc.skipCounters.no_item_or_player_or_time =
+        TSMSrc.skipCounters.no_item_or_player_or_time + 1
+      return
+    end
 
     local kind = kindResolver(src)
-    if not kind then return end
+    if not kind then
+      TSMSrc.skipCounters.unknown_kind = TSMSrc.skipCounters.unknown_kind + 1
+      return
+    end
 
     local copper = (price and qty) and (price * qty) or 0
     local charKey = (player or "") .. "-" .. (realm or "")
@@ -228,6 +243,9 @@ end
 
 function TSMSrc:Register()
   if not ns.Ledger or not ns.Ledger.RegisterSource then return end
+  -- Reset skip counters on each load so /tally diag reports the loss
+  -- since the most recent session start, not cumulative across days.
+  for k in pairs(self.skipCounters) do self.skipCounters[k] = 0 end
   ns.Ledger:RegisterSource(SOURCE_NAME, {
     label = "TSM Accounting",
     importFn = importAll,

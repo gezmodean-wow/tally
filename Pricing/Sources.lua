@@ -66,6 +66,16 @@ end
 
 -- Look up a per-unit copper value for an item under the given strategy.
 -- Returns (copper, source) where source is one of "tsm", "token", "vendor", "none".
+--
+-- TLY-24 fix: when an item-string with bonus IDs (e.g. "i:12345:0:1483:1827")
+-- doesn't match TSM market data, retry with the bare ID ("i:12345"). TSM's
+-- DBMarket / DBRegionMarketAvg data is often only at the bare-ID level for
+-- crafted gear, catalysts, and other non-commodity items, so a bonus-ID
+-- variant returns nil under the strategy and we'd otherwise fall through
+-- to vendor — dropping the per-unit value by 100x or more. We already
+-- have this fallback for TSM group lookups (GetTSMGroupPath); applying it
+-- to the price path closes a meaningful chunk of the Tally-vs-TSM
+-- valuation gap reported by Toeknee.
 function Pricing:GetUnitValue(itemID, itemKey, strategy)
   if itemID == WOW_TOKEN_ITEM_ID then
     local p = getTokenPrice()
@@ -78,6 +88,17 @@ function Pricing:GetUnitValue(itemID, itemKey, strategy)
       local ok, copper = pcall(TSM_API.GetCustomPriceValue, strategy, itemString)
       if ok and copper and copper > 0 then
         return copper, "tsm"
+      end
+      -- Bare-ID fallback: only if the item-string actually carries bonus
+      -- IDs / modifiers. Skip when the canonical form is already "i:N".
+      if itemID and itemID > 0 then
+        local bare = "i:" .. itemID
+        if itemString ~= bare then
+          local okB, copperB = pcall(TSM_API.GetCustomPriceValue, strategy, bare)
+          if okB and copperB and copperB > 0 then
+            return copperB, "tsm"
+          end
+        end
       end
     end
   elseif not tsmAvailableWarned then

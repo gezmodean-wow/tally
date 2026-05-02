@@ -8,6 +8,17 @@ The engineering-detail companion lives in `CHANGELOG.md` (commit-readerese — f
 
 ## Unreleased
 
+### More accurate item valuation
+
+When TSM doesn't have market data for an exact item variant (typical for crafted gear, catalysts, and anything with bonus IDs attached), Tally now retries the lookup against the base item ID before falling through to vendor price. Previously these items showed up at vendor value — often 100x lower than reality — silently undercounting your net worth by potentially huge margins. If you've been seeing a gap between Tally's number and TSM's, this closes part of it.
+
+### Diagnostic dump knows more
+
+`/tally diag` now reports two extra things useful for tracking down accuracy mismatches:
+
+- **Skipped-row counts per source.** If TSM had 50,000 sales rows and Tally only imported 49,953, the dump now tells you that 47 rows were skipped and groups them by reason (item missing, kind unrecognized, etc.). No more silent data loss; if something's getting dropped you can see it.
+- **Raw Syndicator gold-field probe.** Tally prints whatever Syndicator actually returns for your current character's gold and your warband's gold under multiple likely field names. Useful when our gold totals disagree with what TSM or another addon shows — we can see immediately whether it's a Syndicator-side issue or something Tally is misreading.
+
 ### Diagnostic dump for bug reports
 
 A new `/tally diag` command prints a structured snapshot of Tally's state to chat — addon versions, whether Syndicator sees your characters, what's in your rollup and ledger, sibling-addon detection, memory usage. If something looks wrong (your inventory is empty, your net worth doesn't match what you expect), paste the output into the GitHub issue and we can diagnose without rounds of "what version are you on, do you have TSM, etc."
