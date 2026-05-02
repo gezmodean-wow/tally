@@ -8,7 +8,13 @@ The engineering-detail companion lives in `CHANGELOG.md` (commit-readerese — f
 
 ## Unreleased
 
-_Notes for the next tagged release will be distilled here. Pull from `CHANGELOG.md` and any closed issues' `## Player summary` sections, then organize into themed prose for players._
+### Main frame is resizable
+
+Drag the corner grip at the bottom-right of Tally's main frame to resize. The new size persists across sessions. Tables and charts inside the frame re-layout live as you drag, so the Compare tab (and any other view with wide tables) is finally fully visible.
+
+### Compare tab: pick "Tally Ledger" against a source
+
+The comparison view has a new entry in both source dropdowns called **Tally Ledger (all)**, which represents everything currently in your ledger regardless of where it came from. By default the Compare tab now opens with Tally Ledger on the left and your first detected source on the right, so the immediate question becomes "is my ledger up to date with this source?" — exactly the comparison most testers were trying to make. The original two-real-sources comparison still works; just pick two non-Ledger entries from the dropdowns.
 
 ## v0.1.0-alpha3
 

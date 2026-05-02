@@ -77,10 +77,25 @@ end
 function ns.UI.CreateCompareLedgersPage(parent)
   local page = CreateFrame("Frame", nil, parent)
 
-  local sources = (ns.Ledger and ns.Ledger:GetSources()) or {}
+  -- Build the dropdown source list. The "Tally Ledger (all)" entry is a
+  -- virtual source representing the entire ledger contents — selecting
+  -- it on either side answers "what's in my ledger overall?" against
+  -- whatever real source is on the other side. The most useful default:
+  -- compare each real source against the ledger so the user can see
+  -- "would re-importing pull anything new in?"
+  local realSources = (ns.Ledger and ns.Ledger:GetSources()) or {}
+  local LEDGER_PSEUDO = ns.Ledger and ns.Ledger.PSEUDO_SOURCE_LEDGER or "__ledger"
+  local sources = {
+    { name = LEDGER_PSEUDO, label = "Tally Ledger (all)" },
+  }
+  for _, s in ipairs(realSources) do
+    sources[#sources + 1] = s
+  end
+
+  -- Default: ledger on the left, first real source on the right.
   local state = {
-    sourceA = (sources[1] and sources[1].name) or nil,
-    sourceB = (sources[2] and sources[2].name) or (sources[1] and sources[1].name) or nil,
+    sourceA = LEDGER_PSEUDO,
+    sourceB = (realSources[1] and realSources[1].name) or LEDGER_PSEUDO,
   }
 
   -- ============================================================================

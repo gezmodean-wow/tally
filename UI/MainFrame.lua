@@ -47,6 +47,10 @@ local tabPanel          -- cw:CreateTabPanel instance, lazy-built on first :Show
 
 local DEFAULT_WIDTH = 720
 local DEFAULT_HEIGHT = 460
+local MIN_WIDTH = 600
+local MIN_HEIGHT = 360
+local MAX_WIDTH = 1600
+local MAX_HEIGHT = 1100
 
 local function uiDB()
   TallyDB.ui = TallyDB.ui or {}
@@ -64,6 +68,13 @@ local function savePosition(self)
   store.y = y
 end
 
+local function saveSize(self)
+  local store = uiDB().mainFrame
+  store.size = store.size or {}
+  store.size.w = math.floor(self:GetWidth())
+  store.size.h = math.floor(self:GetHeight())
+end
+
 local function restorePosition(self)
   local store = uiDB().mainFrame
   if store.point and store.x ~= nil and store.y ~= nil then
@@ -74,13 +85,31 @@ local function restorePosition(self)
   end
 end
 
+local function restoreSize(self)
+  local store = uiDB().mainFrame
+  local w, h = DEFAULT_WIDTH, DEFAULT_HEIGHT
+  if store.size and store.size.w and store.size.h then
+    w = math.max(MIN_WIDTH, math.min(MAX_WIDTH, store.size.w))
+    h = math.max(MIN_HEIGHT, math.min(MAX_HEIGHT, store.size.h))
+  end
+  self:SetSize(w, h)
+end
+
 local function build()
   if frame then return frame end
 
   frame = CreateFrame("Frame", "TallyMainFrame", UIParent, "BackdropTemplate")
-  frame:SetSize(DEFAULT_WIDTH, DEFAULT_HEIGHT)
   frame:SetFrameStrata("HIGH")
   frame:SetMovable(true)
+  frame:SetResizable(true)
+  -- SetResizeBounds is the modern API; SetMinResize / SetMaxResize is the
+  -- pre-10.0 fallback. We use both so older clients still get the bounds.
+  if frame.SetResizeBounds then
+    frame:SetResizeBounds(MIN_WIDTH, MIN_HEIGHT, MAX_WIDTH, MAX_HEIGHT)
+  else
+    if frame.SetMinResize then frame:SetMinResize(MIN_WIDTH, MIN_HEIGHT) end
+    if frame.SetMaxResize then frame:SetMaxResize(MAX_WIDTH, MAX_HEIGHT) end
+  end
   frame:EnableMouse(true)
   frame:RegisterForDrag("LeftButton")
   frame:SetScript("OnDragStart", frame.StartMoving)
@@ -90,6 +119,7 @@ local function build()
   end)
   frame:SetClampedToScreen(true)
   frame:Hide()
+  restoreSize(frame)
   restorePosition(frame)
 
   -- Backdrop fill.
@@ -135,6 +165,56 @@ local function build()
   body:SetPoint("TOPLEFT", titleBar, "BOTTOMLEFT", 0, -2)
   body:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", -1, 1)
   frame.body = body
+
+  -- Resize grip in the bottom-right corner. Drag to resize within
+  -- (MIN_*, MAX_*) bounds; saves to TallyDB.ui.mainFrame.size on release.
+  -- Also fires the active page's :Refresh on size-change so charts /
+  -- ScrollTables / column widths recompute against the new viewport.
+  local grip = CreateFrame("Button", nil, frame)
+  grip:SetSize(16, 16)
+  grip:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", -1, 1)
+  grip:SetFrameLevel(frame:GetFrameLevel() + 10)
+  grip:EnableMouse(true)
+
+  local gripTex = grip:CreateTexture(nil, "OVERLAY")
+  gripTex:SetAllPoints()
+  -- Three-line hash texture: a couple of brass diagonals so the grip
+  -- reads as a corner control instead of a generic button.
+  gripTex:SetColorTexture(themeColor("brass", { 0.83, 0.63, 0.09, 0.6 }))
+  -- Cheap visual: the texture above is solid; layer two darker lines on
+  -- top to imply "draggable corner". Stays minimal but discoverable.
+  local gripDot1 = grip:CreateTexture(nil, "OVERLAY")
+  gripDot1:SetSize(2, 2); gripDot1:SetPoint("BOTTOMRIGHT", grip, "BOTTOMRIGHT", -2, 2)
+  gripDot1:SetColorTexture(0, 0, 0, 0.6)
+  local gripDot2 = grip:CreateTexture(nil, "OVERLAY")
+  gripDot2:SetSize(2, 2); gripDot2:SetPoint("BOTTOMRIGHT", grip, "BOTTOMRIGHT", -6, 2)
+  gripDot2:SetColorTexture(0, 0, 0, 0.6)
+  local gripDot3 = grip:CreateTexture(nil, "OVERLAY")
+  gripDot3:SetSize(2, 2); gripDot3:SetPoint("BOTTOMRIGHT", grip, "BOTTOMRIGHT", -2, 6)
+  gripDot3:SetColorTexture(0, 0, 0, 0.6)
+
+  grip:SetScript("OnMouseDown", function(self, button)
+    if button == "LeftButton" then
+      frame:StartSizing("BOTTOMRIGHT")
+    end
+  end)
+  grip:SetScript("OnMouseUp", function()
+    frame:StopMovingOrSizing()
+    saveSize(frame)
+    savePosition(frame)
+    -- Re-Refresh the active page so layout-sensitive children recompute.
+    if MainFrame.RefreshActivePage then MainFrame:RefreshActivePage() end
+  end)
+
+  -- Continuous resize: throttle Refresh to once every 0.1s while sizing
+  -- so the user sees layout responding live without burning frames.
+  local lastResizeRefresh = 0
+  frame:SetScript("OnSizeChanged", function(_, w, h)
+    local now = GetTime and GetTime() or 0
+    if now - lastResizeRefresh < 0.1 then return end
+    lastResizeRefresh = now
+    if MainFrame.RefreshActivePage then MainFrame:RefreshActivePage() end
+  end)
 
   -- ESC closes the frame, mirroring most WoW addon frames.
   tinsert(UISpecialFrames, "TallyMainFrame")

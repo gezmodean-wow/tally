@@ -544,13 +544,31 @@ local function findMatch(a, bucket, consumed)
   return nil
 end
 
+-- Special pseudo-source meaning "every row in the Tally ledger,
+-- regardless of which adapter wrote it." Lets the Compare view answer
+-- "is my ledger up to date with this source?" instead of just
+-- "do source X and source Y agree." Picked from the dropdown when
+-- the user wants to see a source's data alongside their actual ledger.
+Ledger.PSEUDO_SOURCE_LEDGER = "__ledger"
+
 function Ledger:Compare(sourceA, sourceB, filter)
   if not sourceA or not sourceB then return {}, {} end
   if sourceA == sourceB then return {}, {} end
 
   filter = filter or {}
-  local rowsA = self:Query(setmetatable({ source = sourceA }, { __index = filter }))
-  local rowsB = self:Query(setmetatable({ source = sourceB }, { __index = filter }))
+
+  -- The ledger pseudo-source maps to "no source filter" — Query then
+  -- returns every entry from every adapter. Real source names map to
+  -- a normal {source = name} filter.
+  local function queryFor(name)
+    if name == self.PSEUDO_SOURCE_LEDGER then
+      return self:Query(filter)
+    end
+    return self:Query(setmetatable({ source = name }, { __index = filter }))
+  end
+
+  local rowsA = queryFor(sourceA)
+  local rowsB = queryFor(sourceB)
 
   local indexB = indexByCharItem(rowsB)
   local consumed = {}
