@@ -8,6 +8,10 @@ The engineering-detail companion lives in `CHANGELOG.md` (commit-readerese — f
 
 ## Unreleased
 
+### Diagnostic dump for bug reports
+
+A new `/tally diag` command prints a structured snapshot of Tally's state to chat — addon versions, whether Syndicator sees your characters, what's in your rollup and ledger, sibling-addon detection, memory usage. If something looks wrong (your inventory is empty, your net worth doesn't match what you expect), paste the output into the GitHub issue and we can diagnose without rounds of "what version are you on, do you have TSM, etc."
+
 ### Main frame is resizable
 
 Drag the corner grip at the bottom-right of Tally's main frame to resize. The new size persists across sessions. Tables and charts inside the frame re-layout live as you drag, so the Compare tab (and any other view with wide tables) is finally fully visible.
