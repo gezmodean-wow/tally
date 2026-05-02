@@ -2,6 +2,17 @@ package-as: tally
 
 enable-nolib-creation: no
 
+# Use RELEASES.md (player-facing release notes) as the per-release changelog
+# on CurseForge / Wago. CHANGELOG.md stays as the engineering log — internal
+# terminology, TLY-N refs, file:line references, full alpha-by-alpha
+# breakdown — and is not pushed to the project pages. The `ignore: "*.md"`
+# line below keeps both files out of the packaged zip; manual-changelog is
+# read at package time and uploaded as changelog metadata, independent of
+# `ignore`.
+manual-changelog:
+  filename: RELEASES.md
+  markup-type: markdown
+
 # Libraries are vendored directly in Libs/ (LibStub, CallbackHandler-1.0,
 # LibDataBroker-1.1, LibDBIcon-1.0) — we stopped relying on wowace SVN
 # externals after 502/503 flakiness broke builds. Cogworks-1.0 is fetched

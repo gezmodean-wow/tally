@@ -100,6 +100,15 @@ The doc has a `## Changelog` section at the top. Compare its most recent entry c
 
 **Last acknowledged:** 2026-04-30f
 
+## Release artifacts: dual changelog
+
+Tally maintains two changelogs that are updated together on every release commit:
+
+- **`CHANGELOG.md`** — engineering-focused. Internal terminology, `TLY-N` issue refs, file:line references, full alpha-by-alpha breakdown. Used during development; not pushed to project pages.
+- **`RELEASES.md`** — player-facing. Plain language, organized by what players see and do, no commit references or file paths. **This is the file that flows through `.pkgmeta`'s `manual-changelog` directive to the CurseForge / Wago changelog tabs on every release.** Update on every alpha *and* when refining prose for clarity — the project-page tab will pick up the new wording on the next upload.
+
+When tagging an alpha, beta, or release: both files need touching. Distill the engineering notes plus any closed issues' `## Player summary` sections into themed prose under the new tag heading in `RELEASES.md`.
+
 ## Cross-cog feature requests
 
 When you spot a gap in a sibling cog's library while working here — most often Cogworks (the shared core) needing a new helper, event, or primitive — offer to file a GitHub Issue on that cog's tracker via `gh issue create --repo gezmodean-wow/<target-cog>`. Mention Tally as the source in the body so the maintainer can triage it as a cross-cog ask. Scribe will mirror it to the target cog's Discord forum where its players can follow along.
