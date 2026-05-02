@@ -1,56 +1,49 @@
 # Tally — next session handoff
 
-Picks up where the 2026-05-01 session left off after shipping `v0.1.0-alpha4`.
+Picks up where the 2026-05-02 session left off after shipping `v0.1.0-alpha5`.
 
-## What landed in alpha4
+## What landed in alpha5
 
-Five commits since alpha3 (all on `main`, tagged `v0.1.0-alpha4`):
+Three logical commits on `main`, tagged `v0.1.0-alpha5`:
 
-- **`e134410`** — `.pkgmeta` `manual-changelog` directive + `RELEASES.md` skeleton; CLAUDE.md documents the dual-changelog discipline
-- **`9ba922c`** — `RELEASES.md` backfilled with player-facing alpha1/2/3 notes
-- **`fe1363e`** — `MainFrame` resizable (drag bottom-right grip; bounds 600×360 to 1600×1100; persists in `TallyDB.ui.mainFrame.size`); Compare tab gains `Tally Ledger (all)` virtual source
-- **`4fcda51`** — `/tally diag` one-shot diagnostic dump command (Tally-local pending Cogworks v0.13's debug primitive)
-- **`0c3dddc`** — TLY-24 immediate wins: bonus-ID price fallback in `Pricing:GetUnitValue`; per-source skip counters on every adapter; raw Syndicator gold-field probe added to `/tally diag`
+- **Cogworks v0.13 adoption** — `.pkgmeta` external bumped v0.11.0 → v0.13.0 (vendored `Libs/Cogworks-1.0/` synced locally, gitignored). `/tally diag` now uses `cw:RegisterDebugInspector` (12 inspectors), `/tally diag copy` uses `cw:CreateCopyDialog` + `cw:DumpDebugState`, `/tally debug` opens `cw:CreateDebugConsole`. `ns.dbg` logger exposed for Phase A traces. `UI/MainFrame.lua` migrated to `cw:CreateThemedMainFrame` (sidebar hidden, tabs preserved). Slash dispatch migrated to `cw:RegisterSlashCommands`.
+- **TLY-31 Phase A — native event capture** — `Sources/Native.lua` restructured into orchestrator + `Native.skipCounters` + `Native:RegisterBucket`. New buckets: `AHPosting.lua` (PostItem/PostCommodity/CancelAuction → ah-deposit / ah-cancel), `Vendor.lua` (MERCHANT_SHOW/CLOSED bag-delta + money-delta), `Repair.lua` (RepairAllItems money-delta), `Mail.lua` (TakeInboxMoney / SendMail). Existing AH-mail invoice capture moved unchanged into `AHInvoice.lua`.
+- **Docs promotion** — CHANGELOG.md + RELEASES.md filled out under v0.1.0-alpha5 heading; this file refreshed.
 
-## What's blocking on tester input
+## Blocking on tester input
 
-Two open tickets have player updates posted (will mirror to Discord) asking for `/tally diag` output:
+Two open tickets are still waiting for `/tally diag` output (filed before alpha4; the diag improvements + native capture in alpha5 should give us much richer signal):
 
-- **[TLY-24](https://github.com/gezmodean-wow/tally/issues/24)** — Toeknee's TSM-vs-Tally discrepancy. Bonus-ID fallback shipped blind; need his diag to confirm the warband/per-char gold field name issue.
+- **[TLY-24](https://github.com/gezmodean-wow/tally/issues/24)** — Toeknee's TSM-vs-Tally discrepancy. Bonus-ID fallback shipped in alpha4; need his diag to confirm the warband/per-char gold field-name issue.
 - **[TLY-28](https://github.com/gezmodean-wow/tally/issues/28)** — Inventory tab shows empty after lag. Need diag + wizard-completion confirmation.
 
-When their diag arrives, fixes are likely one-line each in `Inventory/Ownership.lua` (gold field name) or wizard completion flow.
+Once their diag arrives, fixes are likely one-line each in `Inventory/Ownership.lua` (gold field name) or wizard completion flow.
 
-## What to start tomorrow
+## Phase A is shipped but untested
 
-**Pivot to TLY-31 Phase A** — Tally as source of truth, native event capture parity for the high-value sibling sources.
+The five new `Sources/Native/*.lua` bucket files were written without in-game testing — pure new ground hooking AH/merchant/repair/mail APIs. Expect first-run rough edges from testers. The `dbg:PrintDebug` traces in every bucket should make diagnosing easy: `/tally debug` → flip enabled → reproduce → look at the log tab.
 
-Phase A scope (per [TLY-31](https://github.com/gezmodean-wow/tally/issues/31)):
-
-- AH posting (`PostItem` / `PostCommodity` / `PostAuction` hooks) → `ah-deposit` rows from Native instead of Journalator-only
-- AH cancel events → `ah-cancel` from Native
-- Vendor sell / buy via `MERCHANT_SHOW` + bag-delta tracking → `vendor-sell` / `vendor-buy` from Native
-- Repairs via money-delta around `RepairAllItems` → `repair` from Native
-- Mail send / receive (non-AH) → `mail-send` / `mail-receive` from Native
-
-File-per-bucket layout: `Sources/Native/AHPosting.lua`, `Sources/Native/Vendor.lua`, `Sources/Native/Repair.lua`, `Sources/Native/Mail.lua` — keep `Sources/Native.lua` as the orchestrator that registers them all.
-
-Sibling adapters (TSM, FlipQueue, Journalator) stay as-is for now; they get demoted to backfill-only in Phase B once Native parity is proven.
+Known V1 limitations to watch for:
+- `AHPosting` emits `ah-deposit` on the hook, not on the actual `AUCTION_HOUSE_AUCTION_CREATED` confirmation event — a server-side post failure leaves an orphan row. Rare but possible.
+- `Vendor` collapses an entire merchant session into one pair of rows per item; per-transaction granularity is sacrificed. Players who need it can run Journalator alongside.
+- `Repair` only hooks `RepairAllItems`; per-item repair (clicking individual gear at the merchant) goes through a different code path and is out of scope for V1.
+- `Mail` doesn't ledger item attachments — items in mail end up in bags which Syndicator captures separately.
 
 ## Other open issues, in priority order
 
-- **[TLY-29](https://github.com/gezmodean-wow/tally/issues/29)** — capture-layer rigor (loss accounting partially shipped via skip counters; kind router + structured field map still pending). Likely to land alongside Phase A as we touch the adapters.
-- **[TLY-30](https://github.com/gezmodean-wow/tally/issues/30)** — view-layer reconciliation. Depends on TLY-29 completion. Probably alpha5+.
-- **[TLY-22](https://github.com/gezmodean-wow/tally/issues/22)**, **[TLY-23](https://github.com/gezmodean-wow/tally/issues/23)**, **[TLY-25](https://github.com/gezmodean-wow/tally/issues/25)**, **[TLY-26](https://github.com/gezmodean-wow/tally/issues/26)**, **[TLY-27](https://github.com/gezmodean-wow/tally/issues/27)** — all shipped in alpha3; ready to close once tester verifies the alpha4 build doesn't regress them. Worth a sweep with `## Player summary` comments per scribe conventions.
+- **[TLY-29](https://github.com/gezmodean-wow/tally/issues/29)** — capture-layer rigor. Skip counters shipped in alpha4 + extended in alpha5 (per-bucket prefixes); remaining work is the kind router for unknown kinds + structured per-source field map.
+- **[TLY-30](https://github.com/gezmodean-wow/tally/issues/30)** — view-layer reconciliation. Depends on TLY-29 completion. Probably alpha6+.
+- **[TLY-31](https://github.com/gezmodean-wow/tally/issues/31) Phase B** — demote sibling adapters to backfill-only by default, periodic ticker becomes off-by-default, setup wizard wording shifts to make the "Tally is the canonical record" stance explicit. Wait for tester confirmation that Phase A capture works before flipping the default.
+- **[TLY-31](https://github.com/gezmodean-wow/tally/issues/31) Phase C** — `Ledger:Subscribe` API for sibling cogs to consume Tally's event stream + cross-cog migration plan for FlipQueue / Maxcraft.
 
-## Waiting-on-Cogworks
+## Stretch / latent work
 
-- **Cogworks v0.13** will land the debug primitive (`cw:CreateDebug`); user will poke when ready. Then bump `.pkgmeta` external from v0.11 → v0.13 + sync vendored `Libs/Cogworks-1.0/` + refactor `/tally diag` onto `dbg:Diag({sections})` + add `dbg:Print` traces throughout.
-- **[cogworks#23](https://github.com/gezmodean-wow/cogworks/issues/23)** — `CreateProgressBar` primitive. `UI/MultiProgressBar.lua` + `UI/ProgressBar.lua` are Tally-local pending this; lift when it lands.
+- **Sidebar nav for `MainFrame`** — `cw:CreateThemedMainFrame` is built around sidebar nav; Tally currently hides the sidebar to preserve tab UX. Worth a UX discussion — sidebar might be the suite-standard pattern (FlipQueue / Tempo are likely candidates for adopting v0.13 in their next revs). User decision.
+- **Cogworks `CreateProgressBar`** ([cogworks#23](https://github.com/gezmodean-wow/cogworks/issues/23)) — `UI/ProgressBar.lua` + `UI/MultiProgressBar.lua` are Tally-local pending this; lift when it lands.
 
 ## Handy facts
 
 - Last acknowledged scribe player-facing conventions: `2026-04-30f` (re-fetch the doc when next writing player-facing copy)
-- Cogworks pinned at `v0.11.0` in `.pkgmeta` (latest released is `v0.12.0`; `v0.13.0` will bring debug)
-- Origin is current as of alpha4 tag
-- Memory at `C:\Users\gezmo\.claude\projects\C--src-tally\memory\` has been updated with the strategic reframe + cogworks-v0.13 reference
+- Cogworks pinned at `v0.13.0` in `.pkgmeta`
+- Origin is current as of alpha5 tag
+- Memory at `C:\Users\gezmo\.claude\projects\C--src-tally\memory\` — relevant entries: project_scope, feedback_no_push_without_approval, feedback_ui_before_ship, reference_cogworks_console, reference_flipqueue

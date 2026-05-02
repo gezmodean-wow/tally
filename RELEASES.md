@@ -10,6 +10,42 @@ The engineering-detail companion lives in `CHANGELOG.md` (commit-readerese — f
 
 _Notes for the next tagged release will be distilled here. Pull from `CHANGELOG.md` and any closed issues' `## Player summary` sections, then organize into themed prose for players._
 
+## v0.1.0-alpha5
+
+A meaningful pivot: Tally now records your activity natively instead of leaning on TSM, FlipQueue, or Journalator as the primary capture path. Plus a much better diagnostic story for testers.
+
+### Tally now records your auction-house, vendor, repair, and mail activity directly
+
+Until this alpha, Tally got most of its data by reading what TSM, FlipQueue, and Journalator had already captured. Now Tally watches WoW directly:
+
+- **Auction posts and cancels.** Every time you post an item or cancel an auction, Tally records the deposit and the cancel immediately — no waiting for the next sibling-addon import to catch up.
+- **Vendor visits.** Selling junk to a vendor, buying repair kits / pet food / vendor mats — both directions land in the ledger the moment you close the merchant window. Sales attribute the item's vendor sell-price; buys attribute the merchant's listed unit price.
+- **Repairs.** Bulk repairs ("Repair All") are tracked with their actual cost — both player-paid and guild-bank-paid (the guild-paid ones are recorded as activity at zero cost so they show up in your history without inflating expenses).
+- **Mail.** Sending or receiving money via mail (non-AH) gets ledgered. AH invoice mail is already captured separately and isn't double-counted.
+
+What this means for you:
+
+- If you have TSM / Journalator / FlipQueue installed, Tally still imports from them — your historical data is preserved. Going forward, Tally and the sibling addons are observing the same events independently; over time Tally becomes the canonical record and the sibling imports become useful only for backfilling history that pre-dates Tally's installation.
+- If you DON'T have any sibling auction addon installed, Tally now actually works as a standalone ledger. Your AH and vendor activity flow in directly from gameplay.
+
+### Live debug console
+
+A new `/tally debug` command opens an in-game window showing what Tally is doing in real time: the events it sees, the rows it writes, the current state inspectors, action buttons. If you're helping test, this is the easiest way to give us a clear picture of what's happening on your client without having to round-trip more questions over Discord.
+
+### `/tally diag copy` for cleaner bug reports
+
+The existing `/tally diag` command still chat-prints the same dump for inline reading. The new `/tally diag copy` opens a structured dialog with the same data in copy-paste-friendly format — easier to drop cleanly into a GitHub issue.
+
+### Main frame chrome rebuilt on the suite primitive
+
+Tally's main window now uses Cogworks's shared chrome. No visible change in behavior; this just means the title bar, resize grip, ESC handler, and position memory live in one place across all the cogs.
+
+**Heads up:** the way Tally remembers your window position changed, so on first login after this update the window will pop up centered. Drag it once and the new position will stick.
+
+### Slash commands work the same; auto-help is now built-in
+
+`/tally help` (and any unknown subcommand) renders the command list automatically from each command's definition. Same 14 subcommands as alpha4 with the same names and aliases — only the help-rendering plumbing changed.
+
 ## v0.1.0-alpha4
 
 ### More accurate item valuation
