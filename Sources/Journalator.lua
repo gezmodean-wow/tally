@@ -135,7 +135,9 @@ local function mapInvoice(row)
   local itemID = itemIDFromLink(row.itemLink)
   local count = safeNum(row.count) > 0 and row.count or 1
   local invoiceType = row.invoiceType or row.type
-  local salt = string.format("%s|%s|%d|%d|%s",
+  -- %.0f for copper-bearing fields: large invoice values exceed Lua's
+  -- signed-32-bit %d ceiling (~214,748g). TLY-33.
+  local salt = string.format("%s|%s|%.0f|%.0f|%s",
     invoiceType or "?",
     row.itemName or "?",
     safeNum(row.value),
@@ -255,7 +257,7 @@ local function mapPosting(row)
     return out
   end
   local count = safeNum(row.count) > 0 and row.count or 1
-  local salt = string.format("post|%s|%d|%d|%d",
+  local salt = string.format("post|%s|%.0f|%.0f|%.0f",
     row.itemName or "?",
     safeNum(row.buyout),
     safeNum(row.deposit),
@@ -306,7 +308,7 @@ local function mapVendoring(row)
     return out
   end
   local count = safeNum(row.count) > 0 and row.count or 1
-  local salt = string.format("%s|%s|%d|%d", kind, row.itemName or "?", safeNum(row.value), count)
+  local salt = string.format("%s|%s|%.0f|%.0f", kind, row.itemName or "?", safeNum(row.value), count)
   local hash = rowHash("Vendoring", salt, row.source, row.time)
   out[#out + 1] = {
     id = SOURCE_NAME .. ":" .. kind .. ":" .. hash,
@@ -371,7 +373,7 @@ local function mapTrade(row)
   end
   local moneyIn = safeNum(row.moneyIn)
   local moneyOut = safeNum(row.moneyOut)
-  local salt = string.format("trade|%s|%d|%d", row.recipient or row.partner or "?", moneyIn, moneyOut)
+  local salt = string.format("trade|%s|%.0f|%.0f", row.recipient or row.partner or "?", moneyIn, moneyOut)
   local hash = rowHash("Trades", salt, row.source, row.time)
   out[#out + 1] = {
     id = SOURCE_NAME .. ":trade:" .. hash,
@@ -409,7 +411,7 @@ local function mapBasicMail(row, kind)
     return out
   end
   local money = safeNum(row.money)
-  local salt = string.format("%s|%s|%d", kind, row.recipient or row.sender or "?", money)
+  local salt = string.format("%s|%s|%.0f", kind, row.recipient or row.sender or "?", money)
   local hash = rowHash(kind == "mail-receive" and "BasicMailReceived" or "BasicMailSent",
     salt, row.source, row.time)
   out[#out + 1] = {
@@ -441,7 +443,7 @@ local function mapTaxi(row)
   end
   local copper = safeNum(row.copperValue or row.value)
   if copper <= 0 then return out end
-  local salt = string.format("taxi|%d|%s", copper, row.target or row.destination or "?")
+  local salt = string.format("taxi|%.0f|%s", copper, row.target or row.destination or "?")
   local hash = rowHash("Taxis", salt, row.source, row.time)
   out[#out + 1] = {
     id = SOURCE_NAME .. ":taxi:" .. hash,
@@ -504,7 +506,7 @@ local function mapQuesting(row)
     return out
   end
   local copper = safeNum(row.copperValue or row.money or row.value)
-  local salt = string.format("quest|%s|%d", row.questName or row.questID or "?", copper)
+  local salt = string.format("quest|%s|%.0f", row.questName or row.questID or "?", copper)
   local hash = rowHash("Questing", salt, row.source, row.time)
   out[#out + 1] = {
     id = SOURCE_NAME .. ":quest-reward:" .. hash,
@@ -539,7 +541,7 @@ local function mapMission(row)
     return out
   end
   local copper = safeNum(row.copperValue or row.money or row.value)
-  local salt = string.format("mission|%s|%d", row.missionName or row.missionID or "?", copper)
+  local salt = string.format("mission|%s|%.0f", row.missionName or row.missionID or "?", copper)
   local hash = rowHash("MissionTables", salt, row.source, row.time)
   out[#out + 1] = {
     id = SOURCE_NAME .. ":mission:" .. hash,
@@ -572,7 +574,7 @@ local function mapLootContainer(row)
     return out
   end
   local copper = safeNum(row.copperValue or row.money or row.value)
-  local salt = string.format("loot|%s|%d", row.sourceMob or row.sourceContainer or "?", copper)
+  local salt = string.format("loot|%s|%.0f", row.sourceMob or row.sourceContainer or "?", copper)
   local hash = rowHash("LootContainers", salt, row.source, row.time)
   out[#out + 1] = {
     id = SOURCE_NAME .. ":loot:" .. hash,
@@ -606,7 +608,7 @@ local function mapTradingPost(row)
       Journalator.skipCounters.no_char_key + 1
     return out
   end
-  local salt = string.format("tp|%s|%d|%d",
+  local salt = string.format("tp|%s|%.0f|%.0f",
     row.itemName or "?", safeNum(row.currencyCost), safeNum(row.count))
   local hash = rowHash("TradingPostVendoring", salt, row.source, row.time)
   out[#out + 1] = {
@@ -638,7 +640,7 @@ local function mapCraftingOrderPlaced(row)
     return out
   end
   local commission = safeNum(row.commission or row.tip)
-  local salt = string.format("co-place|%s|%d", row.recipeName or row.itemName or "?", commission)
+  local salt = string.format("co-place|%s|%.0f", row.recipeName or row.itemName or "?", commission)
   local hash = rowHash("CraftingOrdersPlaced", salt, row.source, row.time)
   out[#out + 1] = {
     id = SOURCE_NAME .. ":crafting-order-placed:" .. hash,
@@ -674,7 +676,7 @@ local function mapCraftingOrderFulfilled(row)
     return out
   end
   local commission = safeNum(row.commission or row.tip)
-  local salt = string.format("co-fulfill|%s|%d", row.itemName or row.recipeName or "?", commission)
+  local salt = string.format("co-fulfill|%s|%.0f", row.itemName or row.recipeName or "?", commission)
   local hash = rowHash("Fulfilling", salt, row.source, row.time)
   out[#out + 1] = {
     id = SOURCE_NAME .. ":crafting-order-fulfilled:" .. hash,

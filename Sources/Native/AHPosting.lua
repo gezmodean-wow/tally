@@ -112,7 +112,11 @@ local function onPost(itemLocation, duration, quantity, bid, buyout, isCommodity
 
   local atTime = time()
   local charKey = Native.CurrentCharKey()
-  local hash = string.format("post|%s|%d|%d|%d|%d|%d",
+  -- %.0f instead of %d throughout: copper amounts on high-end items
+  -- routinely exceed Lua's signed-32-bit %d ceiling (~2.1B copper /
+  -- ~214,748g). %.0f accepts a Lua double and formats as a decimal
+  -- integer with no fractional part — TLY-33.
+  local hash = string.format("post|%s|%.0f|%.0f|%.0f|%.0f|%.0f",
     charKey, itemID, quantity,
     Native.SafeNum(bid), Native.SafeNum(buyout), atTime)
 
@@ -138,7 +142,7 @@ local function onPost(itemLocation, duration, quantity, bid, buyout, isCommodity
 
   local ok, err = ns.Ledger:Insert(entry)
   if ns.dbg then
-    ns.dbg:PrintDebug(string.format("AHPosting: post %s x%d deposit=%d → %s",
+    ns.dbg:PrintDebug(string.format("AHPosting: post %s x%d deposit=%.0f → %s",
       tostring(itemLink or itemID), quantity, deposit,
       ok and "inserted" or ("skipped: " .. tostring(err))))
   end
@@ -167,7 +171,7 @@ local function onCancel(auctionID)
   local quantity = Native.SafeNum(info.quantity) > 0 and info.quantity or 1
   local atTime = time()
   local charKey = Native.CurrentCharKey()
-  local hash = string.format("cancel|%s|%d|%d|%d",
+  local hash = string.format("cancel|%s|%.0f|%.0f|%.0f",
     charKey, auctionID, itemID or 0, atTime)
 
   local entry = {
@@ -189,7 +193,7 @@ local function onCancel(auctionID)
 
   local ok, err = ns.Ledger:Insert(entry)
   if ns.dbg then
-    ns.dbg:PrintDebug(string.format("AHPosting: cancel auctionID=%d → %s",
+    ns.dbg:PrintDebug(string.format("AHPosting: cancel auctionID=%.0f → %s",
       auctionID, ok and "inserted" or ("skipped: " .. tostring(err))))
   end
 end

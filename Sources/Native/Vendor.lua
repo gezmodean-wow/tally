@@ -157,7 +157,9 @@ local function emitDiff()
         buyTotal = buyTotal + copper
       end
 
-      local hash = string.format("vendor|%s|%s|%d|%d|%d",
+      -- %.0f instead of %d: itemID + count are bounded but atTime as
+      -- epoch seconds is fine; consistency + future-proofing. TLY-33.
+      local hash = string.format("vendor|%s|%s|%.0f|%.0f|%.0f",
         charKey, kind, itemID, count, atTime)
 
       entries[#entries + 1] = {

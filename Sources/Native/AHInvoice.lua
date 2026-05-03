@@ -47,7 +47,9 @@ local function entryFromInvoice(charKey, invoiceType, itemName, otherPlayer,
     return nil
   end
 
-  local hash = string.format("mail|%s|%s|%s|%s|%d|%d",
+  -- %.0f for copper amounts: bid/buyout on high-end items exceed Lua's
+  -- signed-32-bit %d ceiling (~214,748g). TLY-33.
+  local hash = string.format("mail|%s|%s|%s|%s|%.0f|%.0f",
     charKey, invoiceType, itemName, otherPlayer or "",
     Native.SafeNum(bid), Native.SafeNum(buyout))
 
@@ -110,7 +112,7 @@ end
 -- the cut as distinct flows.
 local function feeEntryFromInvoice(charKey, itemName, otherPlayer, bid, buyout, consignment)
   if not consignment or consignment <= 0 then return nil end
-  local hash = string.format("mail-fee|%s|%s|%s|%d|%d",
+  local hash = string.format("mail-fee|%s|%s|%s|%.0f|%.0f",
     charKey, itemName, otherPlayer or "", Native.SafeNum(bid), Native.SafeNum(buyout))
   return {
     id = SOURCE_NAME .. ":ah-fee:" .. hash,

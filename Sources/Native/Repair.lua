@@ -40,7 +40,9 @@ local function emitRepair(cost, useGuildBank)
 
   local atTime = time()
   local charKey = Native.CurrentCharKey()
-  local hash = string.format("repair|%s|%d|%d|%s",
+  -- %.0f instead of %d: copper costs exceed signed-32-bit ceiling for
+  -- guild-bank repairs at endgame. TLY-33.
+  local hash = string.format("repair|%s|%.0f|%.0f|%s",
     charKey, atTime, cost, useGuildBank and "guild" or "player")
 
   local entry = {
@@ -57,7 +59,7 @@ local function emitRepair(cost, useGuildBank)
 
   local ok, err = ns.Ledger:Insert(entry)
   if ns.dbg then
-    ns.dbg:PrintDebug(string.format("Repair: cost=%d guild=%s → %s",
+    ns.dbg:PrintDebug(string.format("Repair: cost=%.0f guild=%s → %s",
       cost, tostring(useGuildBank), ok and "inserted" or ("skipped: " .. tostring(err))))
   end
 end

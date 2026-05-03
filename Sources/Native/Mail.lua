@@ -61,7 +61,9 @@ local function onTakeInboxMoney(index)
 
   local atTime = time()
   local charKey = Native.CurrentCharKey()
-  local hash = string.format("mail-recv|%s|%s|%s|%d|%d",
+  -- %.0f instead of %d: mail money attachments routinely exceed Lua's
+  -- signed-32-bit %d ceiling (~214,748g). TLY-33.
+  local hash = string.format("mail-recv|%s|%s|%s|%.0f|%.0f",
     charKey, sender or "?", subject or "", money, atTime)
 
   local entry = {
@@ -78,7 +80,7 @@ local function onTakeInboxMoney(index)
 
   local ok, err = ns.Ledger:Insert(entry)
   if ns.dbg then
-    ns.dbg:PrintDebug(string.format("Mail: receive %s from %s money=%d → %s",
+    ns.dbg:PrintDebug(string.format("Mail: receive %s from %s money=%.0f → %s",
       tostring(subject), tostring(sender), money,
       ok and "inserted" or ("skipped: " .. tostring(err))))
   end
@@ -105,7 +107,7 @@ local function onSendMail(recipient, subject)
 
   local atTime = time()
   local charKey = Native.CurrentCharKey()
-  local hash = string.format("mail-send|%s|%s|%s|%d|%d",
+  local hash = string.format("mail-send|%s|%s|%s|%.0f|%.0f",
     charKey, recipient or "?", subject or "", money, atTime)
 
   local entry = {
@@ -122,7 +124,7 @@ local function onSendMail(recipient, subject)
 
   local ok, err = ns.Ledger:Insert(entry)
   if ns.dbg then
-    ns.dbg:PrintDebug(string.format("Mail: send to %s money=%d → %s",
+    ns.dbg:PrintDebug(string.format("Mail: send to %s money=%.0f → %s",
       tostring(recipient), money,
       ok and "inserted" or ("skipped: " .. tostring(err))))
   end
