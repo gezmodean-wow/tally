@@ -10,6 +10,14 @@ The engineering-detail companion lives in `CHANGELOG.md` (commit-readerese — f
 
 _Notes for the next tagged release will be distilled here. Pull from `CHANGELOG.md` and any closed issues' `## Player summary` sections, then organize into themed prose for players._
 
+## v0.1.0-alpha6
+
+Hotfix on top of alpha5.
+
+### High-value AH posts no longer error
+
+A bug in alpha5's native auction-house capture caused Tally to error out whenever the value of a posted item exceeded about 214,748 gold. The fix raises the internal ceiling well above any plausible WoW copper amount, so the error should stop after you update. Posts that errored before don't get backfilled automatically — but the next time you post a similar item, it'll be captured normally. Same fix also patches a few related spots in the Journalator import path that had the same overflow shape latent.
+
 ## v0.1.0-alpha5
 
 A meaningful pivot: Tally now records your activity natively instead of leaning on TSM, FlipQueue, or Journalator as the primary capture path. Plus a much better diagnostic story for testers.

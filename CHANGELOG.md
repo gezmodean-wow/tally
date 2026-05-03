@@ -4,6 +4,11 @@ All notable changes to Tally will be documented in this file.
 
 ## [Unreleased]
 
+## [v0.1.0-alpha6]
+
+- **TLY-33 hotfix.** Lua's `string.format("%d", N)` requires N to fit in a signed 32-bit integer (max ~2.1B copper / ~214,748g). Several `Sources/Native/*.lua` and `Sources/Journalator.lua` adapters built dedupe-hash strings via `%d` over copper amounts, throwing "integer overflow attempting to store …" the moment a tester with high-value posts triggered the path. Switched `%d` → `%.0f` everywhere a copper / money / price value flows through a format slot — `%.0f` accepts a Lua double and formats as a decimal integer with no fractional part, working up to 2^53 (~9 quadrillion). Fixed in `Sources/Native/AHPosting.lua` (post hash + cancel hash + debug print), `Sources/Native/AHInvoice.lua` (mail invoice + AH-fee hash), `Sources/Native/Vendor.lua` (vendor row hash), `Sources/Native/Repair.lua` (repair hash + debug print), `Sources/Native/Mail.lua` (mail receive / send hash + debug prints), `Sources/Journalator.lua` (eight salt constructions across invoice / posting / vendoring / trade / mail / taxi / quest / mission / loot / trading-post / crafting-order paths). The Journalator overflows are pre-existing — same root cause, same fix shipped together since both adapters were one tester report away from breaking on the same data shape.
+- **FQ-138 cross-cog check.** Reviewed FlipQueue's recently-fixed FQ-138 ("FlipQueue interferes with TSM Post Scan, items get skipped") and confirmed Tally is non-interfering by construction. Tally's AHPosting bucket only uses `hooksecurefunc` (pure observation) and reads `C_AuctionHouse.GetOwnedAuctions()` (cache read). Tally never calls `RequestOwnedAuctionsRefresh()` and never listens for `AUCTION_HOUSE_AUCTION_CREATED`, which is what FQ's listener was extra-querying after every post — the source of TSM-state-machine confusion. No fix needed.
+
 ## [v0.1.0-alpha5]
 
 - **Cogworks v0.13 adoption.** `.pkgmeta` external bumped from v0.11.0 → v0.13.0; vendored `Libs/Cogworks-1.0/` synced with the new `Debug`, `ThemedMainFrame`, `Drawer`, `Slash`, `Toast`, `SegmentedControl`, `Scaling` modules. Tally now leans on three new primitives:
