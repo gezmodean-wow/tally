@@ -31,6 +31,7 @@ FQ.skipCounters = {
   bad_entry = 0,
   active_skipped = 0,
   unknown_status = 0,
+  bad_item_key = 0,
 }
 
 -- ============================================================================
@@ -85,6 +86,16 @@ local function mapEntry(entry)
 
   local itemKey = entry.itemKey
   local itemID = itemIDFromKey(itemKey)
+  if not itemID then
+    if entry.itemID then
+      itemID = entry.itemID
+    elseif entry.itemLink and GetItemInfoInstant then
+      itemID = select(1, GetItemInfoInstant(entry.itemLink))
+    end
+    if not itemID then
+      FQ.skipCounters.bad_item_key = FQ.skipCounters.bad_item_key + 1
+    end
+  end
   local charKey = entry.charKey or ""
   local count = entry.postedQuantity or 1
   local hash = rowHash(entry)

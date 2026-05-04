@@ -33,9 +33,30 @@ local SOURCE_NAME = Native.SOURCE_NAME
 Native.skipCounters.invoice_no_item_name     = 0
 Native.skipCounters.invoice_zero_revenue     = 0
 Native.skipCounters.invoice_bad_invoice_type = 0
+Native.skipCounters.invoice_no_item_id       = 0
 
 local frame = CreateFrame("Frame")
 local isMailOpen = false
+
+-- Per-session itemName -> itemID cache. AH invoices only carry the item name,
+-- not the itemID, so we resolve via GetItemInfoInstant the first time we see
+-- each name and reuse from cache afterward. Cache stores `false` for names
+-- that didn't resolve so we don't keep paying the lookup cost across many
+-- invoices for the same legitimately-unresolvable item.
+local itemNameCache = {}
+
+local function resolveItemID(itemName)
+  if not itemName or itemName == "" then return nil end
+  local cached = itemNameCache[itemName]
+  if cached ~= nil then
+    if cached == false then return nil end
+    return cached
+  end
+  if not GetItemInfoInstant then return nil end
+  local id = select(1, GetItemInfoInstant(itemName))
+  itemNameCache[itemName] = id or false
+  return id
+end
 
 -- Build a ledger entry from a single inbox invoice. Returns a ledger-shape
 -- table (or nil if the invoice can't be classified). hash is the stable
@@ -52,6 +73,12 @@ local function entryFromInvoice(charKey, invoiceType, itemName, otherPlayer,
   local hash = string.format("mail|%s|%s|%s|%s|%.0f|%.0f",
     charKey, invoiceType, itemName, otherPlayer or "",
     Native.SafeNum(bid), Native.SafeNum(buyout))
+
+  local itemID = resolveItemID(itemName)
+  if not itemID then
+    Native.skipCounters.invoice_no_item_id = Native.skipCounters.invoice_no_item_id + 1
+  end
+  local itemKey = itemID and ("i:" .. itemID) or nil
 
   local meta = {
     name = itemName,
@@ -73,8 +100,8 @@ local function entryFromInvoice(charKey, invoiceType, itemName, otherPlayer,
       id = SOURCE_NAME .. ":sale:" .. hash,
       atTime = time(),
       kind = "sale",
-      itemKey = nil,
-      itemID = nil,
+      itemKey = itemKey,
+      itemID = itemID,
       charKey = charKey,
       copper = revenue,
       count = 1,
@@ -92,8 +119,8 @@ local function entryFromInvoice(charKey, invoiceType, itemName, otherPlayer,
       id = SOURCE_NAME .. ":buy:" .. hash,
       atTime = time(),
       kind = "purchase",
-      itemKey = nil,
-      itemID = nil,
+      itemKey = itemKey,
+      itemID = itemID,
       charKey = charKey,
       copper = cost,
       count = 1,
@@ -114,12 +141,14 @@ local function feeEntryFromInvoice(charKey, itemName, otherPlayer, bid, buyout, 
   if not consignment or consignment <= 0 then return nil end
   local hash = string.format("mail-fee|%s|%s|%s|%.0f|%.0f",
     charKey, itemName, otherPlayer or "", Native.SafeNum(bid), Native.SafeNum(buyout))
+  local itemID = resolveItemID(itemName)
+  local itemKey = itemID and ("i:" .. itemID) or nil
   return {
     id = SOURCE_NAME .. ":ah-fee:" .. hash,
     atTime = time(),
     kind = "ah-fee",
-    itemKey = nil,
-    itemID = nil,
+    itemKey = itemKey,
+    itemID = itemID,
     charKey = charKey,
     copper = consignment,
     count = 1,
