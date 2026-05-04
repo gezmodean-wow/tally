@@ -164,10 +164,32 @@ local function mapEntry(entry)
   elseif status == "active" then
     -- In-flight; not a completed transaction. Counted for visibility
     -- (a user with thousands of active rows on a fresh import will
-    -- want to know they're being skipped on purpose).
+    -- want to know they're being skipped on purpose). Deliberately NOT
+    -- routed to Unknown — "active" is a recognized FlipQueue status that
+    -- intentionally has no completed amount yet, distinct from
+    -- unrecognized statuses below.
     FQ.skipCounters.active_skipped = FQ.skipCounters.active_skipped + 1
-  elseif status ~= "" and not entry.buyPrice then
+  elseif status ~= "" then
+    -- TLY-29: route any unrecognized auctionStatus to Ledger.Kinds.Unknown
+    -- with the original status preserved on meta.sourceKind. Previously
+    -- this path silently dropped, which hid FlipQueue schema additions
+    -- (or stale-shape rows from older FQ versions) until someone manually
+    -- spot-checked the diag counters. Skip counter still increments — it's
+    -- "rows routed to Unknown" loss accounting now, not silent drop.
     FQ.skipCounters.unknown_status = FQ.skipCounters.unknown_status + 1
+    local unknown = ns.Ledger:BuildUnknownEntry({
+      source     = SOURCE_NAME,
+      sourceId   = "status:" .. hash,
+      atTime     = entry.postedAt or time(),
+      sourceKind = status,
+      charKey    = charKey,
+      itemID     = itemID,
+      itemKey    = itemKey,
+      copper     = 0,
+      count      = count,
+      meta       = meta,  -- carries name, postedAt, postHistory, etc.
+    })
+    if unknown then out[#out + 1] = unknown end
   end
   -- "active" entries are in-flight; no completed transaction yet, skip.
 
