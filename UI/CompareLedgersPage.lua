@@ -81,9 +81,7 @@ function ns.UI.CreateCompareLedgersPage(parent)
   -- Build the dropdown source list. The "Tally Ledger (all)" entry is a
   -- virtual source representing the entire ledger contents — selecting
   -- it on either side answers "what's in my ledger overall?" against
-  -- whatever real source is on the other side. The most useful default:
-  -- compare each real source against the ledger so the user can see
-  -- "would re-importing pull anything new in?"
+  -- whatever real source is on the other side.
   local realSources = (ns.Ledger and ns.Ledger:GetSources()) or {}
   local LEDGER_PSEUDO = ns.Ledger and ns.Ledger.PSEUDO_SOURCE_LEDGER or "__ledger"
   local sources = {
@@ -93,10 +91,13 @@ function ns.UI.CreateCompareLedgersPage(parent)
     sources[#sources + 1] = s
   end
 
-  -- Default: ledger on the left, first real source on the right.
+  -- No default selection. Compare runs are O(rowsA * bucketSize) over the
+  -- full ledger plus index builds; eagerly running on tab-open delayed the
+  -- first paint by seconds for users with large datasets. The user picks
+  -- both sides before any work happens.
   local state = {
-    sourceA = LEDGER_PSEUDO,
-    sourceB = (realSources[1] and realSources[1].name) or LEDGER_PSEUDO,
+    sourceA = nil,
+    sourceB = nil,
   }
 
   -- ============================================================================
@@ -121,6 +122,8 @@ function ns.UI.CreateCompareLedgersPage(parent)
     for _, s in ipairs(sources) do
       if s.name == state.sourceA then UIDropDownMenu_SetText(ddA, s.label) end
     end
+  else
+    UIDropDownMenu_SetText(ddA, "(pick a source)")
   end
 
   local labelB = row:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
@@ -136,6 +139,8 @@ function ns.UI.CreateCompareLedgersPage(parent)
     for _, s in ipairs(sources) do
       if s.name == state.sourceB then UIDropDownMenu_SetText(ddB, s.label) end
     end
+  else
+    UIDropDownMenu_SetText(ddB, "(pick a source)")
   end
 
   local refreshBtn = CreateFrame("Button", nil, row, "UIPanelButtonTemplate")
@@ -145,9 +150,9 @@ function ns.UI.CreateCompareLedgersPage(parent)
   refreshBtn:SetScript("OnClick", function() if page.Refresh then page:Refresh() end end)
 
   local exportBtn = CreateFrame("Button", nil, row, "UIPanelButtonTemplate")
-  exportBtn:SetSize(110, 22)
+  exportBtn:SetSize(80, 22)
   exportBtn:SetPoint("LEFT", refreshBtn, "RIGHT", 6, 0)
-  exportBtn:SetText("Export to chat")
+  exportBtn:SetText("Export")
 
   -- "Hide expire/cancel" toggle — strips rows where copper == 0 from the
   -- export sample + bucket counts. Most divergence in real-world Compare
@@ -276,13 +281,16 @@ function ns.UI.CreateCompareLedgersPage(parent)
   end
 
   exportBtn:SetScript("OnClick", function()
-    print(string.format("|cff7fbfffTally Compare:|r %s vs %s",
+    local lines = {}
+    local function emit(s) lines[#lines + 1] = s end
+
+    emit(string.format("Tally Compare: %s vs %s",
       state.sourceA or "?", state.sourceB or "?"))
-    print(string.format("  A: %d entries (%s); B: %d entries (%s); Δ %s",
+    emit(string.format("  A: %d entries (%s); B: %d entries (%s); delta %s",
       lastStats.aCount or 0, formatGoldShort(lastStats.aCopper or 0),
       lastStats.bCount or 0, formatGoldShort(lastStats.bCopper or 0),
       formatGoldShort(lastStats.deltaCopper or 0)))
-    print(string.format("  matches: strict=%d loose=%d name=%d fuzzy=%d a-only=%d b-only=%d",
+    emit(string.format("  matches: strict=%d loose=%d name=%d fuzzy=%d a-only=%d b-only=%d",
       lastStats.strict or 0, lastStats.loose or 0, lastStats.name or 0,
       lastStats.fuzzy or 0, lastStats.aOnly or 0, lastStats.bOnly or 0))
 
@@ -325,14 +333,25 @@ function ns.UI.CreateCompareLedgersPage(parent)
     local bSample, bByKind, bBySource = collectSide(function(p) return p.b and not p.a and p.b or nil end)
 
     local hideNote = hideZero and ", expire/cancel hidden" or ""
-    print(string.format("  --- A-only sample (top %d%s) ---", #aSample, hideNote))
-    for _, e in ipairs(aSample) do print(formatRow("A-only", e)) end
-    print("  " .. bucketLine("A-only by kind", aByKind))
-    print("  " .. bucketLine("A-only by source", aBySource))
-    print(string.format("  --- B-only sample (top %d%s) ---", #bSample, hideNote))
-    for _, e in ipairs(bSample) do print(formatRow("B-only", e)) end
-    print("  " .. bucketLine("B-only by kind", bByKind))
-    print("  " .. bucketLine("B-only by source", bBySource))
+    emit(string.format("  --- A-only sample (top %d%s) ---", #aSample, hideNote))
+    for _, e in ipairs(aSample) do emit(formatRow("A-only", e)) end
+    emit("  " .. bucketLine("A-only by kind", aByKind))
+    emit("  " .. bucketLine("A-only by source", aBySource))
+    emit(string.format("  --- B-only sample (top %d%s) ---", #bSample, hideNote))
+    for _, e in ipairs(bSample) do emit(formatRow("B-only", e)) end
+    emit("  " .. bucketLine("B-only by kind", bByKind))
+    emit("  " .. bucketLine("B-only by source", bBySource))
+
+    local text = table.concat(lines, "\n")
+    -- Prefer Cogworks's copy-friendly dialog (same primitive `/tally diag copy`
+    -- uses) so the long multi-section dump is selectable + paste-ready. Fall
+    -- back to chat for installs without the lib.
+    local cw = getCogworks()
+    if cw and cw.CreateCopyDialog then
+      cw:CreateCopyDialog(text, "Paste this into a Tally GitHub issue (Compare divergence report).")
+    else
+      for _, line in ipairs(lines) do print(line) end
+    end
   end)
 
   page:Refresh()
