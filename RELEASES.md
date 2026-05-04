@@ -10,6 +10,14 @@ The engineering-detail companion lives in `CHANGELOG.md` (commit-readerese — f
 
 _Notes for the next tagged release will be distilled here. Pull from `CHANGELOG.md` and any closed issues' `## Player summary` sections, then organize into themed prose for players._
 
+## v0.1.0-alpha7
+
+Hotfix on top of alpha6.
+
+### Game menu / logout / quit no longer locks up after opening Tally
+
+A bug in the Cogworks library bundled with alpha6 caused the Escape key to silently stop working after you opened (or even just closed) Tally's main window. Pressing Escape would do nothing and the game menu, logout dialog, and quit dialog all became unreachable until you typed `/reload`. The fix updates the bundled Cogworks library to use Blizzard's standard close-on-Escape mechanism, which doesn't interfere with the game menu. No settings change needed — just install this update and the issue stops happening immediately.
+
 ## v0.1.0-alpha6
 
 Hotfix on top of alpha5.
