@@ -360,6 +360,7 @@ local function inspectSetup()
   return {
     completed     = TallyDB and TallyDB.setup and TallyDB.setup.completed and true or false,
     grandfathered = TallyDB and TallyDB.setup and TallyDB.setup.grandfathered and true or false,
+    skipped       = TallyDB and TallyDB.setup and TallyDB.setup.skipped and true or false,
   }
 end
 
@@ -1064,6 +1065,15 @@ if LDB then
     return ns.Ledger and ns.Ledger.IsSetupComplete and not ns.Ledger:IsSetupComplete()
   end
 
+  -- TLY-35: a skipped user is technically still "pending" (no completed
+  -- flag, no imports), but they explicitly opted out of the setup nag.
+  -- Click handlers keep using setupPending so the icon stays a re-entry
+  -- point into the wizard; the tooltip + launcher text branch on this so
+  -- "setup required" only screams at users who haven't decided yet.
+  local function setupSkipped()
+    return TallyDB and TallyDB.setup and TallyDB.setup.skipped and true or false
+  end
+
   local dataobject = LDB:NewDataObject(addonName, {
     type = "data source",
     text = addonName,
@@ -1090,6 +1100,20 @@ if LDB then
       -- regular net worth breakdown until imports have actually run,
       -- so the user doesn't see "Total: 0g" and assume Tally is broken.
       if setupPending() then
+        -- TLY-35: skipped users get a calm, non-nagging variant — they
+        -- already told us they're not ready. Keep it short and re-entry
+        -- friendly so they can change their mind without feeling badgered.
+        if setupSkipped() then
+          tooltip:SetText("|cff888888Tally|r — setup skipped")
+          tooltip:AddLine(" ")
+          tooltip:AddLine("Setup was dismissed. Tally isn't tracking your data.",
+            0.85, 0.85, 0.85, true)
+          tooltip:AddLine("Re-run any time from /tally setup or Settings → Re-run setup wizard.",
+            0.85, 0.85, 0.85, true)
+          tooltip:AddLine(" ")
+          tooltip:AddLine("Click to re-open setup.", 1, 0.82, 0, true)
+          return
+        end
         tooltip:SetText("|cffffd070Tally|r — setup required")
         tooltip:AddLine(" ")
         tooltip:AddLine("Tally hasn't run its first-time setup yet.", 1, 1, 1, true)
@@ -1174,6 +1198,13 @@ if LDB then
   -- text itself is unambiguous.
   local function refreshText()
     if setupPending() then
+      -- TLY-35: distinct text for "user opted out" vs "user hasn't decided".
+      -- Skipped uses a quieter gray to match the calm tooltip; required
+      -- keeps the gold/yellow attention pull for fresh installs.
+      if setupSkipped() then
+        dataobject.text = "|cff888888setup skipped|r"
+        return
+      end
       dataobject.text = "|cffffd070setup required|r"
       return
     end
