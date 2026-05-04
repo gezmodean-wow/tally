@@ -153,7 +153,12 @@ local function buildTabPanel()
     onTabChange = function(key)
       activePage = key
       uiDB().lastTab = key
-      if frame.SetSummary then frame:SetSummary("— " .. key) end
+      -- Tabs already indicate the active page; the cogworks summary bar
+      -- is anchored under the title bar, which is exactly where Tally's
+      -- tab strip sits (sidebar slot is hidden), so calling SetSummary
+      -- caused the active tab name to render as plaintext overlapping
+      -- the leftmost tab. Suppress until the cogworks primitive grows a
+      -- "show only when sidebar visible" or anchor-aware mode.
       local entry = pages[key]
       if entry and entry.instance and entry.instance.Refresh then
         entry.instance:Refresh()

@@ -116,6 +116,22 @@ function ns:PLAYER_LOGIN()
       end
     end)
   end
+
+  -- TLY-40 migration: pre-fix rollups (warband.items without bankItems /
+  -- spillsByChar) may carry inflated counts from the old duplication bug.
+  -- Ownership:Get already triggers a Rebuild when it sees the legacy shape,
+  -- but only on first call — and that first call may happen before
+  -- Syndicator's API is populated, so the Rebuild bails and the user sees
+  -- stale data until they manually `/tally rescan`. Force a deferred
+  -- Rebuild here so the migration completes without manual intervention.
+  if TallyDB.inventoryRollup and TallyDB.inventoryRollup.warband
+     and not TallyDB.inventoryRollup.warband.bankItems
+     and ns.Inventory and ns.Inventory.Rebuild
+     and C_Timer and C_Timer.After then
+    C_Timer.After(5, function()
+      ns.Inventory:Rebuild()
+    end)
+  end
   -- Register diagnostic inspectors with Cogworks's debug toolkit so the
   -- dev console + DumpDebugState read the same per-section state that
   -- /tally diag prints to chat.
