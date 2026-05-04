@@ -55,6 +55,12 @@ ns.Ledger = Ledger
 -- (post-time escrow paired with sale/expire/cancel at view time), taxi,
 -- trainer, quest-reward, loot, mission, trading-post, crafting-order-placed,
 -- crafting-order-fulfilled.
+--
+-- Unknown (TLY-29): catch-all for adapter rows with a source-kind we
+-- don't recognize. Routes unknowns into the ledger as `kind = "unknown"`
+-- with the original payload preserved in `meta.sourceKind` instead of
+-- silently dropping or falling back to a wrong kind. Neutral sign — the
+-- row is queryable + diagnostic but doesn't affect P&L.
 Ledger.Kinds = {
   Sale                    = "sale",
   Purchase                = "purchase",
@@ -77,7 +83,245 @@ Ledger.Kinds = {
   TradingPost             = "trading-post",
   CraftingOrderPlaced     = "crafting-order-placed",
   CraftingOrderFulfilled  = "crafting-order-fulfilled",
+  Unknown                 = "unknown",
 }
+
+-- ============================================================================
+-- Schema (TLY-29)
+-- ============================================================================
+--
+-- Per-(kind, source) field declaration: documents which fields each
+-- adapter populates for each kind. Used as living documentation +
+-- introspection surface for /tally diag + the future Reconcile pass
+-- (which needs to know which fields a given source can authoritatively
+-- supply for each kind).
+--
+-- Schema is *additive*. Adapters keep writing the same `meta` tables
+-- they always have; this table just describes them so consumers can
+-- query "what does FlipQueue carry on a sale row?" without grepping the
+-- adapter code.
+--
+-- `canonical` lists the top-level entry fields every adapter is expected
+-- to populate for that kind. Universal fields (id, atTime, kind, source,
+-- sourceId) are validated at insert time and omitted here for brevity.
+--
+-- `sourceFields` lists the meta keys each adapter populates. Missing
+-- entries mean "this adapter doesn't emit this kind." Empty list means
+-- "this adapter emits this kind but writes no source-specific extras."
+--
+-- The `unknown` kind has no sourceFields predeclared — by definition we
+-- don't know the shape — but every Unknown row MUST carry `meta.sourceKind`
+-- (the original source-kind string the adapter saw before routing).
+local ITEM_TXN_CANONICAL = { "itemID", "itemKey", "charKey", "copper", "count" }
+local NON_ITEM_CANONICAL = { "charKey", "copper" }
+
+Ledger.Schema = {
+  sale = {
+    canonical = ITEM_TXN_CANONICAL,
+    sourceFields = {
+      ["tally-native"] = { "name", "ahCut" },
+      flipqueue       = { "name", "icon", "quality", "targetRealm",
+                          "postedPrice", "expectedPrice", "auctionStatus",
+                          "saleOutcome", "ahFee", "totalFeesSpent",
+                          "postAttempts", "postHistory", "postedAt" },
+      tsm             = { "itemString", "stackSize", "otherPlayer",
+                          "unitPrice", "tsmSource", "csvName" },
+      journalator     = { "name", "itemLink", "buyout", "deposit" },
+    },
+  },
+  purchase = {
+    canonical = ITEM_TXN_CANONICAL,
+    sourceFields = {
+      ["tally-native"] = { "name" },
+      flipqueue       = { "name", "icon", "quality", "targetRealm",
+                          "auctionStatus", "saleOutcome", "ahFee",
+                          "postAttempts", "postHistory", "postedAt" },
+      tsm             = { "itemString", "stackSize", "otherPlayer",
+                          "unitPrice", "tsmSource", "csvName" },
+      journalator     = { "name", "itemLink" },
+    },
+  },
+  ["ah-cancel"] = {
+    canonical = ITEM_TXN_CANONICAL,
+    sourceFields = {
+      flipqueue   = { "name", "auctionStatus", "ahFee", "postedAt" },
+      tsm         = { "itemString", "stackSize", "csvName" },
+      journalator = { "name", "itemLink", "failedType" },
+    },
+  },
+  ["ah-expire"] = {
+    canonical = ITEM_TXN_CANONICAL,
+    sourceFields = {
+      flipqueue   = { "name", "auctionStatus", "ahFee", "postedAt" },
+      tsm         = { "itemString", "stackSize", "csvName" },
+      journalator = { "name", "itemLink", "failedType" },
+    },
+  },
+  ["ah-fee"] = {
+    canonical = ITEM_TXN_CANONICAL,
+    sourceFields = {
+      journalator = { "name", "itemLink" },
+    },
+  },
+  ["ah-deposit"] = {
+    canonical = ITEM_TXN_CANONICAL,
+    sourceFields = {
+      ["tally-native"] = { "name", "buyout", "bid", "deposit" },
+      journalator      = { "name", "itemLink", "buyout", "bid", "deposit" },
+    },
+  },
+  ["vendor-sell"] = {
+    canonical = ITEM_TXN_CANONICAL,
+    sourceFields = {
+      ["tally-native"] = { "merchantLink" },
+      tsm              = { "itemString", "stackSize", "unitPrice", "tsmSource", "csvName" },
+      journalator      = { "name", "itemLink", "vendorType" },
+    },
+  },
+  ["vendor-buy"] = {
+    canonical = ITEM_TXN_CANONICAL,
+    sourceFields = {
+      ["tally-native"] = { "merchantLink" },
+      tsm              = { "itemString", "stackSize", "unitPrice", "tsmSource", "csvName" },
+      journalator      = { "name", "itemLink", "vendorType" },
+    },
+  },
+  ["mail-receive"] = {
+    canonical = NON_ITEM_CANONICAL,
+    sourceFields = {
+      ["tally-native"] = { "sender", "subject" },
+      journalator      = { "recipient", "sender", "items" },
+    },
+  },
+  ["mail-send"] = {
+    canonical = NON_ITEM_CANONICAL,
+    sourceFields = {
+      ["tally-native"] = { "recipient", "subject" },
+      journalator      = { "recipient", "sender", "items" },
+    },
+  },
+  trade = {
+    canonical = NON_ITEM_CANONICAL,
+    sourceFields = {
+      journalator = { "partner", "moneyIn", "moneyOut", "itemsIn", "itemsOut" },
+    },
+  },
+  repair = {
+    canonical = NON_ITEM_CANONICAL,
+    sourceFields = {
+      ["tally-native"] = { "useGuildBank" },
+      journalator      = {},
+    },
+  },
+  refund = {
+    canonical = ITEM_TXN_CANONICAL,
+    sourceFields = {},  -- no producer yet; reserved
+  },
+  taxi = {
+    canonical = NON_ITEM_CANONICAL,
+    sourceFields = {
+      journalator = { "origin", "target", "zone", "map" },
+    },
+  },
+  trainer = {
+    canonical = NON_ITEM_CANONICAL,
+    sourceFields = {
+      journalator = {},
+    },
+  },
+  ["quest-reward"] = {
+    canonical = ITEM_TXN_CANONICAL,
+    sourceFields = {
+      journalator = {},
+    },
+  },
+  loot = {
+    canonical = ITEM_TXN_CANONICAL,
+    sourceFields = {
+      journalator = {},
+    },
+  },
+  mission = {
+    canonical = ITEM_TXN_CANONICAL,
+    sourceFields = {
+      journalator = { "missionName", "missionID", "rewards" },
+    },
+  },
+  ["trading-post"] = {
+    canonical = NON_ITEM_CANONICAL,
+    sourceFields = {
+      journalator = { "itemName", "itemLink", "currencyCost" },
+    },
+  },
+  ["crafting-order-placed"] = {
+    canonical = ITEM_TXN_CANONICAL,
+    sourceFields = {
+      journalator = {},
+    },
+  },
+  ["crafting-order-fulfilled"] = {
+    canonical = ITEM_TXN_CANONICAL,
+    sourceFields = {
+      journalator = {},
+    },
+  },
+  -- TLY-29: catch-all kind for adapter rows whose source-kind we don't
+  -- recognize. No predeclared sourceFields — every Unknown row carries
+  -- the original source-kind string in meta.sourceKind so consumers can
+  -- distinguish "TSM Trade row we don't yet support" from "FlipQueue
+  -- in-flight active status" by inspection. KindSign returns 0 so these
+  -- never affect income/expense totals.
+  unknown = {
+    canonical = { "source", "sourceId" },
+    sourceFields = {},
+    metaRequired = { "sourceKind" },
+  },
+}
+
+-- Returns the schema entry for a kind (canonical + sourceFields) or nil
+-- if the kind is unrecognized. Used by /tally diag introspection and by
+-- the future Reconcile pass to decide which fields a given source can
+-- authoritatively supply.
+function Ledger:GetSchema(kind)
+  return Ledger.Schema[kind]
+end
+
+-- Build a ledger entry routed to Kinds.Unknown. Adapters use this when
+-- the underlying source emitted a status / source / kind string the
+-- adapter doesn't recognize. Preserves the original source-kind on
+-- meta.sourceKind so the row stays diagnostically useful.
+--
+-- Required fields in `attrs`: source, sourceId, atTime, sourceKind.
+-- Optional: charKey, itemID, itemKey, copper, count, meta (extra fields
+-- merged into meta beneath sourceKind).
+--
+-- Returns the entry table (caller appends to its entries list) or nil if
+-- required fields are missing.
+function Ledger:BuildUnknownEntry(attrs)
+  if type(attrs) ~= "table" then return nil end
+  if type(attrs.source) ~= "string" or attrs.source == "" then return nil end
+  if type(attrs.sourceId) ~= "string" or attrs.sourceId == "" then return nil end
+  if type(attrs.atTime) ~= "number" or attrs.atTime <= 0 then return nil end
+  if type(attrs.sourceKind) ~= "string" or attrs.sourceKind == "" then return nil end
+  local meta = {}
+  if type(attrs.meta) == "table" then
+    for k, v in pairs(attrs.meta) do meta[k] = v end
+  end
+  meta.sourceKind = attrs.sourceKind
+  return {
+    id       = attrs.source .. ":unknown:" .. attrs.sourceId,
+    atTime   = attrs.atTime,
+    kind     = Ledger.Kinds.Unknown,
+    itemID   = attrs.itemID,
+    itemKey  = attrs.itemKey,
+    charKey  = attrs.charKey,
+    copper   = attrs.copper or 0,
+    count    = attrs.count or 1,
+    source   = attrs.source,
+    sourceId = "unknown:" .. attrs.sourceId,
+    meta     = meta,
+  }
+end
 
 -- ============================================================================
 -- Storage
@@ -198,11 +442,15 @@ end
 --               loot, mission, crafting-order-fulfilled.
 -- Expense (-1): purchase, vendor-buy, mail-send, repair, ah-fee, taxi,
 --               trainer, trading-post, crafting-order-placed.
--- Neutral (0):  ah-cancel, ah-expire, ah-deposit, trade.
+-- Neutral (0):  ah-cancel, ah-expire, ah-deposit, trade, unknown.
 --   ah-deposit is paired with the eventual sale/expire/cancel at view time
 --   (Lifecycle module) — gross deposit + outcome together yield the realized
 --   loss/recovery. Counting deposit as a live expense would double-count
 --   when the sale completes and TSM/Native attribute the cut.
+--   unknown (TLY-29) is the catch-all bucket for adapter source-kinds we
+--   don't yet recognize. Neutral by design — these rows are diagnostic,
+--   not financial; treating them as either income or expense would corrupt
+--   stats based on rows we haven't classified.
 function Ledger:KindSign(kind)
   if kind == "sale" or kind == "vendor-sell" or kind == "mail-receive"
      or kind == "refund" or kind == "quest-reward" or kind == "loot"
@@ -214,6 +462,10 @@ function Ledger:KindSign(kind)
          or kind == "crafting-order-placed" then
     return -1
   end
+  -- ah-cancel, ah-expire, ah-deposit, trade, unknown, and any future
+  -- additions land here. Explicit fall-through keeps Schema-defined kinds
+  -- and unrecognized strings indistinguishable for sign purposes — both
+  -- correctly read as zero contribution to income/expense totals.
   return 0
 end
 
