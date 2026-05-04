@@ -79,14 +79,14 @@ local function isWarbound(itemKey, itemLink)
 end
 
 -- Fold a Syndicator slot list into the destination items table(s). When
--- `warbandItems` is provided AND the location allows it (PERSONAL_ONLY_LOCATIONS
--- excluded), warbound items are routed to warbandItems instead of charItems.
--- Each slot carries the full hyperlink (preserves bonus IDs / modifiers), so
--- we feed it through the canonical key helper rather than reading itemID
--- directly.
-local function foldSlots(charItems, warbandItems, slots, location)
+-- `spilledItems` is provided AND the location allows it (PERSONAL_ONLY_LOCATIONS
+-- excluded), warbound items are routed to spilledItems instead of charItems.
+-- spilledItems is the per-character spill bucket — projectCharacter returns
+-- it separately so the warband can compose its merged view from a known
+-- per-character contribution (TLY-40).
+local function foldSlots(charItems, spilledItems, slots, location)
   if type(slots) ~= "table" then return end
-  local allowWarboundRoute = warbandItems ~= nil and not PERSONAL_ONLY_LOCATIONS[location]
+  local allowSpill = spilledItems ~= nil and not PERSONAL_ONLY_LOCATIONS[location]
   for _, slot in ipairs(slots) do
     local link = slot and slot.itemLink
     if link and link ~= "" then
@@ -94,8 +94,8 @@ local function foldSlots(charItems, warbandItems, slots, location)
       if key then
         local itemID = ns.Items.GetNumericID(key)
         local items = charItems
-        if allowWarboundRoute and isWarbound(key, link) then
-          items = warbandItems
+        if allowSpill and isWarbound(key, link) then
+          items = spilledItems
         end
         local entry = items[key]
         if not entry then
@@ -115,19 +115,20 @@ local function foldSlots(charItems, warbandItems, slots, location)
   end
 end
 
-local function projectCharacter(charKey, warbandItems)
+local function projectCharacter(charKey)
   local api = syndicator()
   if not api or not api.GetByCharacterFullName then return nil end
   local data = api.GetByCharacterFullName(charKey)
   if type(data) ~= "table" then return nil end
 
   local items = {}
+  local spilled = {}
 
   -- Bags: charData.bags is keyed by bag index; index 5 is the reagent bag.
   if type(data.bags) == "table" then
     for bagIndex, slots in pairs(data.bags) do
       local loc = (bagIndex == 5) and "reagent" or "bags"
-      foldSlots(items, warbandItems, slots, loc)
+      foldSlots(items, spilled, slots, loc)
     end
   end
 
@@ -137,9 +138,9 @@ local function projectCharacter(charKey, warbandItems)
     for _, tab in pairs(data.bank) do
       if type(tab) == "table" then
         if tab.itemLink or tab.itemCount or #tab == 0 then
-          foldSlots(items, warbandItems, { tab }, "bank")
+          foldSlots(items, spilled, { tab }, "bank")
         else
-          foldSlots(items, warbandItems, tab.slots or tab, "bank")
+          foldSlots(items, spilled, tab.slots or tab, "bank")
         end
       end
     end
@@ -147,37 +148,37 @@ local function projectCharacter(charKey, warbandItems)
 
   -- Mail: bag-shaped slot array; in-flight items count toward net worth.
   if type(data.mail) == "table" then
-    foldSlots(items, warbandItems, data.mail, "mail")
+    foldSlots(items, spilled, data.mail, "mail")
   end
 
   -- Equipped gear: warbound override suppressed (PERSONAL_ONLY_LOCATIONS) so
   -- a "Warbound until equipped" item that's already equipped stays with the
   -- character.
   if type(data.equipped) == "table" then
-    foldSlots(items, warbandItems, data.equipped, "equipped")
+    foldSlots(items, spilled, data.equipped, "equipped")
   end
 
   -- Void storage: bound transmog stash, character-only by mechanic.
   if type(data.void) == "table" then
-    foldSlots(items, warbandItems, data.void, "void")
+    foldSlots(items, spilled, data.void, "void")
   end
 
   -- Active AH auctions: bound items can't be listed, so the warbound route
   -- never fires here in practice. Saleable is forced true by isSlotSaleable.
   if type(data.auctions) == "table" then
-    foldSlots(items, warbandItems, data.auctions, "auctions")
+    foldSlots(items, spilled, data.auctions, "auctions")
   end
 
-  return { gold = data.money or 0, items = items }
+  return { gold = data.money or 0, items = items, spilled = spilled }
 end
 
-local function projectWarband()
+local function projectWarbandBank()
   local api = syndicator()
   if not api or not api.GetWarband then return nil end
   local data = api.GetWarband(1)
   if type(data) ~= "table" then return nil end
 
-  local items = {}
+  local bankItems = {}
 
   -- warbandData.bank is a list of tabs; each tab is { slots, name, ... } or
   -- a flat slot array directly. Same pattern as character bank.
@@ -185,27 +186,65 @@ local function projectWarband()
     for _, tab in pairs(data.bank) do
       if type(tab) == "table" then
         local slots = tab.slots or tab
-        foldSlots(items, nil, slots, "warbank")
+        foldSlots(bankItems, nil, slots, "warbank")
       end
     end
   end
 
-  return { gold = data.money or 0, items = items }
+  return { gold = data.money or 0, bankItems = bankItems }
+end
+
+-- Rebuild warband.items as the merge of warband.bankItems plus every
+-- character's warbound spill in warband.spillsByChar. This is the public
+-- field every consumer reads (Inventory page, NetWorth, Research, etc.) —
+-- the per-source split is internal bookkeeping. Called whenever any input
+-- changes (Rebuild / RefreshCharacter / RefreshWarband). TLY-40.
+local function recomputeWarbandItems(warband)
+  local merged = {}
+
+  local function fold(src)
+    if type(src) ~= "table" then return end
+    for key, e in pairs(src) do
+      local m = merged[key]
+      if not m then
+        m = { itemID = e.itemID, total = 0, saleable = 0, locations = {} }
+        merged[key] = m
+      end
+      m.total = m.total + (e.total or 0)
+      m.saleable = m.saleable + (e.saleable or 0)
+      if e.locations then
+        for loc, count in pairs(e.locations) do
+          m.locations[loc] = (m.locations[loc] or 0) + count
+        end
+      end
+    end
+  end
+
+  fold(warband.bankItems)
+  for _, charSpills in pairs(warband.spillsByChar or {}) do
+    fold(charSpills)
+  end
+
+  warband.items = merged
 end
 
 function Ownership:Rebuild()
   local api = syndicator()
   if not api then return false, "Syndicator API unavailable" end
 
-  -- Project the warband first so character scans can spill warbound items
-  -- into rollup.warband.items as they walk each character. If Syndicator
-  -- doesn't expose a warband (no warband at all), still create an empty
-  -- bucket — warbound items are still warbound regardless of warbank state.
-  local warband = projectWarband() or { gold = 0, items = {} }
+  -- Project the warband bank first; characters contribute their warbound
+  -- spills into a per-character map (warband.spillsByChar[charKey]) which
+  -- we merge into warband.items at the end via recomputeWarbandItems.
+  local bank = projectWarbandBank() or { gold = 0, bankItems = {} }
 
   local rollup = {
     characters = {},
-    warband = warband,
+    warband = {
+      gold = bank.gold,
+      bankItems = bank.bankItems,
+      spillsByChar = {},
+      items = {},
+    },
     lastFullScan = time(),
   }
 
@@ -213,11 +252,16 @@ function Ownership:Rebuild()
     local chars = api.GetAllCharacters()
     if type(chars) == "table" then
       for _, charKey in ipairs(chars) do
-        local proj = projectCharacter(charKey, warband.items)
-        if proj then rollup.characters[charKey] = proj end
+        local proj = projectCharacter(charKey)
+        if proj then
+          rollup.characters[charKey] = { gold = proj.gold, items = proj.items }
+          rollup.warband.spillsByChar[charKey] = proj.spilled
+        end
       end
     end
   end
+
+  recomputeWarbandItems(rollup.warband)
 
   TallyDB.inventoryRollup = rollup
   if ns.cw and ns.cw.Fire then
@@ -231,20 +275,23 @@ end
 -- :Rebuild for the common case "user moved an item between bags" — no need
 -- to re-walk every char on the account.
 --
--- TLY-21: warbound items routed via projectCharacter still spill into
--- rollup.warband.items. That spill is one-way: refreshing one character
--- can ADD warbound items to the warband bucket, but it can't REMOVE
--- warbound items deposited by *other* characters. For the bag-slot-change
--- case that's a no-op (the moved item is still in someone's bags); for
--- the cross-character-trade case the next full :Rebuild settles it.
+-- TLY-40: per-character warband spills are tracked in
+-- warband.spillsByChar[charKey] and replaced wholesale on each refresh, so
+-- repeated BagCacheUpdate / AuctionsCacheUpdate fires no longer compound
+-- the warband totals (the alpha8 dup bug). The merged warband.items view is
+-- recomputed from bankItems + spillsByChar[*] after the swap.
 function Ownership:RefreshCharacter(charKey)
-  if not TallyDB.inventoryRollup or not TallyDB.inventoryRollup.warband then
+  local rollup = TallyDB.inventoryRollup
+  if not rollup or not rollup.warband or not rollup.warband.bankItems then
     return self:Rebuild()
   end
-  local proj = projectCharacter(charKey, TallyDB.inventoryRollup.warband.items)
+  local proj = projectCharacter(charKey)
   if proj then
-    TallyDB.inventoryRollup.characters[charKey] = proj
-    TallyDB.inventoryRollup.lastFullScan = time()
+    rollup.characters[charKey] = { gold = proj.gold, items = proj.items }
+    rollup.warband.spillsByChar = rollup.warband.spillsByChar or {}
+    rollup.warband.spillsByChar[charKey] = proj.spilled
+    recomputeWarbandItems(rollup.warband)
+    rollup.lastFullScan = time()
   end
   if ns.cw and ns.cw.Fire then
     pcall(ns.cw.Fire, ns.cw, ns.cw.Events and ns.cw.Events.InventoryChanged or "InventoryChanged")
@@ -252,12 +299,20 @@ function Ownership:RefreshCharacter(charKey)
   return true
 end
 
--- Refresh just the warband bucket. Used when WarbandBankCacheUpdate fires.
+-- Refresh just the warband bank. Character spills are untouched — they
+-- live under warband.spillsByChar and only that character's RefreshCharacter
+-- updates them. recomputeWarbandItems re-merges the new bankItems with the
+-- existing spills.
 function Ownership:RefreshWarband()
-  if not TallyDB.inventoryRollup then return self:Rebuild() end
-  local warband = projectWarband() or { gold = 0, items = {} }
-  TallyDB.inventoryRollup.warband = warband
-  TallyDB.inventoryRollup.lastFullScan = time()
+  local rollup = TallyDB.inventoryRollup
+  if not rollup or not rollup.warband or not rollup.warband.bankItems then
+    return self:Rebuild()
+  end
+  local bank = projectWarbandBank() or { gold = 0, bankItems = {} }
+  rollup.warband.gold = bank.gold
+  rollup.warband.bankItems = bank.bankItems
+  recomputeWarbandItems(rollup.warband)
+  rollup.lastFullScan = time()
   if ns.cw and ns.cw.Fire then
     pcall(ns.cw.Fire, ns.cw, ns.cw.Events and ns.cw.Events.InventoryChanged or "InventoryChanged")
   end
@@ -265,7 +320,13 @@ function Ownership:RefreshWarband()
 end
 
 function Ownership:Get()
-  if not TallyDB.inventoryRollup or not TallyDB.inventoryRollup.lastFullScan then
+  local rollup = TallyDB.inventoryRollup
+  if not rollup or not rollup.lastFullScan then
+    self:Rebuild()
+  -- Migration: pre-TLY-40 rollups stored only warband.items (no bankItems
+  -- or spillsByChar). The existing items map may be inflated by the
+  -- duplication bug, so force a full rebuild on first read after upgrade.
+  elseif not rollup.warband or not rollup.warband.bankItems then
     self:Rebuild()
   end
   return TallyDB.inventoryRollup
