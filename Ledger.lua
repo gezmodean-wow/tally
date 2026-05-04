@@ -483,6 +483,10 @@ local function buildReconciledRecord(cluster, kind, charKey, itemID)
       copper      = e.copper,
       count       = e.count,
       meta        = e.meta,
+      -- Representative source: same as the only contributor for 1-row
+      -- clusters. Preserves the field for consumers that read it directly
+      -- (Research/Aggregator) without forcing them onto provenance.
+      source      = e.source,
       sources     = { [e.source or "?"] = true },
       originalIds = { e.id },
       provenance  = {
@@ -575,6 +579,13 @@ local function buildReconciledRecord(cluster, kind, charKey, itemID)
   rec.provenance.meta = next(rec.metaProvenance)
                         and rec.metaProvenance[next(rec.metaProvenance)]
                         or (cluster[1] and cluster[1].source)
+
+  -- Representative source: whichever source won the atTime priority.
+  -- This is the "primary observer" — not the only source (cluster has
+  -- multiple), but the one consumers should treat as the canonical one
+  -- when they need a single string. Aggregator and similar reads `e.source`
+  -- directly; preserving the field keeps those callers source-agnostic.
+  rec.source = rec.provenance.atTime or (cluster[1] and cluster[1].source)
 
   return rec
 end

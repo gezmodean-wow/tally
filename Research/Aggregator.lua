@@ -147,10 +147,21 @@ end
 -- canonical ledger. Source-agnostic — any registered adapter (FlipQueue,
 -- TSM, Native, Auctionator) contributes here. The record shape preserves
 -- FlipQueue's ItemResearch contract so existing consumers keep working.
+--
+-- TLY-30: reads from Ledger:Reconcile rather than raw Query so users
+-- with overlapping multi-source captures (Native + Journalator + TSM
+-- all observed the same sale) see one row per real-world event in
+-- record.sales / record.purchases / record.failures, not one-per-source.
+-- Per-realm and per-character summaries that aggregate over these lists
+-- stop over-counting; profitSummary / averages / counts now reflect
+-- actual transaction count rather than source-observation count.
+-- Reconciled records preserve the same field shape (atTime, kind,
+-- copper, count, charKey, meta, source); the source field is the
+-- atTime-priority winner for multi-row clusters.
 local function augmentTxnsFromLedger(record, itemID)
   if not (ns.Ledger and itemID) then return end
 
-  for _, e in ipairs(ns.Ledger:Query({ itemID = itemID })) do
+  for _, e in ipairs(ns.Ledger:Reconcile({ itemID = itemID })) do
     local meta = e.meta or {}
     if e.kind == "sale" then
       table.insert(record.sales, {
@@ -236,9 +247,13 @@ local function augmentTxnsFromLedger(record, itemID)
   }
 
   -- AH fees from native + FQ ah-fee entries (separate kind in the ledger).
+  -- Reconcile here too — ah-fee is currently single-source (Native) so the
+  -- pass is a no-op clusterwise, but the call signature stays consistent
+  -- with the rest of this function and picks up automatically when a
+  -- second adapter starts producing ah-fee.
   local feesPaid = 0
   if ns.Ledger and itemID then
-    for _, fe in ipairs(ns.Ledger:Query({ kind = "ah-fee", itemID = itemID })) do
+    for _, fe in ipairs(ns.Ledger:Reconcile({ kind = "ah-fee", itemID = itemID })) do
       feesPaid = feesPaid + (fe.copper or 0)
     end
   end
@@ -267,7 +282,7 @@ local function augmentTxnsFromLedger(record, itemID)
   -- present; otherwise they roll up into the unattributed bucket.
   local feesByRealm = {}
   if ns.Ledger and itemID then
-    for _, fe in ipairs(ns.Ledger:Query({ kind = "ah-fee", itemID = itemID })) do
+    for _, fe in ipairs(ns.Ledger:Reconcile({ kind = "ah-fee", itemID = itemID })) do
       local realm = (fe.meta and fe.meta.targetRealm) or "Unknown"
       feesByRealm[realm] = (feesByRealm[realm] or 0) + (fe.copper or 0)
     end

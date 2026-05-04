@@ -37,15 +37,23 @@ local COHORT_PAIR_WINDOW = 30 * 86400  -- 30 days
 -- Helpers
 -- ============================================================================
 
-local function ledgerQuery(filter)
-  if not (ns.Ledger and ns.Ledger.Query) then return {} end
-  return ns.Ledger:Query(filter)
+-- TLY-30: cohort math reads from reconciled records, not raw Query
+-- output, so users with overlapping multi-source captures (Native +
+-- Journalator both observed the same posting + sale) don't get
+-- doubled-up cohorts. Reconcile preserves the same record fields the
+-- cohort pipeline already reads (atTime, kind, copper, count, charKey,
+-- meta), so the rest of this file is unchanged. Single-source users
+-- see effectively the same output: every cluster is a 1-row cluster
+-- with trivial provenance.
+local function ledgerRows(filter)
+  if not (ns.Ledger and ns.Ledger.Reconcile) then return {} end
+  return ns.Ledger:Reconcile(filter)
 end
 
--- All ledger rows for an itemID, sorted ascending by atTime. Cohort
--- pairing relies on ordered traversal.
+-- All reconciled records for an itemID, sorted ascending by atTime.
+-- Cohort pairing relies on ordered traversal.
 local function rowsForItem(itemID)
-  local rows = ledgerQuery({ itemID = itemID })
+  local rows = ledgerRows({ itemID = itemID })
   table.sort(rows, function(a, b) return (a.atTime or 0) < (b.atTime or 0) end)
   return rows
 end
