@@ -324,6 +324,345 @@ function Ledger:BuildUnknownEntry(attrs)
 end
 
 -- ============================================================================
+-- Authority + Reconcile (TLY-30)
+-- ============================================================================
+--
+-- Authority: per-(kind, field) source priority. When two or more adapters
+-- captured the same real-world event, Reconcile merges them into one
+-- record by picking each canonical field from the highest-priority source
+-- that has a non-nil value for it. The selection is per-field, not per-
+-- row, so a single reconciled record can have atTime from Native (event-
+-- driven, exact second) and copper from TSM (knows the AH cut precisely).
+--
+-- Sources not listed for a (kind, field) tuple fall back to the global
+-- DEFAULT_PRIORITY ordering. Rationale for the defaults:
+--
+--   tally-native — event-driven, captured the instant the event fires;
+--                  most reliable for atTime and field presence in general.
+--   journalator  — also live, captures alongside Native; very close in
+--                  fidelity but second so we don't double-count when
+--                  Native already saw the event.
+--   tsm          — periodic CSV write; lossy on atTime (TSM rounds to
+--                  the second of the source event but its writes can
+--                  lag), but uniquely accurate on copper for sales
+--                  because it accounts for the AH cut at write time.
+--   flipqueue    — derived from FlipQueue's posting-flow log; rich on
+--                  posting metadata (postedPrice, postHistory, etc.)
+--                  but financial fields are downstream of what the
+--                  user sees in mail, so they trail Native + TSM.
+--
+-- Per-(kind, field) overrides express the cases where the default is
+-- wrong — most importantly `sale.copper` where TSM beats everyone else.
+local DEFAULT_PRIORITY = { "tally-native", "journalator", "tsm", "flipqueue" }
+
+Ledger.Authority = {
+  sale = {
+    -- atTime: Native sees the mail invoice the instant the inbox
+    -- updates; Journalator hooks the same path; TSM's CSV row carries
+    -- the source-event time but writes lag.
+    atTime = { "tally-native", "journalator", "tsm", "flipqueue" },
+    -- copper: TSM's CSV records final post-cut amount with no rounding
+    -- ambiguity; Native sees the mail invoice's gross + cut but rounds
+    -- to whole copper; FlipQueue carries soldPrice off the AH itself.
+    copper = { "tsm", "tally-native", "journalator", "flipqueue" },
+    -- itemID: Native resolves from the inbox item link; FlipQueue knows
+    -- it from the posting; Journalator parses an itemLink; TSM has only
+    -- an itemString and we resolve numerically with no metadata.
+    itemID = { "tally-native", "flipqueue", "journalator", "tsm" },
+    -- count + charKey: any source equally reliable; default order.
+    count   = DEFAULT_PRIORITY,
+    charKey = DEFAULT_PRIORITY,
+  },
+  purchase = {
+    atTime  = { "tally-native", "journalator", "tsm", "flipqueue" },
+    copper  = { "tsm", "tally-native", "journalator", "flipqueue" },
+    itemID  = { "tally-native", "flipqueue", "journalator", "tsm" },
+    count   = DEFAULT_PRIORITY,
+    charKey = DEFAULT_PRIORITY,
+  },
+  ["ah-cancel"] = {
+    -- Native AHPosting fires on AUCTION_HOUSE_AUCTION_CANCELED — exact;
+    -- FlipQueue uses postedAt (off by the listing duration); TSM writes
+    -- the source-event time but with the usual lag.
+    atTime = { "tally-native", "journalator", "tsm", "flipqueue" },
+    -- copper is structurally 0 for cancels; Schema doesn't carry money
+    -- on this kind. Listed for completeness.
+    copper = DEFAULT_PRIORITY,
+  },
+  ["ah-expire"] = {
+    atTime = { "tally-native", "journalator", "tsm", "flipqueue" },
+    copper = DEFAULT_PRIORITY,
+  },
+  ["ah-deposit"] = {
+    -- Native AHPosting captures at the moment of POST; Journalator's
+    -- Posting bucket fires from the same hook. Either is exact.
+    atTime = { "tally-native", "journalator" },
+    copper = { "tally-native", "journalator" },
+  },
+  ["ah-fee"] = {
+    -- Only Native produces this kind currently; entry exists for
+    -- forward-compat if Journalator's invoice path ever splits the cut
+    -- into a separate row.
+    atTime = { "tally-native", "journalator" },
+    copper = { "tally-native", "journalator" },
+  },
+  ["vendor-sell"] = {
+    -- Native computes copper from sellPrice * count at MERCHANT_CLOSED —
+    -- bag delta drives the count exactly. TSM and Journalator write the
+    -- vendor txn after the fact.
+    atTime  = { "tally-native", "journalator", "tsm" },
+    copper  = { "tally-native", "tsm", "journalator" },
+    count   = { "tally-native", "tsm", "journalator" },
+  },
+  ["vendor-buy"] = {
+    atTime  = { "tally-native", "journalator", "tsm" },
+    copper  = { "tally-native", "tsm", "journalator" },
+    count   = { "tally-native", "tsm", "journalator" },
+  },
+  ["mail-receive"] = {
+    atTime = { "tally-native", "journalator" },
+    copper = { "tally-native", "journalator" },
+  },
+  ["mail-send"] = {
+    atTime = { "tally-native", "journalator" },
+    copper = { "tally-native", "journalator" },
+  },
+  repair = {
+    -- Native's RepairAllItems hook gives the exact money delta;
+    -- Journalator's VendorRepairs row is fed from the same UI but
+    -- the lag is non-zero.
+    atTime = { "tally-native", "journalator" },
+    copper = { "tally-native", "journalator" },
+  },
+  -- trade, taxi, trainer, quest-reward, loot, mission, trading-post,
+  -- crafting-order-* are single-source today (Journalator only). They
+  -- will pass through Reconcile as 1-row clusters with trivial provenance;
+  -- when Native picks up these kinds we'll add explicit Authority entries.
+}
+
+-- Returns the priority list for (kind, field), or DEFAULT_PRIORITY if
+-- the (kind, field) tuple has no explicit override.
+function Ledger:GetAuthority(kind, field)
+  local k = Ledger.Authority[kind]
+  if k and k[field] then return k[field] end
+  return DEFAULT_PRIORITY
+end
+
+-- Reconcile clustering windows. Same-event captures across sources land
+-- within seconds for live capture (Native + Journalator) but TSM's CSV
+-- write lag can be longer; the loose window catches the wider spread
+-- without coalescing distinct postings of the same item.
+--
+-- Stricter than Compare's tiered matching: Compare's "fuzzy" tier (1h)
+-- exists to align bulk archive imports between sources whose clocks may
+-- have drifted; Reconcile is reasoning about live multi-source overlap
+-- on a single user's events, where 5min covers all observed lag.
+local RECONCILE_WINDOW = 5 * 60  -- 5 minutes
+
+-- Field list reconciled per record. Universal id/atTime/kind/source are
+-- handled inline (kind / charKey / itemID drive the grouping; id is
+-- regenerated for the reconciled record).
+local RECONCILED_FIELDS = { "atTime", "copper", "count", "itemKey" }
+
+-- For one cluster (set of rows representing the same real-world event),
+-- pick each canonical field from the highest-priority source with a
+-- non-nil value, falling back to the first row's value. Returns the
+-- merged record + provenance map.
+local function buildReconciledRecord(cluster, kind, charKey, itemID)
+  -- Single-row cluster: trivial pass-through, provenance points entirely
+  -- at the one source.
+  if #cluster == 1 then
+    local e = cluster[1]
+    return {
+      id          = "reconciled:" .. (e.id or "?"),
+      atTime      = e.atTime,
+      kind        = kind,
+      itemID      = itemID,
+      itemKey     = e.itemKey,
+      charKey     = charKey,
+      copper      = e.copper,
+      count       = e.count,
+      meta        = e.meta,
+      sources     = { [e.source or "?"] = true },
+      originalIds = { e.id },
+      provenance  = {
+        atTime = e.source, copper = e.source, count = e.source,
+        itemKey = e.source, meta = e.source,
+      },
+    }
+  end
+
+  local rec = {
+    kind        = kind,
+    itemID      = itemID,
+    charKey     = charKey,
+    sources     = {},
+    originalIds = {},
+    provenance  = {},
+  }
+  for _, e in ipairs(cluster) do
+    rec.sources[e.source or "?"] = true
+    rec.originalIds[#rec.originalIds + 1] = e.id
+  end
+
+  -- Synthetic id for reconciled record. Stable across re-imports as
+  -- long as the underlying originalIds are stable (they are — adapters
+  -- hash on canonical row identity).
+  rec.id = "reconciled:" .. table.concat(rec.originalIds, "+")
+
+  for _, field in ipairs(RECONCILED_FIELDS) do
+    local priority = Ledger.Authority[kind] and Ledger.Authority[kind][field]
+                  or DEFAULT_PRIORITY
+    local picked, pickedFrom = nil, nil
+    for _, srcName in ipairs(priority) do
+      for _, e in ipairs(cluster) do
+        if e.source == srcName and e[field] ~= nil then
+          picked = e[field]
+          pickedFrom = srcName
+          break
+        end
+      end
+      if pickedFrom then break end
+    end
+    -- Fallback: any row's non-nil value, in cluster order.
+    if pickedFrom == nil then
+      for _, e in ipairs(cluster) do
+        if e[field] ~= nil then
+          picked = e[field]
+          pickedFrom = e.source
+          break
+        end
+      end
+    end
+    rec[field] = picked
+    rec.provenance[field] = pickedFrom
+  end
+
+  -- Meta: shallow merge across rows. Higher-priority sources' meta keys
+  -- win; lower-priority keys fill in gaps. Provenance points at whichever
+  -- source contributed the *first* observed key for each meta field.
+  -- Coarser than per-meta-key provenance, sufficient for current consumers.
+  rec.meta = {}
+  rec.metaProvenance = {}
+  local priority = Ledger.Authority[kind] and Ledger.Authority[kind].atTime
+                or DEFAULT_PRIORITY
+  -- Walk in priority order so higher-priority rows write first; the
+  -- second-pass over remaining rows fills in keys the leader didn't have.
+  local visited = {}
+  for _, srcName in ipairs(priority) do
+    for _, e in ipairs(cluster) do
+      if e.source == srcName and not visited[e] and type(e.meta) == "table" then
+        visited[e] = true
+        for k, v in pairs(e.meta) do
+          if rec.meta[k] == nil then
+            rec.meta[k] = v
+            rec.metaProvenance[k] = e.source
+          end
+        end
+      end
+    end
+  end
+  for _, e in ipairs(cluster) do
+    if not visited[e] and type(e.meta) == "table" then
+      for k, v in pairs(e.meta) do
+        if rec.meta[k] == nil then
+          rec.meta[k] = v
+          rec.metaProvenance[k] = e.source
+        end
+      end
+    end
+  end
+  rec.provenance.meta = next(rec.metaProvenance)
+                        and rec.metaProvenance[next(rec.metaProvenance)]
+                        or (cluster[1] and cluster[1].source)
+
+  return rec
+end
+
+-- Cluster a sorted-by-atTime list of rows (all sharing the same kind +
+-- charKey + itemID) into groups representing same-real-world-event
+-- captures. Greedy: each row joins the first prior cluster within
+-- RECONCILE_WINDOW that has matching count; otherwise opens a new
+-- cluster. Returns a list of clusters (each a list of rows).
+local function clusterGroup(rows)
+  local clusters = {}
+  for _, e in ipairs(rows) do
+    local matched
+    for _, cluster in ipairs(clusters) do
+      local first = cluster[1]
+      if (e.count or 1) == (first.count or 1)
+         and math.abs((e.atTime or 0) - (first.atTime or 0)) <= RECONCILE_WINDOW then
+        cluster[#cluster + 1] = e
+        matched = true
+        break
+      end
+    end
+    if not matched then
+      clusters[#clusters + 1] = { e }
+    end
+  end
+  return clusters
+end
+
+-- Reconcile multi-source observations of the same event into one record
+-- per event, with per-field provenance. Same call surface as Query so
+-- consumers can swap drop-in.
+--
+-- Behavior:
+--   * filter — same shape as Query (kind, kinds, itemID, itemKey,
+--              charKey, source, atTimeFrom, atTimeTo).
+--   * Returns a list of reconciled records. Each record carries:
+--       id, atTime, kind, itemID, itemKey, charKey, copper, count,
+--       meta, sources (set), originalIds (list), provenance (map),
+--       metaProvenance (map).
+--   * Single-source captures pass through as 1-row clusters — same
+--       record shape, sources has one entry, provenance points at it.
+--
+-- Kinds that don't reconcile:
+--   * Ledger.Kinds.Unknown — by definition each Unknown row carries a
+--       distinct sourceKind; merging would lose that diagnostic. They
+--       pass through as 1-row clusters (provenance.atTime = source).
+--
+-- Filtering by source via filter.source short-circuits reconciliation
+-- (single-source filter → single-row clusters; useful for the LedgerPage
+-- Raw-mode filter chips that select a specific adapter).
+function Ledger:Reconcile(filter)
+  local rows = self:Query(filter)
+  if #rows == 0 then return {} end
+
+  -- Group by (kind, charKey, itemID). Rows with nil itemID share the
+  -- "0" bucket — fine for kinds that don't carry an item (ah-fee, repair,
+  -- taxi, etc.); those still cluster correctly by atTime + count.
+  local groups = {}
+  local groupOrder = {}
+  for _, e in ipairs(rows) do
+    local key = (e.kind or "?") .. "|"
+             .. (e.charKey or "?") .. "|"
+             .. tostring(e.itemID or 0)
+    if not groups[key] then
+      groups[key] = {}
+      groupOrder[#groupOrder + 1] = key
+    end
+    groups[key][#groups[key] + 1] = e
+  end
+
+  local records = {}
+  for _, key in ipairs(groupOrder) do
+    local group = groups[key]
+    table.sort(group, function(a, b) return (a.atTime or 0) < (b.atTime or 0) end)
+    local kind    = group[1].kind
+    local charKey = group[1].charKey
+    local itemID  = group[1].itemID
+    local clusters = clusterGroup(group)
+    for _, cluster in ipairs(clusters) do
+      records[#records + 1] = buildReconciledRecord(cluster, kind, charKey, itemID)
+    end
+  end
+
+  return records
+end
+
+-- ============================================================================
 -- Storage
 -- ============================================================================
 
