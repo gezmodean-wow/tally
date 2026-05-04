@@ -1,20 +1,20 @@
 # Tally — next session handoff
 
-Picks up after the 2026-05-02 session. Last shipped: `v0.1.0-alpha6` (TLY-33 hotfix on top of alpha5).
+Picks up after the 2026-05-03 session. Last shipped: `v0.1.0-alpha7` (TLY-39 hotfix on top of alpha6 — Cogworks v0.13.0 → v0.13.1 to pick up COG-26 ESC handler fix).
 
 ## State
 
-- Working tree clean. All alpha6 commits pushed (`ff13ffc` fix, `0c35a41` docs).
-- Cogworks pinned at `v0.13.0` in `.pkgmeta`; vendored `Libs/Cogworks-1.0/` synced (gitignored).
+- Working tree clean. Alpha7 commits pushed (`9ab59b2` fix, `9357a38` docs); tag `v0.1.0-alpha7` pushed; release CI run 25295398018 succeeded; player-facing TLY-39 update posted.
+- Cogworks pinned at `v0.13.1` in `.pkgmeta`; vendored `Libs/Cogworks-1.0/` synced (gitignored).
 - Memory at `C:\Users\gezmo\.claude\projects\C--src-tally\memory\` updated with alpha-cadence preference (`feedback_alpha_cadence.md`).
 
 ## The big change for next session: compressed alpha cadence
 
 Per user direction (saved as `feedback_alpha_cadence.md`): **alphas ship full critical-path bundles, not incremental planned work.** Subsequent alphas exist only to fix tester-reported problems. Phase the development internally across sessions / commits, but only `git tag` when the bundle is complete.
 
-Practical consequence: do NOT tag intermediate alphas as you finish each phase below. Commit each phase to `main`, but hold the tag until the whole alpha7 bundle (Phase 1 → 4) is done.
+Practical consequence: do NOT tag intermediate alphas as you finish each phase below. Commit each phase to `main`, but hold the tag until the whole alpha8 bundle (Phase 1 → 4) is done.
 
-## Alpha7 scope: authoritative ledger (full critical-path)
+## Alpha8 scope: authoritative ledger (full critical-path)
 
 Reflected on [TLY-30 comment](https://github.com/gezmodean-wow/tally/issues/30#issuecomment-4365424684). Bundle ships:
 
@@ -82,14 +82,14 @@ Smaller; can land same session as Phase 3 if time permits.
 - `UI/SetupWizard.lua` source-detection step wording: relabel sibling sources as "Backfill from <source>" rather than "Import from <source>". Helps users understand the new role.
 - `UI/SettingsPage.lua` DATA SOURCES section: add a label clarifying that sibling-source imports are now manual / one-shot, with "Import now" buttons per source unchanged.
 
-## Tester signals still live (independent of alpha7 bundle)
+## Tester signals still live (independent of alpha8 bundle)
 
 - **[TLY-24](https://github.com/gezmodean-wow/tally/issues/24)** — Toeknee's TSM-vs-Tally discrepancy. `/tally diag` from alpha6 needed to confirm warband/per-char gold field name. Fix likely one-line in `Inventory/Ownership.lua`.
 - **[TLY-28](https://github.com/gezmodean-wow/tally/issues/28)** — Inventory tab empty. Need diag + wizard-completion confirmation.
 - **[TLY-33](https://github.com/gezmodean-wow/tally/issues/33)** — Closed but waiting for tester re-test confirmation that the alpha6 fix resolved the integer overflow.
 - **[TLY-35](https://github.com/gezmodean-wow/tally/issues/35)** — Welcome popup per-toon question (filed by scribe; not yet triaged).
 
-If any of these get tester replies during the alpha7 work cycle, evaluate whether to fold into alpha7 or split as alpha7-hotfix tags. Per cadence preference, prefer folding when feasible.
+If any of these get tester replies during the alpha8 work cycle, evaluate whether to fold into alpha8 or split as alpha8-hotfix tags. Per cadence preference, prefer folding when feasible.
 
 ## Waiting on Cogworks
 
@@ -98,8 +98,8 @@ If any of these get tester replies during the alpha7 work cycle, evaluate whethe
 ## Handy facts
 
 - Last acknowledged scribe player-facing conventions: `2026-04-30f` (re-fetch when next writing player-facing copy)
-- Cogworks pinned at `v0.13.0` in `.pkgmeta`
-- Origin current as of `0c35a41` (alpha6 docs commit)
+- Cogworks pinned at `v0.13.1` in `.pkgmeta`
+- Origin current as of `9357a38` (alpha7 docs commit)
 - Slash commands now use `cw:RegisterSlashCommands` — auto-help renders from per-command `{ name, run, help, args, aliases }`. Add new commands as table entries in `Core.lua`'s `RegisterSlashCommands` block, not via separate `SLASH_*` globals.
 - Debug toolkit: `ns.dbg:PrintDebug(...)` for trace logging; `/tally debug` toggles the live console; `/tally diag copy` opens the structured paste-friendly dump.
 - Memory entries to read when starting: `feedback_alpha_cadence` (the new cadence rule), `feedback_no_push_without_approval` (push approval), `feedback_ui_before_ship` (UI-before-shipping principle), `project_scope` (what Tally is), `feedback_player_summary` (scribe doc URL).
