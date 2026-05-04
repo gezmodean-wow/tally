@@ -149,6 +149,22 @@ function ns.UI.CreateCompareLedgersPage(parent)
   exportBtn:SetPoint("LEFT", refreshBtn, "RIGHT", 6, 0)
   exportBtn:SetText("Export to chat")
 
+  -- "Hide expire/cancel" toggle — strips rows where copper == 0 from the
+  -- export sample + bucket counts. Most divergence in real-world Compare
+  -- runs is dominated by AH cancels/expires (high volume, zero copper); this
+  -- lets a debugger focus on the rows that actually move money.
+  state.hideExpireCancel = state.hideExpireCancel or false
+  local hideZeroCheck = CreateFrame("CheckButton", nil, row, "UICheckButtonTemplate")
+  hideZeroCheck:SetSize(22, 22)
+  hideZeroCheck:SetPoint("LEFT", exportBtn, "RIGHT", 4, 0)
+  hideZeroCheck:SetChecked(state.hideExpireCancel)
+  hideZeroCheck.text = hideZeroCheck:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+  hideZeroCheck.text:SetPoint("LEFT", hideZeroCheck, "RIGHT", 0, 1)
+  hideZeroCheck.text:SetText("Hide expire/cancel in export")
+  hideZeroCheck:SetScript("OnClick", function(self)
+    state.hideExpireCancel = self:GetChecked() and true or false
+  end)
+
   -- ============================================================================
   -- Summary card
   -- ============================================================================
@@ -266,25 +282,57 @@ function ns.UI.CreateCompareLedgersPage(parent)
       lastStats.aCount or 0, formatGoldShort(lastStats.aCopper or 0),
       lastStats.bCount or 0, formatGoldShort(lastStats.bCopper or 0),
       formatGoldShort(lastStats.deltaCopper or 0)))
-    print(string.format("  matches: strict=%d loose=%d fuzzy=%d a-only=%d b-only=%d",
-      lastStats.strict or 0, lastStats.loose or 0, lastStats.fuzzy or 0,
-      lastStats.aOnly or 0, lastStats.bOnly or 0))
-    -- Top 10 unique-on-each-side rows for paste-into-issue.
-    local printed = 0
-    for _, p in ipairs(lastPairs) do
-      if printed >= 10 then break end
-      if p.tier == "unique" then
-        local rep = p.a or p.b
-        local sideLabel = p.a and "A-only" or "B-only"
-        print(string.format("  [%s] %s | %s | item:%s | %s",
-          sideLabel,
-          rep.atTime and date("%m/%d %H:%M", rep.atTime) or "?",
-          rep.charKey or "?",
-          tostring(rep.itemID or "?"),
-          formatGoldShort(rep.copper or 0)))
-        printed = printed + 1
-      end
+    print(string.format("  matches: strict=%d loose=%d name=%d fuzzy=%d a-only=%d b-only=%d",
+      lastStats.strict or 0, lastStats.loose or 0, lastStats.name or 0,
+      lastStats.fuzzy or 0, lastStats.aOnly or 0, lastStats.bOnly or 0))
+
+    local hideZero = state.hideExpireCancel and true or false
+
+    local function formatRow(side, e)
+      return string.format("  [%s] %s | %s | %s | %s | item:%s | %s",
+        side,
+        e.atTime and date("%m/%d %H:%M", e.atTime) or "?",
+        e.source or "?",
+        e.kind or "?",
+        e.charKey or "?",
+        tostring(e.itemID or "?"),
+        formatGoldShort(e.copper or 0))
     end
+
+    local function bucketLine(label, counts)
+      local parts = {}
+      for k, n in pairs(counts) do parts[#parts + 1] = k .. "=" .. n end
+      table.sort(parts)
+      if #parts == 0 then return label .. ": (none)" end
+      return label .. ": " .. table.concat(parts, ", ")
+    end
+
+    local function collectSide(predicate)
+      local sample, byKind, bySource = {}, {}, {}
+      for _, p in ipairs(lastPairs) do
+        local e = predicate(p)
+        if e and not (hideZero and (e.copper or 0) == 0) then
+          if #sample < 5 then sample[#sample + 1] = e end
+          local k, s = e.kind or "?", e.source or "?"
+          byKind[k] = (byKind[k] or 0) + 1
+          bySource[s] = (bySource[s] or 0) + 1
+        end
+      end
+      return sample, byKind, bySource
+    end
+
+    local aSample, aByKind, aBySource = collectSide(function(p) return p.a and not p.b and p.a or nil end)
+    local bSample, bByKind, bBySource = collectSide(function(p) return p.b and not p.a and p.b or nil end)
+
+    local hideNote = hideZero and ", expire/cancel hidden" or ""
+    print(string.format("  --- A-only sample (top %d%s) ---", #aSample, hideNote))
+    for _, e in ipairs(aSample) do print(formatRow("A-only", e)) end
+    print("  " .. bucketLine("A-only by kind", aByKind))
+    print("  " .. bucketLine("A-only by source", aBySource))
+    print(string.format("  --- B-only sample (top %d%s) ---", #bSample, hideNote))
+    for _, e in ipairs(bSample) do print(formatRow("B-only", e)) end
+    print("  " .. bucketLine("B-only by kind", bByKind))
+    print("  " .. bucketLine("B-only by source", bBySource))
   end)
 
   page:Refresh()
