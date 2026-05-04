@@ -124,9 +124,12 @@ end
 -- Per-CSV import
 -- ============================================================================
 
--- kindResolver(sourceCol) → ledger kind string. For Sales/Buys we use the
--- TSM `source` column to distinguish Auction vs Vendor; for Expired/Cancelled
--- the kind is fixed.
+-- kindResolver(sourceCol) → ledger kind string OR nil to route the row to
+-- Ledger.Kinds.Unknown. For Sales/Buys we use the TSM `source` column to
+-- distinguish Auction vs Vendor; anything else (Trade, Mail, future TSM
+-- additions) returns nil so the row lands in the Unknown bucket carrying
+-- the original `src` string in meta.sourceKind. Expired/Cancelled have no
+-- `source` column and resolvers return their fixed kind unconditionally.
 local function importCSV(realm, value, csvName, kindResolver)
   local entries = {}
   eachRow(value, function(cols, fields)
@@ -145,14 +148,39 @@ local function importCSV(realm, value, csvName, kindResolver)
       return
     end
 
+    local copper = (price and qty) and (price * qty) or 0
+    local charKey = (player or "") .. "-" .. (realm or "")
+
     local kind = kindResolver(src)
     if not kind then
+      -- TLY-29: route to Unknown instead of silently dropping or — the
+      -- previous behavior — falling back to "sale" / "purchase" and
+      -- mis-categorizing Trade / Mail rows. Hash incorporates the raw
+      -- `src` so two rows with different source-kinds at the same
+      -- second don't collide.
       TSMSrc.skipCounters.unknown_kind = TSMSrc.skipCounters.unknown_kind + 1
+      local hash = rowHash(realm, "unknown:" .. (src or ""), fields, cols)
+      local entry = ns.Ledger:BuildUnknownEntry({
+        source     = SOURCE_NAME,
+        sourceId   = csvName .. ":" .. hash,
+        atTime     = t,
+        sourceKind = src and src ~= "" and src or "(empty)",
+        charKey    = charKey,
+        itemID     = itemIDFromTSM(item),
+        copper     = copper,
+        count      = qty,
+        meta       = {
+          itemString = item,
+          stackSize = stack,
+          otherPlayer = other,
+          unitPrice = price,
+          csvName = csvName,
+        },
+      })
+      if entry then entries[#entries + 1] = entry end
       return
     end
 
-    local copper = (price and qty) and (price * qty) or 0
-    local charKey = (player or "") .. "-" .. (realm or "")
     local hash = rowHash(realm, kind, fields, cols)
 
     entries[#entries + 1] = {
@@ -183,14 +211,19 @@ local function resolverForCSV(csvName)
   if csvName == "csvSales" then
     return function(src)
       if src == "Auction" then return "sale"
-      elseif src == "Vendor" then return "vendor-sell"
-      else return "sale" end -- conservative: unknown source still counts as sale
+      elseif src == "Vendor" then return "vendor-sell" end
+      -- TLY-29: previously fell back to "sale" — that misclassified
+      -- TSM "Trade" rows (and any future source enum addition) as
+      -- auction sales, inflating sale counts and tilting per-item
+      -- pricing history. Returning nil now routes the row to
+      -- Ledger.Kinds.Unknown with `src` preserved in meta.sourceKind.
+      return nil
     end
   elseif csvName == "csvBuys" then
     return function(src)
       if src == "Auction" then return "purchase"
-      elseif src == "Vendor" then return "vendor-buy"
-      else return "purchase" end
+      elseif src == "Vendor" then return "vendor-buy" end
+      return nil
     end
   elseif csvName == "csvExpired" then
     return function() return "ah-expire" end
