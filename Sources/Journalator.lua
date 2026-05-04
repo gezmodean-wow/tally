@@ -218,8 +218,33 @@ local function mapFailure(row)
   if row.failedType == "expired" then kind = "ah-expire"
   elseif row.failedType == "cancelled" then kind = "ah-cancel"
   else
+    -- TLY-29: route unrecognized failedType (Journalator schema addition,
+    -- stale-shape archive row, etc.) to Ledger.Kinds.Unknown rather than
+    -- silently dropping. Counter still increments — loss accounting is
+    -- now "rows routed to Unknown" rather than "rows silently dropped."
     Journalator.skipCounters.unknown_failure_type =
       Journalator.skipCounters.unknown_failure_type + 1
+    local count = safeNum(row.count) > 0 and row.count or 1
+    local salt = string.format("unknown:%s|%s|%d",
+      row.failedType or "(empty)", row.itemName or "?", count)
+    local hash = rowHash("Failures", salt, row.source, row.time)
+    local unknown = ns.Ledger:BuildUnknownEntry({
+      source     = SOURCE_NAME,
+      sourceId   = "Failures:" .. hash,
+      atTime     = row.time,
+      sourceKind = row.failedType and row.failedType ~= "" and row.failedType or "(empty)",
+      charKey    = charKey,
+      itemID     = itemIDFromLink(row.itemLink),
+      copper     = 0,
+      count      = count,
+      meta       = {
+        name = row.itemName,
+        itemLink = row.itemLink,
+        failedType = row.failedType,
+        bucket = "Failures",
+      },
+    })
+    if unknown then out[#out + 1] = unknown end
     return out
   end
   local count = safeNum(row.count) > 0 and row.count or 1
@@ -303,8 +328,32 @@ local function mapVendoring(row)
   if row.vendorType == "sell" then kind = "vendor-sell"
   elseif row.vendorType == "buy" then kind = "vendor-buy"
   else
+    -- TLY-29: same pattern as mapFailure — route unrecognized vendorType
+    -- to Ledger.Kinds.Unknown with the original string preserved.
     Journalator.skipCounters.unknown_vendor_type =
       Journalator.skipCounters.unknown_vendor_type + 1
+    local count = safeNum(row.count) > 0 and row.count or 1
+    local salt = string.format("unknown:%s|%s|%.0f|%.0f",
+      row.vendorType or "(empty)", row.itemName or "?",
+      safeNum(row.value), count)
+    local hash = rowHash("Vendoring", salt, row.source, row.time)
+    local unknown = ns.Ledger:BuildUnknownEntry({
+      source     = SOURCE_NAME,
+      sourceId   = "Vendoring:" .. hash,
+      atTime     = row.time,
+      sourceKind = row.vendorType and row.vendorType ~= "" and row.vendorType or "(empty)",
+      charKey    = charKey,
+      itemID     = itemIDFromLink(row.itemLink),
+      copper     = safeNum(row.value),
+      count      = count,
+      meta       = {
+        name = row.itemName,
+        itemLink = row.itemLink,
+        vendorType = row.vendorType,
+        bucket = "Vendoring",
+      },
+    })
+    if unknown then out[#out + 1] = unknown end
     return out
   end
   local count = safeNum(row.count) > 0 and row.count or 1
