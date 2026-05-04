@@ -354,6 +354,25 @@ function ns.UI.CreateCompareLedgersPage(parent)
     end
   end)
 
+  -- Clear selection + Compare results every time the tab becomes visible.
+  -- A repeat visit with the previous A/B still selected would re-run the
+  -- expensive Compare:Compare on every tab switch (heavier post-TLY-37
+  -- with the name-tier index pass), which made the tab feel slow to
+  -- re-enter. Forcing the user to re-pick on each visit keeps the tab
+  -- fast; the dropdowns + summary text reset to their (pick a source)
+  -- placeholder state.
+  page:HookScript("OnShow", function()
+    state.sourceA = nil
+    state.sourceB = nil
+    UIDropDownMenu_SetSelectedValue(ddA, nil)
+    UIDropDownMenu_SetText(ddA, "(pick a source)")
+    UIDropDownMenu_SetSelectedValue(ddB, nil)
+    UIDropDownMenu_SetText(ddB, "(pick a source)")
+    sumText:SetText("(pick two sources to compare)")
+    if scrollTable then scrollTable:SetData({}) end
+    lastPairs, lastStats = {}, {}
+  end)
+
   page:Refresh()
 
   return page
