@@ -10,6 +10,36 @@ The engineering-detail companion lives in `CHANGELOG.md` (commit-readerese — f
 
 _Notes for the next tagged release will be distilled here. Pull from `CHANGELOG.md` and any closed issues' `## Player summary` sections, then organize into themed prose for players._
 
+## v0.1.0-alpha8
+
+A data-quality + UI polish alpha. Tally's matching against TSM / FlipQueue / Journalator gets sharper, the Compare and Ledger views both gain a copy-friendly export dialog, and a stack of tester-feedback fixes lands on top of the alpha7 surface.
+
+### More accurate item identification
+
+When Tally captures an AH mailbox invoice it now resolves the item's ID immediately instead of leaving it blank, and FlipQueue rows whose item key was malformed or missing now fall back to the item link to recover the ID. Net effect: more of your historical AH activity shows up correctly in per-item Research, Lifecycle cohorts, and the Compare view — fewer rows attributed to "unknown item" because the source addon happened to drop the ID.
+
+### Compare view smarter and faster
+
+- A new "name" match tier connects rows that share a character + item name but lack an item ID on one side, sitting between the existing loose and fuzzy tiers. Useful for matching old native-capture rows against current TSM / FlipQueue data.
+- Export-to-chat is now Export-to-dialog. The report opens in a copy-paste-friendly window instead of being dumped into the chat frame (which mangled long lines and was hard to select). The new format also gives a dual-side sample plus by-kind / by-source bucket counts so divergence reports are useful at a glance. New checkbox to hide expire/cancel rows from the export.
+- The Compare tab no longer pre-selects sources on open or remembers your selections across tab switches. Re-entering the tab is instant; pick Source A and B fresh each time you want a comparison.
+
+### Ledger tab gains export
+
+Same copy-friendly dialog pattern, on the Ledger tab. Click Export to grab the currently-visible transactions (whichever filter chip you have on — All, Sales, Purchases, AH Activity, Other) into a paste-ready window. Useful for filing GitHub issues with concrete data, or pulling a subset into a spreadsheet for external analysis.
+
+### Warband counts no longer climb forever
+
+A bug caused Warbound items in your bags (heirlooms, achievement rewards, anything bound to the warband) to duplicate every time you moved an item or posted at the auction house — your "Master of Fishing" could climb to 4 or 5 within seconds of normal play. Fixed. The first login after this update triggers a one-time full inventory rescan to clear out any inflated counts already on disk; you don't need to do anything manually.
+
+### Tab name no longer overlaps the leftmost tab
+
+A small chrome regression where the active tab's name rendered as floating plaintext over the *Net Worth* tab on the left of the strip. Removed; the tab buttons themselves indicate which page is active.
+
+### Behind the scenes
+
+The release pipeline now runs a verification step before publishing — asserts the built zip has its embedded library directory populated, every `.lua` and `.xml` file referenced by the table-of-contents actually exists in the package, and the archive isn't trivially small. Catches the failure mode that produced the alpha6 "couldn't open Cogworks-1.0.xml" report before it can ship.
+
 ## v0.1.0-alpha7
 
 Hotfix on top of alpha6.
