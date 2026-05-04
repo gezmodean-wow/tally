@@ -149,8 +149,13 @@ function ns.UI.CreateLedgerPage(parent)
     prev = chip
   end
 
+  local exportBtn = CreateFrame("Button", nil, filterRow, "UIPanelButtonTemplate")
+  exportBtn:SetSize(80, 22)
+  exportBtn:SetPoint("RIGHT", filterRow, "RIGHT", -4, 0)
+  exportBtn:SetText("Export")
+
   local countText = filterRow:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
-  countText:SetPoint("RIGHT", filterRow, "RIGHT", -4, 0)
+  countText:SetPoint("RIGHT", exportBtn, "LEFT", -8, 0)
   countText:SetJustifyH("RIGHT")
 
   -- ============================================================================
@@ -284,6 +289,67 @@ function ns.UI.CreateLedgerPage(parent)
     end
     scrollTable:SetData(rows)
   end
+
+  -- Export the currently-filtered ledger rows to Cogworks's copy-friendly
+  -- dialog. All rows in the active filter, not just the on-screen MAX_ROWS
+  -- slice — the dialog is for grabbing data into a GitHub issue or external
+  -- analysis tool, where the cap is unhelpful. Falls back to chat for
+  -- installs without the lib.
+  exportBtn:SetScript("OnClick", function()
+    if not ns.Ledger then return end
+    local filter = FILTERS[state.filterIdx]
+    local query = {}
+    if filter.kinds then query.kinds = filter.kinds end
+
+    local stats = ns.Ledger:Stats(query)
+    local entries = ns.Ledger:Query(query)
+    table.sort(entries, function(a, b) return (a.atTime or 0) > (b.atTime or 0) end)
+
+    local lines = {}
+    local function emit(s) lines[#lines + 1] = s end
+
+    emit(string.format("Tally Ledger: %s (%d entries)",
+      filter.label, stats.count or 0))
+    emit(string.format("  income = %s, expense = %s, net = %s%s",
+      formatGoldShort(stats.income or 0),
+      formatGoldShort(stats.expense or 0),
+      (stats.net or 0) >= 0 and "+" or "-",
+      formatGoldShort(stats.net or 0)))
+    emit("")
+
+    for _, e in ipairs(entries) do
+      local sign = ns.Ledger:KindSign(e.kind)
+      local copper = e.copper or 0
+      local signedAmount = sign * copper
+      local amountStr
+      if signedAmount == 0 then amountStr = "0c"
+      elseif signedAmount > 0 then amountStr = "+" .. formatGoldShort(signedAmount)
+      else amountStr = "-" .. formatGoldShort(-signedAmount) end
+
+      local itemLabel = (e.meta and e.meta.name)
+        or (e.itemID and ("item:" .. e.itemID))
+        or "?"
+      if e.count and e.count > 1 then itemLabel = itemLabel .. " x" .. e.count end
+
+      emit(string.format("%s | %s | %s | %s | %s | %s",
+        date("%m/%d %H:%M", e.atTime or 0),
+        e.charKey or "?",
+        e.kind or "?",
+        e.source or "?",
+        itemLabel,
+        amountStr))
+    end
+
+    local text = table.concat(lines, "\n")
+    local cw = getCogworks()
+    if cw and cw.CreateCopyDialog then
+      cw:CreateCopyDialog(text, string.format(
+        "Tally Ledger export (%s, %d entries) — paste into a GitHub issue or external tool.",
+        filter.label, stats.count or 0))
+    else
+      for _, line in ipairs(lines) do print(line) end
+    end
+  end)
 
   return page
 end
