@@ -130,8 +130,26 @@ local function entryFromInvoice(charKey, invoiceType, itemName, otherPlayer,
     }
   end
 
+  -- TLY-29: Blizzard's invoice API documents two values for invoiceType
+  -- ("seller" / "buyer"), but anything we don't recognize at runtime
+  -- (a future API addition, a third-party AH addon mucking with the
+  -- inbox, a corrupt invoice row) used to drop silently here. Route
+  -- to Ledger.Kinds.Unknown so the row stays inspectable; counter
+  -- stays for loss accounting.
   Native.skipCounters.invoice_bad_invoice_type = Native.skipCounters.invoice_bad_invoice_type + 1
-  return nil
+  local revenue = (buyout and buyout > 0) and buyout or (bid or 0)
+  return ns.Ledger:BuildUnknownEntry({
+    source     = SOURCE_NAME,
+    sourceId   = "invoice:" .. hash,
+    atTime     = time(),
+    sourceKind = invoiceType and invoiceType ~= "" and invoiceType or "(empty)",
+    charKey    = charKey,
+    itemID     = itemID,
+    itemKey    = itemKey,
+    copper     = revenue or 0,
+    count      = 1,
+    meta       = meta,
+  })
 end
 
 -- Companion entry for the AH cut on seller invoices. Recorded as a separate
@@ -174,7 +192,14 @@ local function scanInbox()
   for i = 1, n do
     local okI, invoiceType, itemName, otherPlayer, bid, buyout, deposit, consignment
       = pcall(GetInboxInvoiceInfo, i)
-    if okI and invoiceType and (invoiceType == "seller" or invoiceType == "buyer") then
+    -- TLY-29: previously filtered to only seller/buyer at this gate, which
+    -- silently dropped any future Blizzard addition or corrupt row. Now we
+    -- pass everything to entryFromInvoice — recognized types still produce
+    -- their sale/purchase entry, unrecognized types produce an Unknown
+    -- entry so they remain visible for triage. The fee companion entry
+    -- still only fires for seller invoices since the consignment field
+    -- only makes sense in that context.
+    if okI and invoiceType then
       local main = entryFromInvoice(charKey, invoiceType, itemName, otherPlayer,
                                     bid, buyout, deposit, consignment)
       if main then entries[#entries + 1] = main end
