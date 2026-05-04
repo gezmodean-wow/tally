@@ -479,10 +479,14 @@ end
 -- in fall-through order:
 --   strict — same (charKey, itemID, count, copper) within ±60s
 --   loose  — same (charKey, itemID, count) within ±5min (ignores copper)
+--   name   — same (charKey, lower(itemName)) within ±5min (TLY-37; only
+--            considered when A has nil itemID + a non-empty name. Connects
+--            historical rows that pre-date itemID resolution at the adapter
+--            source against rows that have it populated.)
 --   fuzzy  — same (charKey, itemID) within ±1h (ignores count + copper)
 --
 -- Returns a list of pairs:
---   { a = entryA|nil, b = entryB|nil, tier = "strict"|"loose"|"fuzzy"|"unique" }
+--   { a = entryA|nil, b = entryB|nil, tier = "strict"|"loose"|"name"|"fuzzy"|"unique" }
 --
 -- Rows present in only one source render with the other side nil and
 -- tier = "unique". Same source appearing in both A and B (sourceA ==
@@ -492,6 +496,17 @@ local STRICT_WINDOW = 60
 local LOOSE_WINDOW = 5 * 60
 local FUZZY_WINDOW = 60 * 60
 
+-- Pull a comparable name string off a ledger entry. Adapters write the
+-- player-facing item name into either `meta.name` (Native, FlipQueue) or
+-- `meta.itemName` (some Journalator paths), so we accept either. Lowercased
+-- for case-insensitive matching.
+local function nameOf(entry)
+  if not entry or type(entry.meta) ~= "table" then return nil end
+  local name = entry.meta.name or entry.meta.itemName
+  if type(name) ~= "string" or name == "" then return nil end
+  return string.lower(name)
+end
+
 -- Index a row list for O(1) match lookups. Keyed by (charKey, itemID); each
 -- bucket holds the chronologically-ordered rows.
 local function indexByCharItem(rows)
@@ -499,6 +514,24 @@ local function indexByCharItem(rows)
   for _, e in ipairs(rows) do
     if e.charKey and e.itemID then
       local key = e.charKey .. "|" .. tostring(e.itemID)
+      idx[key] = idx[key] or {}
+      table.insert(idx[key], e)
+    end
+  end
+  for _, list in pairs(idx) do
+    table.sort(list, function(a, b) return (a.atTime or 0) < (b.atTime or 0) end)
+  end
+  return idx
+end
+
+-- Secondary index for the name-tier fallback. Keyed by (charKey, lower(name));
+-- only populated for entries with a non-empty meta.name / meta.itemName.
+local function indexByCharName(rows)
+  local idx = {}
+  for _, e in ipairs(rows) do
+    local name = nameOf(e)
+    if e.charKey and name then
+      local key = e.charKey .. "|" .. name
       idx[key] = idx[key] or {}
       table.insert(idx[key], e)
     end
@@ -544,6 +577,21 @@ local function findMatch(a, bucket, consumed)
   return nil
 end
 
+-- Name-tier match: chronologically-nearest unconsumed B-row in the same
+-- (charKey, name) bucket within LOOSE_WINDOW. Used only when the primary
+-- (charKey, itemID) pass returns nil for an A-row that has no itemID.
+local function findNameMatch(a, bucket, consumed)
+  if not bucket then return nil end
+  local aT = a.atTime or 0
+  for _, b in ipairs(bucket) do
+    if not consumed[b]
+       and math.abs((b.atTime or 0) - aT) <= LOOSE_WINDOW then
+      return b, "name"
+    end
+  end
+  return nil
+end
+
 -- Special pseudo-source meaning "every row in the Tally ledger,
 -- regardless of which adapter wrote it." Lets the Compare view answer
 -- "is my ledger up to date with this source?" instead of just
@@ -571,6 +619,7 @@ function Ledger:Compare(sourceA, sourceB, filter)
   local rowsB = queryFor(sourceB)
 
   local indexB = indexByCharItem(rowsB)
+  local indexBByName = indexByCharName(rowsB)
   local consumed = {}
   local pairs_out = {}
 
@@ -581,6 +630,13 @@ function Ledger:Compare(sourceA, sourceB, filter)
     local key = (a.charKey or "?") .. "|" .. tostring(a.itemID or 0)
     local bucket = indexB[key]
     local match, tier = findMatch(a, bucket, consumed)
+    if not match and not a.itemID then
+      local aName = nameOf(a)
+      if aName then
+        local nameKey = (a.charKey or "?") .. "|" .. aName
+        match, tier = findNameMatch(a, indexBByName[nameKey], consumed)
+      end
+    end
     if match then
       consumed[match] = true
       pairs_out[#pairs_out + 1] = { a = a, b = match, tier = tier }
@@ -599,7 +655,7 @@ function Ledger:Compare(sourceA, sourceB, filter)
   -- Summary stats.
   local stats = {
     aCount = #rowsA, bCount = #rowsB,
-    strict = 0, loose = 0, fuzzy = 0,
+    strict = 0, loose = 0, name = 0, fuzzy = 0,
     aOnly = 0, bOnly = 0,
     aCopper = 0, bCopper = 0,
     deltaCopper = 0,
@@ -610,6 +666,7 @@ function Ledger:Compare(sourceA, sourceB, filter)
   for _, p in ipairs(pairs_out) do
     if p.tier == "strict" then stats.strict = stats.strict + 1
     elseif p.tier == "loose" then stats.loose = stats.loose + 1
+    elseif p.tier == "name" then stats.name = stats.name + 1
     elseif p.tier == "fuzzy" then stats.fuzzy = stats.fuzzy + 1
     elseif p.tier == "unique" then
       if p.a and not p.b then stats.aOnly = stats.aOnly + 1

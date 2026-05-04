@@ -44,6 +44,7 @@ end
 local TIER_COLOR = {
   strict = "|cff7fffae",
   loose  = "|cffffd070",
+  name   = "|cffffb050",
   fuzzy  = "|cffff8c40",
   unique = "|cffff6666",
 }
@@ -221,9 +222,10 @@ function ns.UI.CreateCompareLedgersPage(parent)
       state.sourceB, stats.bCount or 0, formatGoldShort(stats.bCopper),
       formatGoldShort(stats.deltaCopper))
     local matchLine = string.format(
-      "Matches: %s%d strict|r  •  %s%d loose|r  •  %s%d fuzzy|r  •  %s%d in A only|r  •  %s%d in B only|r",
+      "Matches: %s%d strict|r  •  %s%d loose|r  •  %s%d name|r  •  %s%d fuzzy|r  •  %s%d in A only|r  •  %s%d in B only|r",
       TIER_COLOR.strict, stats.strict,
       TIER_COLOR.loose, stats.loose,
+      TIER_COLOR.name, stats.name or 0,
       TIER_COLOR.fuzzy, stats.fuzzy,
       TIER_COLOR.unique, stats.aOnly,
       TIER_COLOR.unique, stats.bOnly)
