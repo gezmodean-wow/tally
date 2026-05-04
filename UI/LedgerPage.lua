@@ -42,6 +42,12 @@ end
 
 -- Filter chip definitions. Each chip's `kinds` is fed directly into
 -- Ledger:Query so counts come from the ledger, not UI-side filtering.
+-- TLY-29: "Unknown" surfaces rows routed to Ledger.Kinds.Unknown by an
+-- adapter that didn't recognize a source-kind (TSM Trade row, FlipQueue
+-- auctionStatus addition, Journalator new failedType, etc.). Dedicated
+-- chip rather than rolling into "Other" — these rows are diagnostic
+-- triage signal, and giving them their own filter makes them visible
+-- to testers who'd otherwise only spot them under "All".
 local FILTERS = {
   { label = "All",          kinds = nil },
   { label = "Sales",        kinds = { "sale" } },
@@ -49,6 +55,7 @@ local FILTERS = {
   { label = "AH Activity",  kinds = { "ah-cancel", "ah-expire", "ah-fee" } },
   { label = "Other",        kinds = { "vendor-sell", "vendor-buy", "mail-receive",
                                       "mail-send", "trade", "repair", "refund" } },
+  { label = "Unknown",      kinds = { "unknown" } },
 }
 
 local MAX_ROWS = 500
