@@ -1,13 +1,19 @@
 -- Tally — UI/LedgerPage.lua
 --
 -- Transaction ledger view. Filter chips at top (All / Sales / Purchases /
--- AH Activity / Other), totals row (income / expense / net / count), and a
--- sortable, column-resizable transaction table powered by Cogworks'
--- CreateScrollTable primitive.
+-- AH Activity / Other), Reconciled/Raw mode toggle (TLY-30), totals row
+-- (income / expense / net / count), and a sortable, column-resizable
+-- transaction table powered by Cogworks' CreateScrollTable primitive.
 --
--- Reads via ns.Ledger:Query and ns.Ledger:Stats. Source-agnostic — every
--- registered source's entries appear here, identified by the `source`
--- column.
+-- Reads via ns.Ledger:Reconcile (default) or ns.Ledger:Query (Raw mode).
+-- Reconciled mode collapses multi-source captures of the same event into
+-- one row — fixes the "Native + Journalator both saw the sale → two
+-- rows" duplication that confuses tester triage. Raw mode preserves the
+-- per-source view for power-user debugging and Compare-tab follow-up
+-- ("which adapter contributed which row?"). Source-agnostic either way —
+-- every registered source's entries appear, identified by the `source`
+-- column (representative source for reconciled rows, exact source for
+-- raw rows).
 
 local addonName, ns = ...
 ns.UI = ns.UI or {}
@@ -121,7 +127,15 @@ function ns.UI.CreateLedgerPage(parent)
   end
 
   local page = CreateFrame("Frame", nil, parent)
-  local state = { filterIdx = 1 }
+  -- TLY-30: ledgerMode persists across sessions so power users who flip
+  -- to Raw for debugging don't get bumped back to Reconciled on every
+  -- /reload. Default is Reconciled — that's the everyday correct view.
+  TallyDB = TallyDB or {}
+  TallyDB.ui = TallyDB.ui or {}
+  if TallyDB.ui.ledgerMode ~= "raw" and TallyDB.ui.ledgerMode ~= "reconciled" then
+    TallyDB.ui.ledgerMode = "reconciled"
+  end
+  local state = { filterIdx = 1, mode = TallyDB.ui.ledgerMode }
   local kindColors = buildKindColors()
 
   -- ============================================================================
@@ -157,6 +171,38 @@ function ns.UI.CreateLedgerPage(parent)
   local countText = filterRow:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
   countText:SetPoint("RIGHT", exportBtn, "LEFT", -8, 0)
   countText:SetJustifyH("RIGHT")
+
+  -- TLY-30: Reconciled (default) collapses multi-source same-event
+  -- captures into one row; Raw shows the per-source rows individually
+  -- for power-user debugging. Two chips at the right end of the filter
+  -- row, anchored left of the entry-count text. The pair is left
+  -- visually-distinct from the kind filter chips by the gap that opens
+  -- up when filterRow stretches — they're conceptually independent
+  -- (mode applies regardless of which kind filter is active).
+  local rawChip, reconChip
+  local function syncModeChips()
+    reconChip:SetSelected(state.mode == "reconciled")
+    rawChip:SetSelected(state.mode == "raw")
+  end
+  reconChip = makeChip(filterRow, "Reconciled", function()
+    if state.mode == "reconciled" then return end
+    state.mode = "reconciled"
+    TallyDB.ui.ledgerMode = "reconciled"
+    syncModeChips()
+    page:Refresh()
+  end)
+  reconChip:SetSize(86, 22)
+  rawChip = makeChip(filterRow, "Raw", function()
+    if state.mode == "raw" then return end
+    state.mode = "raw"
+    TallyDB.ui.ledgerMode = "raw"
+    syncModeChips()
+    page:Refresh()
+  end)
+  rawChip:SetSize(50, 22)
+  rawChip:SetPoint("RIGHT", countText, "LEFT", -10, 0)
+  reconChip:SetPoint("RIGHT", rawChip, "LEFT", -4, 0)
+  syncModeChips()
 
   -- ============================================================================
   -- Totals row (income / expense / net)
@@ -238,7 +284,27 @@ function ns.UI.CreateLedgerPage(parent)
     local query = {}
     if filter.kinds then query.kinds = filter.kinds end
 
-    local stats = ns.Ledger:Stats(query)
+    -- TLY-30: pull rows + compute totals from whichever view the user is
+    -- on. Reconciled mode walks reconciled records; Raw uses Query +
+    -- Stats so power users can see per-source rows. Stats over reconciled
+    -- records is computed inline since Ledger:Stats hits raw Query.
+    local entries
+    local stats
+    if state.mode == "reconciled" then
+      entries = ns.Ledger:Reconcile(query)
+      stats = { count = #entries, income = 0, expense = 0, net = 0 }
+      for _, r in ipairs(entries) do
+        local sign = ns.Ledger:KindSign(r.kind)
+        local copper = r.copper or 0
+        if sign > 0 then stats.income = stats.income + copper
+        elseif sign < 0 then stats.expense = stats.expense + copper end
+      end
+      stats.net = stats.income - stats.expense
+    else
+      stats = ns.Ledger:Stats(query)
+      entries = ns.Ledger:Query(query)
+    end
+
     valIncome:SetText(formatGoldShort(stats.income))
     valIncome:SetTextColor(themeColor("success", { 0.30, 0.85, 0.30, 1 }))
     valExpense:SetText(formatGoldShort(stats.expense))
@@ -251,10 +317,11 @@ function ns.UI.CreateLedgerPage(parent)
     end
     valCount:SetText(tostring(stats.count))
 
-    local entries = ns.Ledger:Query(query)
     local total = #entries
-    countText:SetText(string.format("%d entries (showing latest %d)",
-      total, math.min(total, MAX_ROWS)))
+    countText:SetText(string.format("%d %s (showing latest %d)",
+      total,
+      state.mode == "reconciled" and "records" or "entries",
+      math.min(total, MAX_ROWS)))
 
     -- Storage is append-only and unordered (TLY-21); sort by atTime descending
     -- so we can take the most-recent MAX_ROWS slice. ScrollTable will re-sort
@@ -273,18 +340,33 @@ function ns.UI.CreateLedgerPage(parent)
       local itemLabel = (e.meta and e.meta.name) or (e.itemID and ("item:" .. e.itemID)) or ""
       if e.count and e.count > 1 then itemLabel = itemLabel .. " ×" .. e.count end
 
+      -- TLY-30: source label. In Reconciled mode multi-source clusters
+      -- carry a primary source plus a "+N" suffix for the additional
+      -- contributors so the user can spot at-a-glance which rows are
+      -- merged from multiple adapters. Single-source rows look the same
+      -- as before; Raw mode always renders the exact source.
+      local sourceLabel = e.source or ""
+      if state.mode == "reconciled" and e.sources then
+        local n = 0
+        for _ in pairs(e.sources) do n = n + 1 end
+        if n > 1 then
+          sourceLabel = sourceLabel .. "|cff999999+" .. (n - 1) .. "|r"
+        end
+      end
+
       rows[#rows + 1] = {
         date         = date("%m/%d %H:%M", e.atTime or 0),
         char         = e.charKey or "",
         kind         = e.kind or "",
         item         = itemLabel,
-        source       = e.source or "",
+        source       = sourceLabel,
         amount       = signedAmount,
         -- Sort overrides: ScrollTable picks up `_sort<Key>` in preference to
         -- the displayed value, so date sorts numerically by epoch and amount
         -- sorts by signed copper (not the formatted "+/-1.2k" string).
         _sortDate    = e.atTime or 0,
         _sortAmount  = signedAmount,
+        _sortSource  = e.source or "",  -- sort by primary source, ignoring +N suffix
       }
     end
     scrollTable:SetData(rows)
@@ -301,15 +383,36 @@ function ns.UI.CreateLedgerPage(parent)
     local query = {}
     if filter.kinds then query.kinds = filter.kinds end
 
-    local stats = ns.Ledger:Stats(query)
-    local entries = ns.Ledger:Query(query)
+    -- Export mirrors the active mode. Reconciled exports collapse
+    -- multi-source captures to the canonical record (with "+N" on
+    -- the source field so the receiver knows the row was merged);
+    -- Raw exports keep per-source rows so the user can attach them
+    -- to a GitHub issue when the question is "which adapter saw what."
+    local entries
+    local stats
+    if state.mode == "reconciled" then
+      entries = ns.Ledger:Reconcile(query)
+      stats = { count = #entries, income = 0, expense = 0, net = 0 }
+      for _, r in ipairs(entries) do
+        local sign = ns.Ledger:KindSign(r.kind)
+        local copper = r.copper or 0
+        if sign > 0 then stats.income = stats.income + copper
+        elseif sign < 0 then stats.expense = stats.expense + copper end
+      end
+      stats.net = stats.income - stats.expense
+    else
+      stats = ns.Ledger:Stats(query)
+      entries = ns.Ledger:Query(query)
+    end
     table.sort(entries, function(a, b) return (a.atTime or 0) > (b.atTime or 0) end)
 
     local lines = {}
     local function emit(s) lines[#lines + 1] = s end
 
-    emit(string.format("Tally Ledger: %s (%d entries)",
-      filter.label, stats.count or 0))
+    emit(string.format("Tally Ledger: %s (%d %s, %s mode)",
+      filter.label, stats.count or 0,
+      state.mode == "reconciled" and "records" or "entries",
+      state.mode))
     emit(string.format("  income = %s, expense = %s, net = %s%s",
       formatGoldShort(stats.income or 0),
       formatGoldShort(stats.expense or 0),
@@ -331,11 +434,26 @@ function ns.UI.CreateLedgerPage(parent)
         or "?"
       if e.count and e.count > 1 then itemLabel = itemLabel .. " x" .. e.count end
 
+      -- Include "+N" / source-set in the source column for reconciled
+      -- exports — the export is meant to be readable plain-text outside
+      -- WoW, so embed without color codes.
+      local sourceLabel = e.source or "?"
+      if state.mode == "reconciled" and e.sources then
+        local extras = {}
+        for s in pairs(e.sources) do
+          if s ~= e.source then extras[#extras + 1] = s end
+        end
+        if #extras > 0 then
+          table.sort(extras)
+          sourceLabel = sourceLabel .. "+" .. table.concat(extras, "+")
+        end
+      end
+
       emit(string.format("%s | %s | %s | %s | %s | %s",
         date("%m/%d %H:%M", e.atTime or 0),
         e.charKey or "?",
         e.kind or "?",
-        e.source or "?",
+        sourceLabel,
         itemLabel,
         amountStr))
     end
@@ -344,8 +462,10 @@ function ns.UI.CreateLedgerPage(parent)
     local cw = getCogworks()
     if cw and cw.CreateCopyDialog then
       cw:CreateCopyDialog(text, string.format(
-        "Tally Ledger export (%s, %d entries) — paste into a GitHub issue or external tool.",
-        filter.label, stats.count or 0))
+        "Tally Ledger export (%s, %d %s, %s mode) — paste into a GitHub issue or external tool.",
+        filter.label, stats.count or 0,
+        state.mode == "reconciled" and "records" or "entries",
+        state.mode))
     else
       for _, line in ipairs(lines) do print(line) end
     end
