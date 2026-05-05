@@ -59,10 +59,21 @@ TallyDB.minimap = TallyDB.minimap or { hide = false }
 -- ============================================================================
 local frame = CreateFrame("Frame")
 frame:RegisterEvent("PLAYER_LOGIN")
+frame:RegisterEvent("PLAYER_LOGOUT")
 frame:SetScript("OnEvent", function(_, event, ...)
   local handler = ns[event]
   if handler then handler(ns, ...) end
 end)
+
+-- TLY-49: PLAYER_LOGOUT is the canonical "save the working memory back
+-- to disk" point. WoW writes SavedVariables after every addon's
+-- PLAYER_LOGOUT handler returns, so this is our chance to compress the
+-- in-memory ledger into TallyDB.ledger.blob before WoW persists it.
+function ns:PLAYER_LOGOUT()
+  if ns.Ledger and ns.Ledger.SaveToDisk then
+    pcall(ns.Ledger.SaveToDisk, ns.Ledger)
+  end
+end
 
 function ns:PLAYER_LOGIN()
   -- TLY-21: force a one-shot history prune on login so users coming from the
@@ -107,7 +118,12 @@ function ns:PLAYER_LOGIN()
   -- just-reset user on their next login as a returning upgrader and
   -- silently re-opened the gate. Ledger rows survive nothing except a
   -- legitimate prior Tally session.
-  if TallyDB.ledger and TallyDB.ledger.entries and #TallyDB.ledger.entries > 0
+  -- TLY-49: ledger storage moved from a raw entries[] array to a
+  -- compressed blob, so probe via Ledger:Count() instead of
+  -- TallyDB.ledger.entries directly. Count triggers the lazy load,
+  -- which also performs the legacy-entries → blob migration if
+  -- this is the first session on the new code.
+  if ns.Ledger and ns.Ledger.Count and ns.Ledger:Count() > 0
      and not (TallyDB.setup and TallyDB.setup.completed) then
     TallyDB.setup = TallyDB.setup or {}
     TallyDB.setup.completed = true
@@ -503,6 +519,15 @@ local function inspectLedger()
   return { rowCount = stats.count, bySource = stats.bySource }
 end
 
+-- TLY-49: blob storage inspector. Confirms LibSerialize + LibDeflate
+-- loaded, lazy-load completed, dirty state, and (after first save) the
+-- on-disk compressed blob's size — testers comparing pre/post should
+-- see blobBytes shrink dramatically vs the legacy raw-table footprint.
+local function inspectStorage()
+  if not (ns.Ledger and ns.Ledger.StorageInfo) then return nil end
+  return ns.Ledger:StorageInfo()
+end
+
 -- Per-source skip counters (TLY-29 capture-layer rigor). Each adapter
 -- registers a `skipCounters` table on its module and increments named
 -- reasons at every early-return. Surfaces silent data loss.
@@ -570,6 +595,7 @@ local DIAG_INSPECTORS = {
   { name = "CurrentChar",     fn = inspectCurrentChar },
   { name = "WarbandProbe",    fn = inspectWarbandProbe },
   { name = "Ledger",          fn = inspectLedger },
+  { name = "Storage",         fn = inspectStorage },
   { name = "SkipCounters",    fn = inspectSkipCounters },
   { name = "History",         fn = inspectHistory },
   { name = "DisabledSources", fn = inspectDisabledSources },
@@ -670,6 +696,23 @@ local function diagPrintChat()
       for src, n in pairs(lg.bySource) do
         print(string.format("  %s: %d", src, n))
       end
+    end
+  end
+
+  local st = inspectStorage()
+  if st then
+    print(string.format(
+      "Storage: libs=%s loaded=%s dirty=%s mem=%d entries  blob=%d bytes (%d entries)%s",
+      st.libsAvailable and "yes" or "|cffff8080NO|r",
+      st.loaded and "yes" or "no",
+      st.dirty and "yes" or "no",
+      st.inMemoryCount,
+      st.blobBytes,
+      st.blobCount,
+      st.legacyPresent and " |cffffa050[legacy entries still on disk]|r" or ""))
+    if st.blobSavedAt and st.blobSavedAt > 0 then
+      print(string.format("  blob last saved: %s",
+        date("%Y-%m-%d %H:%M:%S", st.blobSavedAt)))
     end
   end
 

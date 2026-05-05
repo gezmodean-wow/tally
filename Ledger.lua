@@ -952,14 +952,137 @@ function Ledger:DivergenceReport(filter)
 end
 
 -- ============================================================================
--- Storage
+-- Storage (TLY-49: compressed blob)
 -- ============================================================================
+--
+-- On disk: TallyDB.ledger.blob is a deflated LibSerialize blob containing
+-- the entries array and byId set. One Lua constant in the SV chunk no
+-- matter how many ledger entries it represents — so even ledgers with
+-- hundreds of thousands of rows don't push the SV's constant pool past
+-- Lua's per-chunk 2^18 limit (which was wholesale-failing TallyDB load on
+-- big-tester accounts pre-fix; see TLY-32).
+--
+-- In memory: _workingMem holds the deserialised { entries, byId }. Lazy
+-- loaded on first db() call; reserialised on PLAYER_LOGOUT (or any
+-- explicit Ledger:SaveToDisk()). All ledger reads/writes share one
+-- _workingMem so callers continue to operate on the same table refs that
+-- the pre-blob db() returned.
+--
+-- Dirty tracking: Insert / InsertMany / Clear / ClearSource flip _dirty.
+-- SaveToDisk early-exits if not dirty so logout doesn't pay the serialise
+-- cost on read-only sessions.
+--
+-- Migration: pre-blob users land here with TallyDB.ledger.entries still
+-- populated as a raw table. loadFromDisk detects that, treats it as the
+-- working memory, and marks dirty so the next save promotes it to blob
+-- form (and clears the legacy field to stop WoW from persisting it
+-- through the SV chunk's overflowing constant pool). Legacy fields stay
+-- on disk until the first successful save so a crash mid-migration
+-- doesn't lose data.
+
+local LibSerialize = LibStub and LibStub("LibSerialize", true)
+local LibDeflate   = LibStub and LibStub("LibDeflate", true)
+
+local _workingMem  -- { entries = { ... }, byId = { ... } } once loaded
+local _loaded = false
+local _dirty = false
+
+local function defaultMem()
+  return { entries = {}, byId = {} }
+end
+
+local function loadFromDisk()
+  TallyDB = TallyDB or {}
+  TallyDB.ledger = TallyDB.ledger or {}
+
+  -- Migration: legacy entries present (no blob yet). Promote in place.
+  -- Don't clear the legacy fields here — saveToDisk does that on the
+  -- first successful save so a crash mid-migration leaves the disk copy
+  -- intact for the next session to retry.
+  if TallyDB.ledger.entries and not TallyDB.ledger.blob then
+    _workingMem = {
+      entries = TallyDB.ledger.entries,
+      byId    = TallyDB.ledger.byId or {},
+    }
+    _loaded = true
+    _dirty = true
+    return
+  end
+
+  -- Modern path: deserialise the blob.
+  if TallyDB.ledger.blob and LibSerialize and LibDeflate then
+    local decompressed = LibDeflate:DecompressDeflate(TallyDB.ledger.blob)
+    if decompressed then
+      local ok, payload = LibSerialize:Deserialize(decompressed)
+      if ok and type(payload) == "table" then
+        _workingMem = {
+          entries = payload.entries or {},
+          byId    = payload.byId or {},
+        }
+        _loaded = true
+        _dirty = false
+        return
+      end
+    end
+    -- Blob failed to deserialise — corrupt or written by an incompatible
+    -- lib version. Warn and start fresh; user can /tally setup to backfill.
+    print("|cffff8080Tally:|r ledger storage failed to load — starting fresh. Run /tally setup to backfill from sibling sources.")
+  end
+
+  _workingMem = defaultMem()
+  _loaded = true
+  _dirty = false
+end
 
 local function db()
+  if not _loaded then loadFromDisk() end
+  return _workingMem
+end
+
+-- Public: serialise + compress _workingMem and write to TallyDB.ledger.blob.
+-- Called from Core.lua's PLAYER_LOGOUT handler. No-op when nothing dirty
+-- so read-only sessions don't pay the cost.
+function Ledger:SaveToDisk()
+  if not _loaded then return end
+  if not _dirty then return end
+  if not (LibSerialize and LibDeflate) then return end
+
+  local payload    = { entries = _workingMem.entries, byId = _workingMem.byId }
+  local serialised = LibSerialize:Serialize(payload)
+  local compressed = LibDeflate:CompressDeflate(serialised, { level = 5 })
+
+  TallyDB = TallyDB or {}
   TallyDB.ledger = TallyDB.ledger or {}
-  TallyDB.ledger.entries = TallyDB.ledger.entries or {}
-  TallyDB.ledger.byId    = TallyDB.ledger.byId or {}
-  return TallyDB.ledger
+  TallyDB.ledger.blob = compressed
+  TallyDB.ledger.blobMeta = {
+    count   = #_workingMem.entries,
+    savedAt = time(),
+    bytes   = #compressed,
+  }
+  -- Migration completion: clear the legacy fields once the blob is
+  -- safely on disk. From here on WoW only persists blob + blobMeta.
+  TallyDB.ledger.entries = nil
+  TallyDB.ledger.byId    = nil
+
+  _dirty = false
+end
+
+-- Diagnostic surface: returns the post-load blob meta + working-memory
+-- shape so /tally diag can show what storage looks like.
+function Ledger:StorageInfo()
+  if not _loaded then loadFromDisk() end
+  TallyDB = TallyDB or {}
+  local meta = TallyDB.ledger and TallyDB.ledger.blobMeta or nil
+  return {
+    libsAvailable = (LibSerialize and LibDeflate) and true or false,
+    loaded        = _loaded,
+    dirty         = _dirty,
+    inMemoryCount = _workingMem and #_workingMem.entries or 0,
+    blobBytes     = meta and meta.bytes or 0,
+    blobCount     = meta and meta.count or 0,
+    blobSavedAt   = meta and meta.savedAt or nil,
+    legacyPresent = (TallyDB.ledger and TallyDB.ledger.entries) and true or false,
+  }
 end
 
 -- ============================================================================
@@ -991,6 +1114,7 @@ function Ledger:Insert(entry)
   if d.byId[entry.id] then return false, "duplicate" end
   d.byId[entry.id] = true
   d.entries[#d.entries + 1] = entry
+  _dirty = true
   return true, entry
 end
 
@@ -1008,6 +1132,7 @@ function Ledger:InsertMany(entries)
       skipped = skipped + 1
     end
   end
+  if inserted > 0 then _dirty = true end
   return inserted, skipped
 end
 
@@ -1563,8 +1688,11 @@ end
 
 -- Wipe all entries. Sources can be re-imported afterward.
 function Ledger:Clear()
-  TallyDB.ledger = nil
-  db() -- re-init defaults
+  TallyDB = TallyDB or {}
+  TallyDB.ledger = { blob = nil, blobMeta = nil, entries = nil, byId = nil }
+  _workingMem = defaultMem()
+  _loaded = true
+  _dirty = true
 end
 
 -- Drop entries from a specific source. Useful when an adapter changes its
@@ -1572,14 +1700,17 @@ end
 function Ledger:ClearSource(sourceName)
   local d = db()
   local kept = {}
+  local removed = 0
   for _, e in ipairs(d.entries) do
     if e.source == sourceName then
       d.byId[e.id] = nil
+      removed = removed + 1
     else
       kept[#kept + 1] = e
     end
   end
   d.entries = kept
+  if removed > 0 then _dirty = true end
 end
 
 function Ledger:Count()
