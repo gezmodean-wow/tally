@@ -4,6 +4,10 @@ All notable changes to Tally will be documented in this file.
 
 ## [Unreleased]
 
+## [v0.1.0-alpha11]
+
+Tester-reported follow-up to alpha10's TLY-35 fix. Single-issue alpha per cadence (alphas between bundles are tester-feedback hotfixes; the next planned bundle stays on its own track).
+
 - **TLY-35 follow-up — welcome popup is one-shot.** Tester report (Zong on alpha10): the popup still fired on every alt despite the alpha10 checkbox + skip-flag plumbing. Root cause was UX rather than persistence — the checkbox was easy to miss, so testers were Cancel-ing alone (which by spec re-fired next login). Per direct user direction the spec changes: the player gets two choices on the welcome step (move forward via Next, or skip via Cancel) and *either choice* permanently dismisses the auto-popup. Re-engagement is exclusively via Settings → Re-run setup wizard or `/tally setup`. Implementation: removed the "Don't show this on login again" checkbox and `state.dontShowAgain` from `UI/SetupWizard.lua`. `onCancel` unconditionally writes `TallyDB.setup.skipped = true` (idempotent against `setup.completed` to avoid clobbering on Settings re-run after a successful Finish) and prints a one-line chat reminder pointing at Settings. Added `onStepChange` that latches `setup.skipped = true` the first time the player advances past the welcome step, so a mid-flow bail (player clicked Next, then Cancel three steps deep) doesn't re-pop on the next character. Welcome step body text rewritten to spell out the two-button contract — "Click Next to start setup, or Cancel to skip. Either way, this popup won't appear again." `ShouldShowSetupWizard` comment block updated to reflect the broader meaning of `skipped` (any user dismissal, not just an explicit skip checkbox). LDB skipped-state tooltip + `inspectSetup` diag inspector unchanged — already keyed off the same `setup.skipped` flag.
 
 ## [v0.1.0-alpha10]

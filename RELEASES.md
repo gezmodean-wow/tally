@@ -10,6 +10,21 @@ The engineering-detail companion lives in `CHANGELOG.md` (commit-readerese — f
 
 _Notes for the next tagged release will be distilled here. Pull from `CHANGELOG.md` and any closed issues' `## Player summary` sections, then organize into themed prose for players._
 
+## v0.1.0-alpha11
+
+Quick follow-up on alpha10's first-run popup fix.
+
+### The welcome popup is now one-and-done
+
+Testers on alpha10 still saw the popup on every alt. Turned out the *Don't show this on login again* checkbox we added was easy to miss — so people were just hitting Cancel, and Cancel-without-the-checkbox by spec re-fired next login.
+
+The simpler thing was the right thing. The checkbox is gone. Now the welcome popup gives you two choices:
+
+- **Click Next** to start setup. If you walk away mid-wizard, that's fine — the popup still won't come back.
+- **Click Cancel** to skip. Same outcome — popup doesn't come back.
+
+You can re-open the wizard any time from Settings → Re-run setup wizard, or run `/tally setup`. Either way, you only see the auto-popup once per account, ever.
+
 ## v0.1.0-alpha10
 
 The big one — closes the data-quality story Tally has been building toward since alpha5. Numbers stop double-counting when you have multiple AH addons installed, an unrecognized transaction type now surfaces in the UI instead of silently disappearing, and a new diagnostic catches anything Tally missed while it wasn't running.
@@ -18,7 +33,7 @@ The big one — closes the data-quality story Tally has been building toward sin
 
 Before alpha10, the welcome popup re-fired on every alt — and on the same character multiple times — even after you walked through the wizard. Common path: you opened the wizard, clicked Cancel partway through, and the popup kept appearing on every login.
 
-The Welcome step now has a *Don't show this on login again* checkbox. Check it and click Cancel and the popup stays gone, on every character, account-wide. You can re-open the wizard any time from Settings → Re-run setup wizard. If you skipped, the minimap icon also calms down — the gold "setup required" tooltip becomes a quiet gray "setup skipped" with a one-line note about how to re-run.
+Alpha10 fixed the underlying bug, and alpha11 simplifies the UX further (see above). The minimap icon also calms down once setup is skipped — the gold *setup required* tooltip becomes a quiet gray *setup skipped* with a one-line note about how to re-run from Settings.
 
 ### Reconciled ledger view — one row per real event
 
