@@ -1,92 +1,87 @@
 # Tally — next session handoff
 
-Picks up after the 2026-05-04 session. Last shipped: `v0.1.0-alpha8` — Phase 1 of the authoritative-ledger bundle (TLY-36 / 37 / 38) plus tester-feedback fixes (TLY-40 / 41 / 42 / 43 / 44) and the cogworks verify-package CI gate.
+Picks up after the 2026-05-04 alpha10 work session. Bundle is committed + locally tagged on `feat/authoritative-ledger`; awaiting user push approval.
 
 ## State
 
-- Working tree clean. Alpha8 commits + tag pushed; release CI run 25305999998 succeeded after a TOC forward-slash fix (the cogworks verify script can't resolve backslash separators on Linux — workaround landed in tally, proper fix tracked at [cogworks#29](https://github.com/gezmodean-wow/cogworks/issues/29)).
+- **Branch:** `feat/authoritative-ledger`, 11 commits ahead of `main`. Local tag `v0.1.0-alpha10` on the head commit. **Nothing pushed.**
+- **Bundle composition** (commits, oldest first):
+  - `4358b22` — `fix(TLY-35)`: welcome popup respects skip + LDB calm tone for skipped state. (Originally landed on `main` as the alpha9 popup-fix slice; folded into the alpha10 bundle per user direction once testers logged off for the night.)
+  - `640effe` — `feat(TLY-29)`: Ledger schema + Unknown kind + BuildUnknownEntry helper.
+  - `ff31efa` — `fix(TLY-29)`: TSM adapter routes unknown source-kinds to Unknown bucket.
+  - `2cdc7ad` — `fix(TLY-29)`: FlipQueue adapter routes unknown auctionStatus to Unknown.
+  - `0ce955c` — `fix(TLY-29)`: Journalator adapter routes unknown bucket discriminators to Unknown.
+  - `cadb1db` — `fix(TLY-29)`: Native AHInvoice routes unknown invoiceType to Unknown bucket.
+  - `894174a` — `feat(TLY-30)`: Ledger.Authority + Ledger:Reconcile with per-field provenance.
+  - `18138f2` — `feat(TLY-30)`: Lifecycle + Aggregator migrate from Query to Reconcile.
+  - `821c6fb` — `feat(TLY-30)`: LedgerPage Reconciled/Raw mode toggle.
+  - `446f861` — `feat(TLY-29)`: Unknown filter chip on LedgerPage.
+  - `e3bd325` — `feat(TLY-31,TLY-45)`: Phase 4 — sibling backfill stance + divergence diagnostic.
+  - `9886d1d` — `docs`: promote Unreleased → v0.1.0-alpha10 in CHANGELOG + RELEASES.
+- **Working tree clean.** `git diff main..HEAD --stat` shows ~1500 LOC across `Ledger.lua`, four source adapters, two Research consumers, four UI files, both changelogs, Core.lua.
 - Cogworks pinned at `v0.13.1` in `.pkgmeta`; vendored `Libs/Cogworks-1.0/` synced (gitignored).
-- 11 stale issues (TLY-13/14/15/16/19/21/22/23/25/26/27) bulk-closed with player-update comments since they shipped in alpha2/alpha3 already. TLY-20 + TLY-32 got retest-request comments (likely already-fixed but need tester confirmation on alpha7+).
 - Memory at `C:\Users\gezmo\.claude\projects\C--src-tally\memory\` is current.
 
-## Cadence rule
+## To ship alpha10
 
-Per saved `feedback_alpha_cadence.md`: **alphas ship full critical-path bundles, not incremental planned work.** Subsequent alphas exist only to fix tester-reported problems. Phase the development internally across sessions / commits, but only `git tag` when the bundle is complete.
+User has authorized the bundle work but not the push (per `feedback_no_push_without_approval`). Steps remaining:
 
-Alpha8 was a partial-bundle exception: shipped Phase 1 + tester polish per direct user direction so testers could validate the data-quality work and cycle on the polish fixes before Phases 2-4 begin. Alpha9 returns to the bundle pattern: ship the full TLY-29 / TLY-30 / TLY-31 Phase B set together when complete.
+1. **Merge `feat/authoritative-ledger` → `main`.** Fast-forward eligible — `main` is an ancestor of feat. `git checkout main && git merge --ff-only feat/authoritative-ledger`. (Alternatively, `git push origin feat/authoritative-ledger:main` if the user prefers updating remote main directly without local checkout.)
+2. **Push `main`.** `git push origin main`.
+3. **Push the tag.** `git push origin v0.1.0-alpha10`. Triggers `release.yml` → BigWigsMods packager → CurseForge + Wago.
+4. **Watch the CI run.** Verify the verify-package gate (cogworks#27 reusable workflow) passes; it caught alpha8's TOC backslash issue, so it's a meaningful trigger.
 
-## Alpha9 scope: complete the authoritative-ledger bundle (Phases 2-4)
+If anything breaks during release (verify gate, packager, channel uploads), the failure mode is similar to alpha8's TOC fix — investigate, fix on `main`, push, re-tag.
 
-Picks up where alpha8 left off. Bundle ships:
+## What ships in alpha10
 
-1. **[TLY-29](https://github.com/gezmodean-wow/tally/issues/29)** — Capture-layer rigor: `Ledger.Schema`, `Ledger.Kinds.Unknown` + kind router, structured per-source field map
-2. **[TLY-30](https://github.com/gezmodean-wow/tally/issues/30)** — `Ledger.Authority` priority map, `Ledger:Reconcile(filter)` API, consumer migrations (Lifecycle, Research, Ledger page)
-3. **[TLY-31 Phase B](https://github.com/gezmodean-wow/tally/issues/31)** — Demote sibling adapters to backfill-only by default; periodic ticker off by default; setup wizard wording shifts
+Full authoritative-ledger bundle. Engineering breakdown lives in `CHANGELOG.md`'s `[v0.1.0-alpha10]` section; player-facing prose in `RELEASES.md`. Quick map:
 
-Estimated remaining scope: 1200–2000 LOC across schema definition, Reconcile API, consumer migrations, wizard config (Phase 1's adapter resolution + Compare matcher work is done, freeing the "smaller slice" estimate from the previous handoff).
+- **TLY-35** — popup gate respects a new "Don't show again" checkbox; LDB launcher shows a calm gray "setup skipped" tooltip + text instead of the gold "setup required" nag for skipped users.
+- **TLY-29** — Schema + Kinds.Unknown + BuildUnknownEntry helper. Four-adapter refactor (TSM, FlipQueue, Journalator, Native AHInvoice) routes unrecognized source-kinds through Unknown with original `meta.sourceKind` preserved. New "Unknown" filter chip on Ledger tab.
+- **TLY-30** — Authority priority map + Reconcile API + per-field provenance. Lifecycle and Aggregator migrate to Reconcile (no more duplicated cohorts / over-counted P&L for users with overlapping multi-source captures). LedgerPage gets a Reconciled/Raw mode toggle (default Reconciled, persisted via TallyDB.ui.ledgerMode).
+- **TLY-31 Phase B + TLY-45** — Sibling backfill stance: 5-min auto-import ticker removed; replaced with 60s heartbeat + one-shot post-login divergence check. Session-window log (`TallyDB.sessions`) feeds `Ledger:DivergenceReport(filter)`. New `/tally diag divergence` command opens copy-dialog with categorized real-gap / expected-gap / field-disagreement rows. Setup wizard + Settings reframed around "backfill" vs "live capture" semantics.
+- **Debug UX** — `/tally diag` default switches from chat dump to copy-dialog; `/tally diag chat` preserves the inline-printing path for users who want it; `/tally diag copy` becomes a no-op alias.
 
-## Phase 2: capture-layer rigor (TLY-29)
+## Known caveats (carry into testing)
 
-Touches every adapter. Phase 1's itemID resolution stabilizes input quality first; this layer formalizes the kind/field router on top.
+- **No in-game runtime validation.** ~1500 LOC of structural change across adapters, ledger primitives, and UI; everything was reviewed but not exercised live. Testers should expect to find at least one rough edge.
+- **Reconcile clustering window is a guess.** 5-minute anchor-anchored window for same-event clustering across sources. If testers report legitimate clusters that should have merged but didn't, that's the knob to widen.
+- **Aggregator's `record.sales[i].source`** now carries a representative source (the Authority winner for atTime) rather than the exact adapter. Downstream consumers (FlipQueue's ItemResearch handoff?) might assume single-source semantics — flag if anything looks weird in cross-cog views.
+- **LedgerPage's Reconciled/Raw chip pair** is untested — possible the two new chips overflow on narrow Tally windows. Layout is hand-rolled (cogworks SegmentedControl isn't wired here yet).
+- **Existing ledger rows tagged `kind = "sale"` from old TSM imports may have actually been Trade rows.** Phase 2 fixes the routing going forward, but doesn't migrate stale rows. A user re-importing TSM produces new Unknown rows alongside the stale `sale` rows. `/tally clear-source tsm` followed by re-import gives a clean state.
 
-**`Ledger.lua` additions:**
-- `Ledger.Schema = { sale = { canonical = {...}, sourceFields = { tsm = {...}, native = {...}, ... } }, ... }`. Per (kind, source), declare canonical fields + source-specific extras.
-- `Ledger.Kinds.Unknown = "unknown"`. `KindSign("unknown")` returns 0 (neutral). Adapters route any source-kind they don't recognize to `Unknown` with the original payload preserved in `meta.sourceKind`.
+## Tester signals still live (independent of alpha10)
 
-**Adapter refactor (touches all of them — Native/*, FlipQueue, TSM, Journalator):**
-- Each adapter declares which source-kinds it knows. Unknown source-kinds → `Ledger.Kinds.Unknown` instead of silent drop / wrong-kind fallback (TSM currently falls back to `sale` which is wrong if the source was actually "Trade").
-- Migrate the free-form `meta` table population to declare canonical vs source-specific fields per the new Schema. Existing `meta` consumers in Lifecycle / Research keep working — Schema is additive structure, not a replacement.
-- Keep skip counters (already in place from earlier work + Phase 1 additions); they're the loss-accounting half of TLY-29.
-
-## Phase 3: authoritative ledger via Reconcile (TLY-30)
-
-The big workstream. Probably one full session minimum.
-
-**`Ledger.lua` additions:**
-- `Ledger.Authority = { sale = { atTime = { "native", "journalator", "tsm" }, copper = { "tsm", "native", "journalator" }, ... }, ... }`. Per (kind, field), declare source priority.
-- `Ledger:Reconcile(filter) -> records[]` — groups raw query results by `(charKey, itemID, count_window, atTime_window)` (same heuristic Compare uses). For each grouped event, build one record where each field comes from the highest-priority source that has it, with `provenance = { atTime = "native", copper = "tsm", ... }` mapping field → source.
-
-**Consumer migrations:**
-- `Research/Lifecycle.lua`: switch sale-matching from `Ledger:Query` to `Ledger:Reconcile`. Users with Journalator no longer see duplicate cohorts when Native + Journalator both observed the same posting.
-- `Research/Aggregator.lua`: `Research:GetRecord` switches sales/purchases from raw `Query` to `Reconcile` so per-item P&L stops over-counting.
-- `UI/LedgerPage.lua`: add a `Reconciled / Raw` toggle. Default to Reconciled. Raw mode preserved for power-user debugging.
-- `NetWorth/Calculator.lua`: no change — reads Inventory + Pricing, not the ledger.
-
-## Phase 4: demote sibling adapters (TLY-31 Phase B)
-
-Smaller; can land same session as Phase 3 if time permits.
-
-- Sibling-adapter periodic ticker default flips: `TallyDB.sourcePolicy.tickerEnabled = false` (was effectively-true via 5-min `C_Timer.NewTicker` in `Core.lua` PLAYER_LOGIN). Native source stays event-driven (no change).
-- One-shot at PLAYER_LOGIN still fires for sibling adapters (so backfill works without user action), but no recurring tick.
-- `UI/SetupWizard.lua` source-detection step wording: relabel sibling sources as "Backfill from <source>" rather than "Import from <source>". Helps users understand the new role.
-- `UI/SettingsPage.lua` DATA SOURCES section: add a label clarifying that sibling-source imports are now manual / one-shot, with "Import now" buttons per source unchanged.
-
-## Tester signals still live (independent of alpha9 bundle)
-
-- **[TLY-17](https://github.com/gezmodean-wow/tally/issues/17)** — surface "currently posted on AH" sub-line in net worth view. Data is already tracked (auctions location); just needs the UI surface.
+- **[TLY-32](https://github.com/gezmodean-wow/tally/issues/32)** — Lua warning on alpha8. Diag-text-please comment posted; awaiting paste.
+- **[TLY-28](https://github.com/gezmodean-wow/tally/issues/28)** — Inventory tab empty (zpectre). Diag-text-please comment posted; awaiting paste.
+- **[TLY-20](https://github.com/gezmodean-wow/tally/issues/20)** — Curseforge install issue from alpha1. Retest comment posted on alpha7; still awaiting tester response.
+- **[TLY-17](https://github.com/gezmodean-wow/tally/issues/17)** — surface "currently posted on AH" sub-line in net worth view. Data tracked; needs UI surface.
 - **[TLY-18](https://github.com/gezmodean-wow/tally/issues/18)** — multi-archive ledger storage + offline export/restore tooling. Long-running.
-- **[TLY-20](https://github.com/gezmodean-wow/tally/issues/20)** — Curseforge install issue from alpha1. Retest comment posted; awaiting tester response on alpha7.
-- **[TLY-24](https://github.com/gezmodean-wow/tally/issues/24)** — Toeknee's TSM-vs-Tally discrepancy umbrella. Phase 1 (TLY-36) addresses the itemID-resolution slice; full close needs Phases 2-3.
-- **[TLY-28](https://github.com/gezmodean-wow/tally/issues/28)** — Inventory tab empty. Awaiting tester diag.
-- **[TLY-32](https://github.com/gezmodean-wow/tally/issues/32)** — Lua warning across alpha4-6. Retest comment posted; awaiting tester response on alpha7.
-- **[TLY-33](https://github.com/gezmodean-wow/tally/issues/33)** — Closed but waiting for tester re-test confirmation that the alpha6 fix resolved the integer overflow.
-- **[TLY-35](https://github.com/gezmodean-wow/tally/issues/35)** — Welcome popup per-toon question (filed by scribe; not yet triaged).
+- **[TLY-24](https://github.com/gezmodean-wow/tally/issues/24)** — Toeknee's TSM-vs-Tally discrepancy umbrella. Phase 1 (TLY-36) addressed itemID resolution; alpha10's Reconcile + Unknown routing closes more of the gap. Worth checking with him whether discrepancies are gone after alpha10.
 - **[TLY-39](https://github.com/gezmodean-wow/tally/issues/39)** — Cogworks v0.13.1 bump shipped in alpha7. Pending tester verification of game-menu / logout / quit dialogs working post-Tally-window-open.
 - **TLY-40 / 41 / 42 / 43 / 44** — alpha8 fixes; pending in-game verification. Close after the user confirms.
-
-If any of these get tester replies during the alpha9 work cycle, evaluate whether to fold into alpha9 or split as alpha9-hotfix tags. Per cadence preference, prefer folding when feasible.
 
 ## Waiting on Cogworks
 
 - **[cogworks#23](https://github.com/gezmodean-wow/cogworks/issues/23)** — `CreateProgressBar` primitive. `UI/ProgressBar.lua` + `UI/MultiProgressBar.lua` are Tally-local pending this; lift when it lands.
 - **[cogworks#27](https://github.com/gezmodean-wow/cogworks/issues/27)** — verify-package reusable workflow. Already landed and wired into Tally's release.yml; close on cogworks side once Gezmo confirms.
-- **[cogworks#29](https://github.com/gezmodean-wow/cogworks/issues/29)** — verify-package script needs to normalize backslash → forward-slash in TOC paths before file existence checks. Tally worked around by switching its own TOC to forward slashes; other cogs in the suite may still trip the bug until cogworks fixes it. Also revisit the ThemedMainFrame.SetSummary anchor issue (filed loosely under TLY-42's commit comment but not yet a cogworks-side ticket — the primitive needs an "only when sidebar shown" mode for consumers using tab-strip layouts).
+- **[cogworks#29](https://github.com/gezmodean-wow/cogworks/issues/29)** — verify-package script needs to normalize backslash → forward-slash in TOC paths before file existence checks. Tally worked around by switching its own TOC to forward slashes; other cogs in the suite may still trip the bug until cogworks fixes it.
+
+## Next bundle (post-alpha10)
+
+Tester reports drive the next bundle. Likely candidates if no fresh signals come in:
+
+- **[TLY-17](https://github.com/gezmodean-wow/tally/issues/17)** — currently-posted-on-AH sub-line on Net Worth view.
+- **Lift `UI/ProgressBar.lua` + `UI/MultiProgressBar.lua` to cogworks** when [cogworks#23](https://github.com/gezmodean-wow/cogworks/issues/23) lands.
+- **Refactor `/tally diag` onto `cw:CreateDebug`** when cogworks v0.13's debug primitive matures (per `reference_cogworks_v013_debug.md`).
+- **Authority priority audit from real data** — once the divergence reporter has a few weeks of tester data, the Authority map per-(kind, field) priorities can be tuned based on which sources actually win field disagreements in the wild.
 
 ## Handy facts
 
 - Last acknowledged scribe player-facing conventions: `2026-04-30f` (re-fetch when next writing player-facing copy)
 - Cogworks pinned at `v0.13.1` in `.pkgmeta`
-- Origin current as of `0917052` (alpha8 TOC fix commit, where the tag now points)
+- Origin's `main` is at `4358b22` (the TLY-35 popup fix); local `main` matches; local `feat/authoritative-ledger` is 11 ahead. Local `v0.1.0-alpha10` tag points at `9886d1d`.
 - Slash commands now use `cw:RegisterSlashCommands` — auto-help renders from per-command `{ name, run, help, args, aliases }`. Add new commands as table entries in `Core.lua`'s `RegisterSlashCommands` block, not via separate `SLASH_*` globals.
-- Debug toolkit: `ns.dbg:PrintDebug(...)` for trace logging; `/tally debug` toggles the live console; `/tally diag copy` opens the structured paste-friendly dump.
+- Debug toolkit: `ns.dbg:PrintDebug(...)` for trace logging; `/tally debug` toggles the live console; `/tally diag` opens the copy dialog by default; `/tally diag divergence` opens the divergence report; `/tally diag chat` falls back to inline chat output.
 - Memory entries to read when starting: `feedback_alpha_cadence` (the cadence rule), `feedback_no_push_without_approval` (push approval), `feedback_ui_before_ship` (UI-before-shipping principle), `project_scope` (what Tally is), `feedback_player_summary` (scribe doc URL).
