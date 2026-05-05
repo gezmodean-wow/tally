@@ -65,10 +65,6 @@ local function makeState()
     historyIntervalHours = 12,
     historyRetentionDays = 90,
     pace = "gentle",  -- "gentle" | "balanced" | "aggressive"
-    -- TLY-35: checkbox on the welcome step is bound to TallyDB.setup.skipped.
-    -- Initial state reflects the persisted flag so re-opening from Settings
-    -- shows the user's previous choice; toggling + cancel writes back.
-    dontShowAgain = (TallyDB and TallyDB.setup and TallyDB.setup.skipped) and true or false,
   }
 end
 
@@ -94,7 +90,7 @@ local function makeBodyText(parent, text)
   return fs
 end
 
-local function buildWelcomeStep(parent, state)
+local function buildWelcomeStep(parent)
   local f = CreateFrame("Frame", nil, parent)
   f:SetAllPoints(parent)
 
@@ -121,30 +117,10 @@ local function buildWelcomeStep(parent, state)
     .. "This wizard takes about a minute. We'll show you what we'll pull and "
     .. "what it'll cost — then backfill in the background so you can "
     .. "play while it runs. After the one-time backfill, Tally captures new "
-    .. "events live as they fire.")
-
-  -- TLY-35: persistent skip switch. Bound to state.dontShowAgain; the
-  -- wizard's onCancel writes that into TallyDB.setup.skipped so users
-  -- who never reach Finish can still dismiss the auto-popup permanently.
-  -- They can re-open the wizard via Settings → Re-run setup wizard.
-  local skipRow = CreateFrame("Frame", nil, f)
-  skipRow:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT", 12, 12)
-  skipRow:SetPoint("RIGHT", f, "RIGHT", -12, 0)
-  skipRow:SetHeight(22)
-
-  local skipCB = CreateFrame("CheckButton", nil, skipRow, "UICheckButtonTemplate")
-  skipCB:SetSize(20, 20)
-  skipCB:SetPoint("LEFT", skipRow, "LEFT", 0, 0)
-  skipCB:SetChecked(state.dontShowAgain and true or false)
-  skipCB:SetScript("OnClick", function(self)
-    state.dontShowAgain = self:GetChecked() and true or false
-  end)
-
-  local skipLabel = skipRow:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-  skipLabel:SetPoint("LEFT", skipCB, "RIGHT", 4, 0)
-  skipLabel:SetPoint("RIGHT", skipRow, "RIGHT", 0, 0)
-  skipLabel:SetJustifyH("LEFT")
-  skipLabel:SetText("Don't show this on login again. (Re-open any time from Settings → Re-run setup wizard.)")
+    .. "events live as they fire.\n\n"
+    .. "|cffffd070Click Next to start setup, or Cancel to skip.|r You can "
+    .. "re-open this any time from Settings → Re-run setup wizard. Either "
+    .. "way, this popup won't appear again.")
 
   return f
 end
@@ -770,7 +746,7 @@ local function createWizardFrame()
 
   wizardWidget = cw:CreateWizard(wizardFrame, {
     steps = {
-      { key = "welcome",  title = "Welcome",       build = function(parent) return buildWelcomeStep(parent, state) end },
+      { key = "welcome",  title = "Welcome",       build = function(parent) return buildWelcomeStep(parent) end },
       { key = "sources",  title = "Data Sources",  build = function(parent) return buildSourcesStep(parent, state) end },
       { key = "primer",   title = "Concept Primer", build = function(parent) return buildPrimerStep(parent) end },
       { key = "strategy", title = "Pricing Strategy", build = function(parent) return buildStrategyStep(parent, state) end },
@@ -783,22 +759,31 @@ local function createWizardFrame()
       wizardFrame:Hide()
       startBackfill(state)
     end,
+    onStepChange = function(_, idx)
+      -- TLY-35: the moment the player chooses to move forward (clicks Next
+      -- past the welcome step), latch setup.skipped so a mid-flow bail
+      -- doesn't re-pop on the next character. completed=true (set on
+      -- Finish) takes priority in the gate, so this is harmless if the
+      -- player goes the distance.
+      if idx > 1 then
+        TallyDB = TallyDB or {}
+        TallyDB.setup = TallyDB.setup or {}
+        if not TallyDB.setup.completed and not TallyDB.setup.skipped then
+          TallyDB.setup.skipped = true
+          TallyDB.setup.skippedAt = time()
+        end
+      end
+    end,
     onCancel = function()
-      -- TLY-35: persist the welcome-step "don't show again" choice.
-      -- Cancel without checking the box leaves the popup gate alone
-      -- (re-fires next login per spec); cancel with the box checked
-      -- writes TallyDB.setup.skipped so the auto-popup stays dismissed.
-      -- Always overwrite (true→true, false→nil) so the checkbox is the
-      -- canonical UI for the persisted flag and unchecking + cancel
-      -- re-enables the auto-popup.
+      -- TLY-35: any Cancel from anywhere in the wizard means "I'm done with
+      -- this popup." Latch skipped unconditionally so the popup never
+      -- re-fires on this account; player re-engages from Settings.
       TallyDB = TallyDB or {}
       TallyDB.setup = TallyDB.setup or {}
-      if state.dontShowAgain then
+      if not TallyDB.setup.completed then
         TallyDB.setup.skipped = true
         TallyDB.setup.skippedAt = time()
-      else
-        TallyDB.setup.skipped = nil
-        TallyDB.setup.skippedAt = nil
+        print("|cff7fbfffTally:|r setup skipped. Re-run any time from Settings → Re-run setup wizard.")
       end
       if ns.RefreshLDB then pcall(ns.RefreshLDB) end
       wizardFrame:Hide()
@@ -841,10 +826,11 @@ function ns.UI.ShouldShowSetupWizard()
   -- Setup-complete (either user finished it, or grandfather flipped it
   -- on for a returning upgrader). Either way, no auto-open.
   if TallyDB.setup and TallyDB.setup.completed then return false end
-  -- TLY-35: user dismissed the wizard via the "don't show again"
-  -- checkbox. Account-wide flag, suppresses auto-popup on every alt
-  -- until they explicitly re-open from Settings → Re-run setup wizard
-  -- (and uncheck the box on the way back out).
+  -- TLY-35: player dismissed the popup (Cancel from anywhere in the
+  -- wizard, or just clicked Next past the welcome step but bailed
+  -- mid-flow). Account-wide flag, one-shot — once set, the popup never
+  -- auto-fires again. Re-engagement is exclusively via Settings →
+  -- Re-run setup wizard or /tally setup.
   if TallyDB.setup and TallyDB.setup.skipped then return false end
   -- Fresh install or post-reset: both have an empty ledger and no
   -- setup-complete flag. Auto-open the wizard so the user lands in the
