@@ -10,6 +10,16 @@ The engineering-detail companion lives in `CHANGELOG.md` (commit-readerese — f
 
 _Notes for the next tagged release will be distilled here. Pull from `CHANGELOG.md` and any closed issues' `## Player summary` sections, then organize into themed prose for players._
 
+## v0.1.0-alpha12
+
+Single-issue hotfix on top of alpha11. Picks up a critical Cogworks library fix.
+
+### Knowledge tomes and confirmation-popup items right-click again
+
+If you've had bag items quietly refuse to be right-clicked while Tally was loaded — knowledge tomes, profession consumables, or anything that pops a *use this?* confirmation — that was a Cogworks library bug that's now fixed. The confirmation popup will appear and the item will use normally on confirm. No settings change needed; the bundled library update does it.
+
+Items without a confirmation popup (gear, tradegoods) were never affected, which is why the bug took a while to surface.
+
 ## v0.1.0-alpha11
 
 Quick follow-up on alpha10's first-run popup fix.

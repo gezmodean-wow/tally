@@ -4,6 +4,10 @@ All notable changes to Tally will be documented in this file.
 
 ## [Unreleased]
 
+## [v0.1.0-alpha12]
+
+- **TLY-46 hotfix.** Bumped Cogworks external in `.pkgmeta` from `v0.13.1` → `v0.13.2` to pick up [COG-30](https://github.com/gezmodean-wow/cogworks/issues/30) — the v0.12.0+ `Scaling.lua` defensive rebind `StaticPopupDialogs = StaticPopupDialogs or {}` tainted the `StaticPopupDialogs` global from insecure context, propagating to any protected Blizzard call that consults the popup table. Most user-visible: `UseContainerItem` on bag items that pop a confirmation StaticPopup (knowledge tomes, profession consumables, anything with a "use this?" prompt) silently failed with `ADDON_ACTION_FORBIDDEN AddOn 'cogworks' tried to call the protected function 'UNKNOWN()'` from `ContainerFrameItemButton_OnClick`. Items that don't trigger a confirmation popup (gear, tradegoods) were unaffected — that asymmetry was the diagnostic signal. Tally is one of several propagation vectors (every cog vendoring v0.12.0–v0.13.1 carries the bug); the per-module guard (`Scaling.lua` MODULE_MINOR `1 → 2`) ensures v0.13.2 supersedes older copies as long as *any* loaded cog ships the bump. No Tally code change required. Tagged as a single-issue hotfix on top of alpha11 per the cadence rule (alphas are full critical-path bundles or tester-reported hotfixes between bundles); the next planned bundle stays on its own track.
+
 ## [v0.1.0-alpha11]
 
 Tester-reported follow-up to alpha10's TLY-35 fix. Single-issue alpha per cadence (alphas between bundles are tester-feedback hotfixes; the next planned bundle stays on its own track).
