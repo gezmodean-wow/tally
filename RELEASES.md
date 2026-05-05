@@ -10,6 +10,50 @@ The engineering-detail companion lives in `CHANGELOG.md` (commit-readerese — f
 
 _Notes for the next tagged release will be distilled here. Pull from `CHANGELOG.md` and any closed issues' `## Player summary` sections, then organize into themed prose for players._
 
+## v0.1.0-alpha10
+
+The big one — closes the data-quality story Tally has been building toward since alpha5. Numbers stop double-counting when you have multiple AH addons installed, an unrecognized transaction type now surfaces in the UI instead of silently disappearing, and a new diagnostic catches anything Tally missed while it wasn't running.
+
+### First-run popup actually goes away when you tell it to
+
+Before alpha10, the welcome popup re-fired on every alt — and on the same character multiple times — even after you walked through the wizard. Common path: you opened the wizard, clicked Cancel partway through, and the popup kept appearing on every login.
+
+The Welcome step now has a *Don't show this on login again* checkbox. Check it and click Cancel and the popup stays gone, on every character, account-wide. You can re-open the wizard any time from Settings → Re-run setup wizard. If you skipped, the minimap icon also calms down — the gold "setup required" tooltip becomes a quiet gray "setup skipped" with a one-line note about how to re-run.
+
+### Reconciled ledger view — one row per real event
+
+If you have TSM, FlipQueue, or Journalator installed alongside Tally, you've probably noticed that the same sale / posting / cancel can show up two or three times in Tally because each addon observed the same event. That's been making Lifecycle cohort counts look inflated and per-item P&L look exaggerated.
+
+Alpha10 adds a *reconciled* view that collapses those duplicates into one record per real event, picking the best value for each field from whichever source captured it most accurately. The Ledger tab defaults to this view; a *Raw* toggle switches back to the per-source rows for power users who want to see who saw what. The Source column annotates merged rows ("native+2") so you can see at a glance when multiple addons agreed on something.
+
+Behind the scenes, Lifecycle and per-item Research now read the reconciled view too — your posting counts and P&L numbers will look more honest after this update.
+
+### "Unknown" filter for transactions Tally couldn't classify
+
+When TSM, FlipQueue, or Journalator emits a transaction with a type Tally doesn't recognize (a TSM "Trade" row, a future FlipQueue auction status, etc.), Tally used to either silently drop it or — worse — guess wrong and file it as a sale. Now those transactions land in a new *Unknown* bucket, preserving the original type tag so we can see what's actually happening. The Ledger tab gets an *Unknown* filter chip after *Other* so testers can isolate them in one click.
+
+If you don't have any of those rows, the chip stays empty and Tally classifies everything correctly — which is the everyday case.
+
+### Sibling-addon imports are explicitly backfill, not periodic
+
+Before alpha10, Tally was re-running TSM / FlipQueue / Journalator imports every 5 minutes whether you wanted it to or not. With native capture (alpha5+) covering live events, that 5-minute loop was redundant — Tally already saw what was happening as it happened. The recurring re-import is gone.
+
+Sibling addons are now framed in the UI as **backfill sources**: imported once during the first-run wizard to recover history Tally couldn't have observed, and re-importable manually from Settings → Import now per source whenever you want to top up. The wizard wording, the Backfill step note, and the Settings header all say *backfill* now to set the right expectation. The Finish button reads *Finish & Backfill*. None of the buttons changed function — only the framing.
+
+### Divergence diagnostic — does Tally have everything?
+
+`/tally diag divergence` is a new slash subcommand that opens a paste-friendly window with three buckets:
+
+- **Real gaps** — events your sibling addons captured during a session when Tally was actually loaded. These are the bugs we want to fix.
+- **Expected gaps** — events your sibling addons captured during a session Tally wasn't loaded. This is what backfill is for, no action needed.
+- **Field disagreements** — events all your addons captured but disagreed on the price / time / count. The reconciled view picks the most reliable source for each field; this list shows where the picks were happening.
+
+The header tells you how much of the last week Tally was actually observing, and per-source contribution counts so you can see at a glance ("TSM contributed 4327 rows, Tally's native source 891"). The auto-divergence-check fires once a minute after login and quietly emits a one-line chat hint only if there are *real* gaps to inspect — silent otherwise so it stays out of the way.
+
+### Diagnostic dumps are copy-pasteable by default
+
+Per tester feedback that pasting from chat scrollback is painful, `/tally diag` now opens directly into the structured copy-dialog. If you specifically want the chat output, use `/tally diag chat`. The previous `/tally diag copy` form keeps working as an alias.
+
 ## v0.1.0-alpha8
 
 A data-quality + UI polish alpha. Tally's matching against TSM / FlipQueue / Journalator gets sharper, the Compare and Ledger views both gain a copy-friendly export dialog, and a stack of tester-feedback fixes lands on top of the alpha7 surface.
