@@ -8,7 +8,13 @@ The engineering-detail companion lives in `CHANGELOG.md` (commit-readerese — f
 
 ## Unreleased
 
-_Notes for the next tagged release will be distilled here. Pull from `CHANGELOG.md` and any closed issues' `## Player summary` sections, then organize into themed prose for players._
+### Tally totals stop under-counting when you use TSM (or other AH addons) alongside
+
+If you've had Tally consistently showing lower sales / item totals than TSM — especially as a high-volume trader posting many of the same item — that's been a structural bug in how Tally combined overlapping records from different addons. Two TSM rows for the same item within five minutes were getting treated as one event, so the second sale's value silently dropped.
+
+After this fix, each TSM row counts as its own event unless a different source (Native, Journalator, FlipQueue) also observed it. Vendor-sell flurries, back-to-back postings, and same-item purchases close together all start counting correctly. Your sales counts and items value will move noticeably closer to what TSM shows. They won't match exactly — TSM has historical rows from before Tally was tracking, and a few earlier classification quirks may leave residual differences in stale entries — but the structural under-count is gone.
+
+If you want to see the impact directly, run `/tally diag divergence` before and after — the "field disagreements" count should drop substantially.
 
 ## v0.1.0-alpha12
 

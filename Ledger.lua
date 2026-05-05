@@ -593,23 +593,39 @@ end
 -- Cluster a sorted-by-atTime list of rows (all sharing the same kind +
 -- charKey + itemID) into groups representing same-real-world-event
 -- captures. Greedy: each row joins the first prior cluster within
--- RECONCILE_WINDOW that has matching count; otherwise opens a new
--- cluster. Returns a list of clusters (each a list of rows).
+-- RECONCILE_WINDOW that has matching count *and* doesn't already include
+-- a row from the candidate's source; otherwise opens a new cluster.
+--
+-- The source-uniqueness gate (TLY-48) keeps Reconcile aligned with its
+-- intended job — coalescing cross-source observations of one event —
+-- without papering over distinct same-source events that happen to share
+-- shape inside the window. Each adapter is the authoritative deduper for
+-- its own rows (TSM/FlipQueue/Journalator/Native each hash on canonical
+-- row identity at insert time), so by the time two same-source rows
+-- reach the ledger they represent two distinct events from that source's
+-- perspective. Pre-fix `clusterGroup` was source-blind and collapsed
+-- vendor-flurries / back-to-back postings of the same item into one
+-- record, which dropped one row's copper via the Authority pick.
 local function clusterGroup(rows)
   local clusters = {}
+  local clusterSources = {}
   for _, e in ipairs(rows) do
     local matched
-    for _, cluster in ipairs(clusters) do
+    local src = e.source or "?"
+    for i, cluster in ipairs(clusters) do
       local first = cluster[1]
       if (e.count or 1) == (first.count or 1)
-         and math.abs((e.atTime or 0) - (first.atTime or 0)) <= RECONCILE_WINDOW then
+         and math.abs((e.atTime or 0) - (first.atTime or 0)) <= RECONCILE_WINDOW
+         and not clusterSources[i][src] then
         cluster[#cluster + 1] = e
+        clusterSources[i][src] = true
         matched = true
         break
       end
     end
     if not matched then
       clusters[#clusters + 1] = { e }
+      clusterSources[#clusters] = { [src] = true }
     end
   end
   return clusters
