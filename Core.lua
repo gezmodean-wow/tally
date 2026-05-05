@@ -711,8 +711,9 @@ local function diagPrintChat()
       st.blobCount,
       st.legacyPresent and " |cffffa050[legacy entries still on disk]|r" or ""))
     if st.blobSavedAt and st.blobSavedAt > 0 then
-      print(string.format("  blob last saved: %s",
-        date("%Y-%m-%d %H:%M:%S", st.blobSavedAt)))
+      print(string.format("  blob last saved: %s  (serialise %dms + compress %dms; serialised %d bytes)",
+        date("%Y-%m-%d %H:%M:%S", st.blobSavedAt),
+        st.serialiseMs or 0, st.compressMs or 0, st.serialisedBytes or 0))
     end
   end
 

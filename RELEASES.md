@@ -8,6 +8,25 @@ The engineering-detail companion lives in `CHANGELOG.md` (commit-readerese — f
 
 ## Unreleased
 
+## v0.1.0-alpha15
+
+Quick perf fix on top of alpha14.
+
+### Logout is fast again
+
+After alpha14 enabled compressed-blob storage, players with very large transaction histories (tens of thousands of ledger rows) saw a multi-second freeze when logging out — Tally was doing all the compression work right at logout time, which blocked the UI before WoW could finish saving. This release switches to a faster compression setting that's roughly 5-10x quicker with only a small impact on file size. Logging out should feel snappy again.
+
+### How to verify
+
+Run `/tally diag` and look at the Storage section. The `blob last saved` line now shows the actual time spent serialising and compressing in milliseconds:
+
+```
+Storage: libs=yes loaded=yes dirty=no  mem=98000 entries  blob=350000 bytes (98000 entries)
+  blob last saved: 2026-05-05 21:00:00  (serialise 1200ms + compress 200ms; serialised 5200000 bytes)
+```
+
+If your `compress` time on the next logout / login cycle is comfortably under a second, the fix is doing its job. Pre-fix on alpha14, the same compress step was taking ~3-5 seconds for that size of ledger.
+
 ## v0.1.0-alpha14
 
 The structural fix for the saved-variables-too-large problem that was wiping testers' Tally state every session.

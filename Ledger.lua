@@ -1042,22 +1042,39 @@ end
 -- Public: serialise + compress _workingMem and write to TallyDB.ledger.blob.
 -- Called from Core.lua's PLAYER_LOGOUT handler. No-op when nothing dirty
 -- so read-only sessions don't pay the cost.
+--
+-- Compression level (TLY-50): LibDeflate at level 5 was costing testers
+-- with big ledgers (~98k entries) multiple seconds of pure-Lua compress
+-- on every logout — visible as a "stuck" UI freeze before the 20s
+-- logout countdown finished. Dropped to level 1: fastest setting LibDeflate
+-- offers without disabling compression entirely, ~5-10x faster than
+-- level 5 on the same input. Output is ~20-30% larger but still one Lua
+-- constant in the SV chunk so the constant-pool cap (the original
+-- TLY-49 motivation) is unchanged. The serialise step is unavoidable
+-- and is the irreducible cost; compress was the dominant tunable.
 function Ledger:SaveToDisk()
   if not _loaded then return end
   if not _dirty then return end
   if not (LibSerialize and LibDeflate) then return end
 
+  local startMs = (debugprofilestop and debugprofilestop()) or 0
+
   local payload    = { entries = _workingMem.entries, byId = _workingMem.byId }
   local serialised = LibSerialize:Serialize(payload)
-  local compressed = LibDeflate:CompressDeflate(serialised, { level = 5 })
+  local serialisedMs = (debugprofilestop and debugprofilestop()) or 0
+  local compressed = LibDeflate:CompressDeflate(serialised, { level = 1 })
+  local compressedMs = (debugprofilestop and debugprofilestop()) or 0
 
   TallyDB = TallyDB or {}
   TallyDB.ledger = TallyDB.ledger or {}
   TallyDB.ledger.blob = compressed
   TallyDB.ledger.blobMeta = {
-    count   = #_workingMem.entries,
-    savedAt = time(),
-    bytes   = #compressed,
+    count             = #_workingMem.entries,
+    savedAt           = time(),
+    bytes             = #compressed,
+    serialisedBytes   = #serialised,
+    serialiseMs       = math.floor(serialisedMs - startMs),
+    compressMs        = math.floor(compressedMs - serialisedMs),
   }
   -- Migration completion: clear the legacy fields once the blob is
   -- safely on disk. From here on WoW only persists blob + blobMeta.
@@ -1074,14 +1091,17 @@ function Ledger:StorageInfo()
   TallyDB = TallyDB or {}
   local meta = TallyDB.ledger and TallyDB.ledger.blobMeta or nil
   return {
-    libsAvailable = (LibSerialize and LibDeflate) and true or false,
-    loaded        = _loaded,
-    dirty         = _dirty,
-    inMemoryCount = _workingMem and #_workingMem.entries or 0,
-    blobBytes     = meta and meta.bytes or 0,
-    blobCount     = meta and meta.count or 0,
-    blobSavedAt   = meta and meta.savedAt or nil,
-    legacyPresent = (TallyDB.ledger and TallyDB.ledger.entries) and true or false,
+    libsAvailable    = (LibSerialize and LibDeflate) and true or false,
+    loaded           = _loaded,
+    dirty            = _dirty,
+    inMemoryCount    = _workingMem and #_workingMem.entries or 0,
+    blobBytes        = meta and meta.bytes or 0,
+    blobCount        = meta and meta.count or 0,
+    blobSavedAt      = meta and meta.savedAt or nil,
+    serialisedBytes  = meta and meta.serialisedBytes or 0,
+    serialiseMs      = meta and meta.serialiseMs or 0,
+    compressMs       = meta and meta.compressMs or 0,
+    legacyPresent    = (TallyDB.ledger and TallyDB.ledger.entries) and true or false,
   }
 end
 

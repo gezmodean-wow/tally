@@ -4,6 +4,13 @@ All notable changes to Tally will be documented in this file.
 
 ## [Unreleased]
 
+## [v0.1.0-alpha15]
+
+Single-issue alpha addressing TLY-50 — logout-delay perf regression introduced by TLY-49's compressed blob storage. Toeknee_atx reported on alpha14 that logout now had a multi-second UI freeze before the 20s logout countdown finished, attributable to `LibDeflate:CompressDeflate` running synchronously at level 5 over a ~98k-entry serialised payload.
+
+- **TLY-50 — drop LibDeflate compression level 5 → 1.** LibDeflate's level 1 is the fastest setting it offers without disabling compression entirely (level 0). Per the lib docs and the implementation, level 5 trades CPU for ratio at a ~5-10x cost over level 1; the output is ~20-30% smaller. For a 98k-entry serialised payload (Toeknee's case) the level-5 compress was the dominant cost on logout — measured in seconds — while level 1 lands in tens-to-hundreds of ms. Level 1 output is still one Lua constant in the SV chunk, which is what TLY-49 needed to solve the original constant-pool overflow; the slightly larger blob is unchanged in that respect. The `LibSerialize:Serialize` step is irreducible (the lib doesn't expose a faster mode for tables of small dicts) and remains the sole pure-Lua cost on save.
+- **Save-time instrumentation surfaced in `Ledger:StorageInfo()` + `/tally diag` Storage section.** New fields `serialisedBytes`, `serialiseMs`, `compressMs` populated from `debugprofilestop` deltas around each step in `Ledger:SaveToDisk`. Diag chat-print line gains `(serialise Xms + compress Yms; serialised N bytes)` annotation on the blob-last-saved row. Lets testers confirm the perf fix and gives us data for any future tuning (e.g. if `serialiseMs` itself becomes the bottleneck on multi-hundred-thousand-row ledgers).
+
 ## [v0.1.0-alpha14]
 
 Single-issue alpha addressing TLY-49 — the structural fix for the SV constant-table-overflow that the alpha13 per-character marker only mitigated symptomatically. Toeknee_atx + _zpectre_'s alpha13 reports confirmed the popup keeps firing once per never-before-acknowledged alt and Native captures stay gated as long as `setup.completed` doesn't persist across sessions; both root-cause back to TallyDB failing wholesale Lua-load due to constant-pool overflow.
