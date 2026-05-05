@@ -655,6 +655,10 @@ local function startBackfill(state)
   -- inverts the priority.
   TallyDB.setup.skipped = nil
   TallyDB.setup.skippedAt = nil
+  -- TLY-32 / TLY-35 follow-up: per-character acknowledged marker. Survives
+  -- account-wide TallyDB load failure (constant-table overflow on huge SVs).
+  TallyCharDB = TallyCharDB or {}
+  TallyCharDB.tallyAcknowledged = true
   if ns.RefreshLDB then pcall(ns.RefreshLDB) end
 
   ns.Ledger:ImportFromAllSourcesChunked({
@@ -772,21 +776,33 @@ local function createWizardFrame()
           TallyDB.setup.skipped = true
           TallyDB.setup.skippedAt = time()
         end
+        -- TLY-32 / TLY-35 follow-up: per-character marker survives even
+        -- when account-wide TallyDB fails to load (constant-table overflow
+        -- on huge SVs). See ShouldShowSetupWizard for the OR-gate.
+        TallyCharDB = TallyCharDB or {}
+        TallyCharDB.tallyAcknowledged = true
       end
     end,
     onCancel = function()
       -- TLY-35: any Cancel from anywhere in the wizard means "I'm done with
       -- this popup." Latch skipped unconditionally so the popup never
       -- re-fires on this account; player re-engages from Settings.
+      --
+      -- TLY-32 / TLY-35 follow-up: write the persistence flags FIRST,
+      -- before any potentially-throwing call (print, RefreshLDB, Hide).
+      -- A late error inside this handler used to leave the flags unset
+      -- and the popup re-fired on the next session.
       TallyDB = TallyDB or {}
       TallyDB.setup = TallyDB.setup or {}
+      TallyCharDB = TallyCharDB or {}
+      TallyCharDB.tallyAcknowledged = true
       if not TallyDB.setup.completed then
         TallyDB.setup.skipped = true
         TallyDB.setup.skippedAt = time()
-        print("|cff7fbfffTally:|r setup skipped. Re-run any time from Settings → Re-run setup wizard.")
       end
+      pcall(print, "|cff7fbfffTally:|r setup skipped. Re-run any time from Settings → Re-run setup wizard.")
       if ns.RefreshLDB then pcall(ns.RefreshLDB) end
-      wizardFrame:Hide()
+      pcall(function() wizardFrame:Hide() end)
     end,
   })
   wizardWidget:SetAllPoints(wizardFrame)
@@ -832,6 +848,19 @@ function ns.UI.ShouldShowSetupWizard()
   -- auto-fires again. Re-engagement is exclusively via Settings →
   -- Re-run setup wizard or /tally setup.
   if TallyDB.setup and TallyDB.setup.skipped then return false end
+  -- TLY-32 / TLY-35 follow-up: per-character acknowledged marker.
+  -- Account-wide TallyDB can fail to load on huge SV files (Lua's
+  -- "constant table overflow" parse error fires when the single SV
+  -- chunk's constant pool exceeds 2^18 entries — easily hit by a tester
+  -- with hundreds of thousands of distinct ledger rows). When the load
+  -- fails, TallyDB starts each session as an empty {} and the
+  -- account-wide skipped flag is gone, so the popup re-fired on every
+  -- alt no matter how many times the player Cancel'd. The per-character
+  -- TallyCharDB lives in a separate, much smaller SV file that doesn't
+  -- hit the overflow, so this marker is the load-failure-resistant
+  -- signal that "this player has already seen and dismissed Tally."
+  TallyCharDB = TallyCharDB or {}
+  if TallyCharDB.tallyAcknowledged then return false end
   -- Fresh install or post-reset: both have an empty ledger and no
   -- setup-complete flag. Auto-open the wizard so the user lands in the
   -- onboarding flow without having to find /tally setup.

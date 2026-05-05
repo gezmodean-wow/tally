@@ -8,6 +8,14 @@ The engineering-detail companion lives in `CHANGELOG.md` (commit-readerese — f
 
 ## Unreleased
 
+### The welcome popup actually stays dismissed now
+
+Two testers (thank you Toeknee and zpectre) confirmed across multiple alphas that the welcome popup kept firing on every alt no matter how many times they hit Cancel. Turned out the gate logic was correct — the issue was that on accounts with very large Tally databases, the saved-variables file fails to load entirely, which wipes the "I dismissed this" flag every session. The popup was firing because Tally genuinely thought you were a fresh install each login.
+
+Tally now also tracks "I've already dismissed this" per character in a separate, much smaller saved-variables file that doesn't hit the load failure. Either Cancel or Next on the wizard sets the flag, and from then on that character won't auto-popup again. New characters still see the popup once each — that's a minor change from "once per account, ever" — but it's a reliable per-character one-shot instead of an unreliable account-wide one.
+
+A separate longer-term fix is needed for the underlying database-too-large problem — for affected testers, the ledger and setup state still won't persist between sessions. That work is queued under [TLY-32](https://github.com/gezmodean-wow/tally/issues/32).
+
 ### Tally totals stop under-counting when you use TSM (or other AH addons) alongside
 
 If you've had Tally consistently showing lower sales / item totals than TSM — especially as a high-volume trader posting many of the same item — that's been a structural bug in how Tally combined overlapping records from different addons. Two TSM rows for the same item within five minutes were getting treated as one event, so the second sale's value silently dropped.

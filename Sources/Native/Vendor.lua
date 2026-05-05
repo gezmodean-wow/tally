@@ -185,7 +185,7 @@ local function emitDiff()
       local moneyDelta = (GetMoney and GetMoney() or 0) - (pre.money or 0)
       local residual = moneyDelta - (sellTotal - buyTotal)
       ns.dbg:PrintDebug(string.format(
-        "Vendor: closed session — sells=%d buys=%d money=%+d residual=%+d (inserted %d rows)",
+        "Vendor: closed session — sells=%.0f buys=%.0f money=%+.0f residual=%+.0f (inserted %d rows)",
         sellTotal, buyTotal, moneyDelta, residual, inserted or 0))
     end
   end
