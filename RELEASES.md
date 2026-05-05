@@ -8,6 +8,10 @@ The engineering-detail companion lives in `CHANGELOG.md` (commit-readerese — f
 
 ## Unreleased
 
+## v0.1.0-alpha13
+
+A tester-feedback hotfix bundle picking up two persistent reports plus the matching root-cause investigation that came out of them.
+
 ### The welcome popup actually stays dismissed now
 
 Two testers (thank you Toeknee and zpectre) confirmed across multiple alphas that the welcome popup kept firing on every alt no matter how many times they hit Cancel. Turned out the gate logic was correct — the issue was that on accounts with very large Tally databases, the saved-variables file fails to load entirely, which wipes the "I dismissed this" flag every session. The popup was firing because Tally genuinely thought you were a fresh install each login.
