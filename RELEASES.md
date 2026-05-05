@@ -8,6 +8,40 @@ The engineering-detail companion lives in `CHANGELOG.md` (commit-readerese — f
 
 ## Unreleased
 
+## v0.1.0-alpha14
+
+The structural fix for the saved-variables-too-large problem that was wiping testers' Tally state every session.
+
+### Tally's database now stays small enough to actually load
+
+The alpha13 popup mitigation only addressed the symptom — the underlying problem was that on accounts with very large transaction histories, Tally's saved-variables file gets too big for WoW to load on startup, and Tally was silently re-creating an empty database every session. That meant your ledger reset to zero every login, the welcome popup re-fired on every never-acknowledged alt, and the Native event-capture stayed disabled because the setup-completed flag never persisted.
+
+This release moves Tally's ledger to a compressed storage format. The new format stores hundreds of thousands of transactions in a fraction of the space a raw table takes, so the file loads cleanly even on long-running heavy-trader accounts. From the player side: nothing changes about what Tally tracks or how it works — your ledger, pricing history, setup state, and net-worth widget all just *stay* across sessions like they should.
+
+### What affected players need to do
+
+If you've been hit by the popup-keeps-firing / ledger-keeps-empty problem (you'll know because Tally always feels like a fresh install), your old saved-variables file is still on disk and still too big to load. Recovery is one logout cycle:
+
+1. Update to alpha14, log into any character.
+2. Tally will look fresh-empty. That's expected — the old file is unreadable.
+3. **Log out fully** (back to character select, or quit the game). This is the important step: it lets WoW write a *new* small saved-variables file to replace the old broken one.
+4. Log back in. Tally now loads cleanly.
+5. Run `/tally setup` and walk through the wizard. The backfill from your sibling addons (TSM, FlipQueue, Journalator) repopulates your ledger.
+6. Log out and back in once more to confirm everything persists.
+
+From this point on, Tally's storage stays compressed and your data sticks across sessions.
+
+### How to verify it's working
+
+Run `/tally diag` and look for the new **Storage** section. It shows:
+- whether the compression libraries loaded (`libs=yes`)
+- how many entries are in working memory
+- how many bytes the on-disk blob is and how many entries it contains
+- when it was last saved
+- a warning marker if any legacy uncompressed data is still on disk (mid-migration state — should clear after one logout cycle)
+
+For any tester comparing pre/post: the blob byte count should be a fraction of what your raw saved-variables file size used to be.
+
 ## v0.1.0-alpha13
 
 A tester-feedback hotfix bundle picking up two persistent reports plus the matching root-cause investigation that came out of them.
