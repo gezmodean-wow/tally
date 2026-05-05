@@ -74,6 +74,20 @@ function ns:PLAYER_LOGIN()
   if ns.Inventory and ns.Inventory.RegisterSyndicatorCallbacks then
     ns.Inventory:RegisterSyndicatorCallbacks()
   end
+  -- TLY-45: open a session-window log entry. Pairs with the periodic
+  -- heartbeat ticker further down so DivergenceReport can categorize
+  -- ledger gaps as real (Tally was running, should have captured) vs
+  -- expected (Tally wasn't running, sibling backfill is the truth).
+  if ns.Ledger and ns.Ledger.StartSession then
+    local tocVer = (C_AddOns and C_AddOns.GetAddOnMetadata
+                    and C_AddOns.GetAddOnMetadata(addonName, "Version")) or "?"
+    pcall(ns.Ledger.StartSession, ns.Ledger, {
+      build   = (GetBuildInfo and select(4, GetBuildInfo())) or nil,
+      version = tostring(tocVer),
+      charKey = ns.Inventory and ns.Inventory.CurrentCharKey
+                and ns.Inventory:CurrentCharKey() or nil,
+    })
+  end
   -- Register ledger source adapters. Each adapter registers itself with
   -- ns.Ledger; we then run the available ones to backfill on login.
   if ns.Sources then
@@ -200,16 +214,42 @@ function ns:PLAYER_LOGIN()
     end)
   end
 
-  -- Periodic ledger backfill from sibling-addon adapters. 5-minute timer is
-  -- well below the cadence at which TSM Accounting / FlipQueue write new
-  -- rows, while staying far away from the per-bag-event hot path. Native
-  -- source is event-driven (MAIL_INBOX_UPDATE) so it never relies on this.
-  -- TLY-25: gated on setup-complete; the ticker keeps running but each
-  -- tick is a no-op until the wizard finishes.
-  if ns.Ledger and ns.Ledger.ImportFromAllSources and C_Timer and C_Timer.NewTicker then
-    C_Timer.NewTicker(300, function()
-      if ns.Ledger:IsSetupComplete() then
-        ns.Ledger:ImportFromAllSources()
+  -- TLY-31 Phase B / TLY-45: the 5-minute periodic auto-import is gone.
+  -- Sibling adapters are now strictly backfill-only — the one-shot at
+  -- PLAYER_LOGIN above (line ~112) handles the catch-up; nothing reruns
+  -- on a ticker. Per the alpha10 strategy discussion, we replace the
+  -- auto-import cycle with two diagnostics:
+  --
+  --   1. Heartbeat ticker (60s) — extends the current session's
+  --      lastSeenAt so DivergenceReport can tell which ledger gaps
+  --      occurred while Tally was running (real-gap candidates) vs
+  --      while it wasn't (expected gap, what backfill is for).
+  --   2. One-shot divergence check (~60s after login) — runs
+  --      Ledger:DivergenceReport, logs a one-line summary to chat
+  --      ("Tally: divergence check — N real gaps. /tally diag
+  --      divergence to inspect."). Auto-fire is silent if zero real
+  --      gaps so it stays out of the way; full detail lives behind
+  --      the slash command.
+  --
+  -- Manual "Import from <source>" buttons in Settings keep working —
+  -- they're now framed as backfill, not periodic refresh, in the UI.
+  if ns.Ledger and ns.Ledger.HeartbeatSession and C_Timer and C_Timer.NewTicker then
+    C_Timer.NewTicker(60, function()
+      pcall(ns.Ledger.HeartbeatSession, ns.Ledger)
+    end)
+  end
+
+  if ns.Ledger and ns.Ledger.DivergenceReport and C_Timer and C_Timer.After then
+    C_Timer.After(60, function()
+      if not ns.Ledger:IsSetupComplete() then return end
+      local ok, report = pcall(ns.Ledger.DivergenceReport, ns.Ledger)
+      if not ok or not report then return end
+      local n = report.summary.realGapCount
+      if n and n > 0 then
+        print(string.format(
+          "|cffffd070Tally:|r divergence check — %d real gap%s. Run "
+          .. "|cffffffff/tally diag divergence|r to inspect.",
+          n, n == 1 and "" or "s"))
       end
     end)
   end
@@ -697,6 +737,169 @@ ns.Diag = diagPrintChat
 ns.DiagCopyDialog = diagOpenCopyDialog
 ns.RegisterDiagInspectors = registerDiagInspectors
 
+-- ============================================================================
+-- /tally diag divergence — multi-source coverage analysis (TLY-45)
+-- ============================================================================
+--
+-- Walks Ledger:DivergenceReport and renders it as a paste-friendly text
+-- block: source counts, real gaps (Tally was running, sibling has the
+-- event but Native doesn't), expected gaps (Tally wasn't running),
+-- field disagreements (clusters where multiple sources captured the
+-- event but disagree on copper / atTime / etc).
+--
+-- The check is the diagnostic complement of Reconcile: Reconcile picks
+-- field values when sources agree on existence; this surfaces where
+-- they disagree on existence so the user can act ("install Native /
+-- check why TSM rows aren't getting paired" etc.).
+--
+-- Truncation: real gaps are listed in full (always actionable), but
+-- expected gaps and field disagreements truncate to MAX_DETAIL each
+-- so the dialog doesn't balloon to thousands of lines on a power user's
+-- ledger. The summary header carries the full counts for context.
+
+local DIVERGENCE_MAX_DETAIL = 25
+
+local function formatDivergenceReport()
+  if not (ns.Ledger and ns.Ledger.DivergenceReport) then
+    return "Divergence report unavailable — Ledger:DivergenceReport missing."
+  end
+  local report = ns.Ledger:DivergenceReport()
+  local lines = {}
+  local function emit(s) lines[#lines + 1] = s end
+
+  emit("Tally divergence report — generated " .. date("%Y-%m-%d %H:%M"))
+  emit("")
+
+  -- Session coverage header. Pulls a 7-day window for a quick "how
+  -- much of last week was Tally observing" headline; the full session
+  -- list is in the regular /tally diag dump for power users.
+  if ns.Ledger.SessionCoverage then
+    local weekAgo = time() - 7 * 86400
+    local total, overlapping, coveredSec = ns.Ledger:SessionCoverage(weekAgo, time())
+    local hours = coveredSec / 3600
+    emit(string.format(
+      "Sessions logged: %d (last 7d: %d sessions, %.1fh of observation)",
+      total, overlapping, hours))
+  end
+  emit(string.format(
+    "Total clusters: %d  |  multi-source: %d  |  field-disagreement: %d  |  real-gap: %d  |  expected-gap: %d",
+    report.summary.clusters,
+    report.summary.multiSourceClusters,
+    report.summary.fieldDisagreementCount,
+    report.summary.realGapCount,
+    report.summary.expectedGapCount))
+  emit("")
+
+  -- Source contribution counts. Stable order so cross-tester diffs read
+  -- consistently — alphabetical by source name.
+  local sourceNames = {}
+  for k in pairs(report.summary.sourceCounts) do sourceNames[#sourceNames + 1] = k end
+  table.sort(sourceNames)
+  emit("SOURCE CONTRIBUTIONS (rows seen, before reconciliation)")
+  for _, name in ipairs(sourceNames) do
+    emit(string.format("  %-16s %d", name, report.summary.sourceCounts[name]))
+  end
+  emit("")
+
+  -- Real gaps — Tally was running, sibling has the event, Native didn't
+  -- capture. These are the bugs we care about.
+  emit("REAL GAPS — events sibling sources observed while Tally was running")
+  if #report.realGap == 0 then
+    emit("  (none — Native captured every event observed during a session)")
+  else
+    for _, item in ipairs(report.realGap) do
+      local c = item.cluster
+      local first = c[1]
+      local sources = {}
+      for _, e in ipairs(c) do sources[#sources + 1] = e.source or "?" end
+      table.sort(sources)
+      local itemDesc = (first.meta and first.meta.name)
+                    or (first.itemID and ("item:" .. first.itemID))
+                    or "(no item)"
+      emit(string.format("  %s | %s | %s | %s | sources=%s | session=%s",
+        date("%Y-%m-%d %H:%M:%S", first.atTime or 0),
+        first.kind or "?",
+        first.charKey or "?",
+        itemDesc,
+        table.concat(sources, "+"),
+        date("%Y-%m-%d %H:%M", item.sessionRef.startedAt or 0)))
+    end
+  end
+  emit("")
+
+  -- Expected gaps — Tally wasn't running. Truncated.
+  emit(string.format("EXPECTED GAPS — events while Tally wasn't running (showing first %d of %d)",
+    math.min(#report.expectedGap, DIVERGENCE_MAX_DETAIL), #report.expectedGap))
+  for i = 1, math.min(#report.expectedGap, DIVERGENCE_MAX_DETAIL) do
+    local c = report.expectedGap[i].cluster
+    local first = c[1]
+    local sources = {}
+    for _, e in ipairs(c) do sources[#sources + 1] = e.source or "?" end
+    table.sort(sources)
+    local itemDesc = (first.meta and first.meta.name)
+                  or (first.itemID and ("item:" .. first.itemID))
+                  or "(no item)"
+    emit(string.format("  %s | %s | %s | %s | sources=%s",
+      date("%Y-%m-%d %H:%M:%S", first.atTime or 0),
+      first.kind or "?",
+      first.charKey or "?",
+      itemDesc,
+      table.concat(sources, "+")))
+  end
+  emit("")
+
+  -- Field disagreements — same event captured by 2+ sources but they
+  -- disagree on values. Reconcile picks the priority winner; this
+  -- shows where the picks happen.
+  emit(string.format("FIELD DISAGREEMENTS — multi-source clusters with conflicting values (showing first %d of %d)",
+    math.min(#report.fieldDisagreement, DIVERGENCE_MAX_DETAIL),
+    #report.fieldDisagreement))
+  for i = 1, math.min(#report.fieldDisagreement, DIVERGENCE_MAX_DETAIL) do
+    local entry = report.fieldDisagreement[i]
+    local c = entry.cluster
+    local first = c[1]
+    local itemDesc = (first.meta and first.meta.name)
+                  or (first.itemID and ("item:" .. first.itemID))
+                  or "(no item)"
+    local fieldDetails = {}
+    for _, field in ipairs(entry.fields) do
+      local pieces = {}
+      for _, e in ipairs(c) do
+        if e[field] ~= nil then
+          pieces[#pieces + 1] = string.format("%s=%s",
+            e.source or "?", tostring(e[field]))
+        end
+      end
+      fieldDetails[#fieldDetails + 1] = field .. "[" .. table.concat(pieces, ", ") .. "]"
+    end
+    emit(string.format("  %s | %s | %s | %s | %s",
+      date("%Y-%m-%d %H:%M:%S", first.atTime or 0),
+      first.kind or "?",
+      first.charKey or "?",
+      itemDesc,
+      table.concat(fieldDetails, "; ")))
+  end
+
+  return table.concat(lines, "\n")
+end
+
+local function divergenceCopyDialog()
+  local text = formatDivergenceReport()
+  if Cogworks and Cogworks.CreateCopyDialog then
+    Cogworks:CreateCopyDialog(text,
+      "Tally divergence report — paste into a GitHub issue or external tool.")
+  else
+    -- Cogworks copy dialog unavailable — fall back to chat. Per the
+    -- alpha10 stance, debug output should land in a copy-dialog by
+    -- default; chat is strictly the degraded path.
+    print("|cffff4040Tally:|r CreateCopyDialog unavailable; printing to chat.")
+    for line in text:gmatch("[^\n]+") do print(line) end
+  end
+end
+
+ns.DivergenceReportText = formatDivergenceReport
+ns.DivergenceCopyDialog = divergenceCopyDialog
+
 -- Live debug console — opens Cogworks's CreateDebugConsole({ cog = "Tally" }).
 -- Singleton: one console instance reused across slash invocations. Position,
 -- size, and pinned state persist into TallyDB.ui.debugConsole.
@@ -1031,11 +1234,18 @@ if Cogworks and Cogworks.RegisterSlashCommands then
       },
       {
         name = "diag", aliases = { "diagnostic" },
-        args = "[copy]",
-        help = "Print diagnostic dump (or open the structured copy dialog)",
+        args = "[divergence|chat]",
+        -- TLY-45 + alpha10 debug-UX: default opens the structured copy
+        -- dialog (was: chat dump). Chat is preserved as `/tally diag
+        -- chat` for users who specifically want inline output. `copy`
+        -- stays as a no-op alias for the default to avoid breaking
+        -- muscle memory from earlier alphas.
+        help = "Open diagnostic dump as a copy dialog. `divergence` for source-coverage report; `chat` to print inline.",
         run = function(rest)
-          if rest and rest:lower() == "copy" then diagOpenCopyDialog()
-          else diagPrintChat() end
+          local sub = rest and rest:lower() or ""
+          if sub == "divergence" then divergenceCopyDialog()
+          elseif sub == "chat" then diagPrintChat()
+          else diagOpenCopyDialog() end
         end,
       },
       {

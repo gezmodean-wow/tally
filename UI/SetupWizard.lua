@@ -119,8 +119,9 @@ local function buildWelcomeStep(parent, state)
     .. "without Tally; installing Tally just unlocks cross-account rollups, "
     .. "pricing-history, and per-item lifecycle analysis.\n\n"
     .. "This wizard takes about a minute. We'll show you what we'll pull and "
-    .. "what it'll cost — then start the import in the background so you can "
-    .. "play while it runs.")
+    .. "what it'll cost — then backfill in the background so you can "
+    .. "play while it runs. After the one-time backfill, Tally captures new "
+    .. "events live as they fire.")
 
   -- TLY-35: persistent skip switch. Bound to state.dontShowAgain; the
   -- wizard's onCancel writes that into TallyDB.setup.skipped so users
@@ -161,9 +162,11 @@ local function buildSourcesStep(parent, state)
   intro:SetPoint("TOPLEFT", title, "BOTTOMLEFT", 0, -8)
   intro:SetPoint("RIGHT", f, "RIGHT", -12, 0)
   intro:SetJustifyH("LEFT")
-  intro:SetText("These are the data sources Tally detected. We'll import "
-    .. "from every checked source. Uncheck any source you'd rather keep out "
-    .. "of Tally's ledger.")
+  intro:SetText("These are the data sources Tally detected. Sibling addons "
+    .. "(TSM, FlipQueue, Journalator) are pulled once as a |cffffffffbackfill|r "
+    .. "to recover history Tally couldn't have observed. Tally's own native "
+    .. "source captures new events live as they happen. Uncheck any sibling "
+    .. "you'd rather keep out of Tally's ledger.")
 
   -- Build a row per registered source.
   local listHost = CreateFrame("Frame", nil, f)
@@ -552,9 +555,9 @@ local function buildBackfillStep(parent, state)
   intro:SetPoint("RIGHT", f, "RIGHT", -12, 0)
   intro:SetJustifyH("LEFT")
   intro:SetSpacing(2)
-  intro:SetText("Click Finish to start the import. Tally will work through "
-    .. "your sources in the background — you'll see a small progress bar "
-    .. "bottom-right. Pick how aggressive that should be:")
+  intro:SetText("Click Finish to start the backfill. Tally will pull history "
+    .. "from each sibling source in the background — you'll see a small "
+    .. "progress bar bottom-right. Pick how aggressive that should be:")
 
   -- Pace radios.
   local rowHost = CreateFrame("Frame", nil, f)
@@ -593,9 +596,11 @@ local function buildBackfillStep(parent, state)
   note:SetPoint("RIGHT", f, "RIGHT", -12, 0)
   note:SetJustifyH("LEFT")
   note:SetSpacing(3)
-  note:SetText("|cff999999After this completes, Tally re-imports every 5 "
-    .. "minutes to catch new activity. Native source (your own mailbox "
-    .. "scans) is event-driven — it's always live regardless of pace.|r")
+  note:SetText("|cff999999This is a one-time backfill. After it completes, "
+    .. "Tally captures new events live via the native source (mailbox, "
+    .. "vendor, repair, posting). Sibling adapters won't auto-rerun on a "
+    .. "ticker — use Settings → Import now to manually backfill again, "
+    .. "or /tally diag divergence to check whether anything Native missed.|r")
 
   return f
 end
@@ -644,7 +649,7 @@ local function startBackfill(state)
   end
 
   local panel = ns.UI.CreateMultiProgress({
-    title = "Importing your data",
+    title = "Backfilling your data",
     sources = sourceList,
   })
   panel:Show()
@@ -706,7 +711,7 @@ local function startBackfill(state)
     onComplete = function(results)
       local total = 0
       for _, r in ipairs(results) do total = total + (r.inserted or 0) end
-      panel:Complete(string.format("Import complete — %s entries across %d sources.",
+      panel:Complete(string.format("Backfill complete — %s entries across %d sources.",
         BreakUpLargeNumbers and BreakUpLargeNumbers(total) or tostring(total),
         #results))
 
@@ -772,7 +777,7 @@ local function createWizardFrame()
       { key = "history",  title = "History",       build = function(parent) return buildHistoryStep(parent, state) end },
       { key = "backfill", title = "Backfill",      build = function(parent) return buildBackfillStep(parent, state) end },
     },
-    finishLabel = "Finish & Import",
+    finishLabel = "Finish & Backfill",
     onComplete = function()
       applyState(state)
       wizardFrame:Hide()

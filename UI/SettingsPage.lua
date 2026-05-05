@@ -408,8 +408,22 @@ function ns.UI.CreateSettingsPage(parent)
 
   local sourcesHdr = makeSectionHeader(page, actionRow, "BOTTOMLEFT", 18, "DATA SOURCES")
 
+  -- TLY-31 Phase B: Tally now treats sibling adapters as backfill sources,
+  -- not periodic auto-importers. The Import now button stays per source
+  -- for manual top-up; the recurring 5-min ticker is gone. This note
+  -- frames the section so users don't expect their TSM rows to update
+  -- live without clicking through.
+  local sourcesNote = page:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+  sourcesNote:SetPoint("TOPLEFT", sourcesHdr, "BOTTOMLEFT", 0, -4)
+  sourcesNote:SetPoint("RIGHT", page, "RIGHT", -4, 0)
+  sourcesNote:SetJustifyH("LEFT")
+  sourcesNote:SetSpacing(2)
+  sourcesNote:SetText("Sibling adapters (TSM, FlipQueue, Journalator) are backfill-only — "
+    .. "imported once on first setup and on the buttons below. Tally's native source "
+    .. "captures new events live (mailbox / vendor / repair / posting) — no manual refresh.")
+
   local sourcesContainer = CreateFrame("Frame", nil, page)
-  sourcesContainer:SetPoint("TOPLEFT", sourcesHdr, "BOTTOMLEFT", 0, -8)
+  sourcesContainer:SetPoint("TOPLEFT", sourcesNote, "BOTTOMLEFT", 0, -8)
   sourcesContainer:SetPoint("RIGHT", page, "RIGHT", 0, 0)
   sourcesContainer:SetHeight(1) -- height grows with rows
 

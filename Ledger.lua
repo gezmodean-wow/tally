@@ -674,6 +674,268 @@ function Ledger:Reconcile(filter)
 end
 
 -- ============================================================================
+-- Session-window log (TLY-45)
+-- ============================================================================
+--
+-- Records when Tally itself was loaded and observing events. The native
+-- source is event-driven — it only captures what fires while Tally is
+-- running, so divergence between Native and a sibling adapter at a
+-- given timestamp could mean either "Tally has a capture bug" or
+-- "Tally wasn't loaded then." The session log distinguishes those two
+-- cases so DivergenceReport can categorize gaps as real (Tally was
+-- running, should have captured) vs expected (Tally wasn't running,
+-- sibling backfill is the only ground truth).
+--
+-- Storage:
+--   TallyDB.sessions = {
+--     { startedAt, lastSeenAt, build, version, charKey }, ...
+--   }
+--
+-- Bounded ring of MAX_SESSIONS entries so the table doesn't grow
+-- unbounded across years of play. 200 covers ~6-12 months of typical
+-- daily play; lookups walk in reverse (most recent first) so the LRU
+-- truncation doesn't hurt query latency.
+
+local MAX_SESSIONS = 200
+
+local function sessionsList()
+  TallyDB = TallyDB or {}
+  TallyDB.sessions = TallyDB.sessions or {}
+  return TallyDB.sessions
+end
+
+-- Open a new session entry. Called once per PLAYER_LOGIN (Core.lua).
+-- charKey identifies which character's login produced this session —
+-- useful for cross-checks but not load-bearing for divergence math.
+function Ledger:StartSession(opts)
+  opts = opts or {}
+  local sessions = sessionsList()
+  local now = (opts.atTime ~= nil) and opts.atTime or time()
+  sessions[#sessions + 1] = {
+    startedAt  = now,
+    lastSeenAt = now,
+    build      = opts.build,
+    version    = opts.version,
+    charKey    = opts.charKey,
+  }
+  -- Bounded ring: drop oldest if we exceeded the cap.
+  while #sessions > MAX_SESSIONS do
+    table.remove(sessions, 1)
+  end
+end
+
+-- Update the most recent session's lastSeenAt. Called periodically by
+-- the heartbeat ticker. No-op if no session has been started yet
+-- (defensive — the heartbeat shouldn't fire pre-login but the addon
+-- can run /reload mid-session and the ticker may resume before
+-- StartSession does in some race orders).
+function Ledger:HeartbeatSession(opts)
+  opts = opts or {}
+  local sessions = sessionsList()
+  local current = sessions[#sessions]
+  if not current then return end
+  local now = (opts.atTime ~= nil) and opts.atTime or time()
+  current.lastSeenAt = math.max(current.lastSeenAt or 0, now)
+end
+
+-- Returns the session entry whose [startedAt, lastSeenAt + grace]
+-- window covers `t`, or nil if no session does. Walks in reverse so
+-- recent queries are O(1) amortized.
+--
+-- Grace window absorbs the period between the last heartbeat and any
+-- terminating event — without it, a row captured 30s after the last
+-- heartbeat fall outside the session and erroneously look like an
+-- "expected gap." 90s = 60s heartbeat interval + 30s slack.
+local SESSION_GRACE = 90
+
+function Ledger:SessionForTime(t)
+  if type(t) ~= "number" or t <= 0 then return nil end
+  local sessions = sessionsList()
+  for i = #sessions, 1, -1 do
+    local s = sessions[i]
+    if s.startedAt and t >= s.startedAt
+       and t <= (s.lastSeenAt or s.startedAt) + SESSION_GRACE then
+      return s
+    end
+  end
+  return nil
+end
+
+-- Returns the count of sessions in the log + the count whose
+-- [startedAt, lastSeenAt] window overlaps the [from, to] range.
+-- Used by DivergenceReport for the "Tally was running for X% of the
+-- analyzed window" header line.
+function Ledger:SessionCoverage(from, to)
+  local sessions = sessionsList()
+  local total = #sessions
+  if not (from and to) or from > to then return total, 0, 0 end
+  local overlapping = 0
+  local coveredSec = 0
+  for _, s in ipairs(sessions) do
+    local sStart = s.startedAt or 0
+    local sEnd = (s.lastSeenAt or s.startedAt or 0) + SESSION_GRACE
+    if sEnd >= from and sStart <= to then
+      overlapping = overlapping + 1
+      local lo = math.max(sStart, from)
+      local hi = math.min(sEnd, to)
+      if hi > lo then coveredSec = coveredSec + (hi - lo) end
+    end
+  end
+  return total, overlapping, coveredSec
+end
+
+-- ============================================================================
+-- Divergence reporter (TLY-45)
+-- ============================================================================
+--
+-- Periodic + on-demand diagnostic. Categorizes source-disagreements
+-- across the ledger:
+--
+--   * field-disagreement — every relevant source captured the event,
+--                          but disagree on copper / atTime / etc.
+--                          Reconcile already picks; reporter just
+--                          counts so we know how often it happens.
+--   * real-gap          — a sibling has the event, Native doesn't,
+--                          but the event's atTime falls inside a
+--                          session window where Tally was running.
+--                          This is the bug class we care about — Tally
+--                          should have observed it but didn't.
+--   * expected-gap      — a sibling has the event, Native doesn't,
+--                          atTime outside any session window. Catalog
+--                          but don't alarm — this is what backfill is
+--                          for.
+--
+-- Returns a structured report consumed by /tally diag divergence and
+-- by the periodic ticker (Phase 4) to surface real-gap counts to chat
+-- (or the LDB tooltip, when one exists).
+
+local NATIVE_SOURCE_NAME = "tally-native"
+
+-- A "covered by Native" event is one where any cluster member has
+-- source = "tally-native". If Native covered the cluster, we don't
+-- need to second-guess sibling-only observations.
+local function clusterHasNative(cluster)
+  for _, e in ipairs(cluster) do
+    if e.source == NATIVE_SOURCE_NAME then return true end
+  end
+  return false
+end
+
+-- A field-disagreement exists when at least two cluster members
+-- carry distinct values for the same canonical field. Returns a
+-- list of fields that disagree; empty list means the cluster is
+-- structurally consistent across sources.
+local function fieldDisagreements(cluster)
+  local fields = { "atTime", "copper", "count", "itemKey" }
+  local out = {}
+  for _, field in ipairs(fields) do
+    local seen
+    for _, e in ipairs(cluster) do
+      local v = e[field]
+      if v ~= nil then
+        if seen == nil then
+          seen = v
+        elseif seen ~= v then
+          out[#out + 1] = field
+          break
+        end
+      end
+    end
+  end
+  return out
+end
+
+function Ledger:DivergenceReport(filter)
+  filter = filter or {}
+  local rows = self:Query(filter)
+
+  -- Reuse the Reconcile clustering pipeline — same grouping rules,
+  -- different output. We need access to the raw cluster (with all
+  -- contributing rows + their sources) rather than the merged record.
+  local groups = {}
+  local groupOrder = {}
+  for _, e in ipairs(rows) do
+    -- Skip Unknown rows — by definition they don't reconcile (each
+    -- carries a distinct sourceKind), so divergence math doesn't apply.
+    if e.kind ~= Ledger.Kinds.Unknown then
+      local key = (e.kind or "?") .. "|"
+               .. (e.charKey or "?") .. "|"
+               .. tostring(e.itemID or 0)
+      if not groups[key] then
+        groups[key] = {}
+        groupOrder[#groupOrder + 1] = key
+      end
+      groups[key][#groups[key] + 1] = e
+    end
+  end
+
+  local report = {
+    fieldDisagreement = {},  -- list of { cluster, fields[] }
+    realGap           = {},  -- list of { cluster, sessionRef }
+    expectedGap       = {},  -- list of { cluster }
+    summary           = {
+      clusters             = 0,
+      multiSourceClusters  = 0,
+      fieldDisagreementCount = 0,
+      realGapCount         = 0,
+      expectedGapCount     = 0,
+      sourceCounts         = {},  -- { [source] = N rows seen }
+    },
+  }
+
+  for _, key in ipairs(groupOrder) do
+    local group = groups[key]
+    table.sort(group, function(a, b) return (a.atTime or 0) < (b.atTime or 0) end)
+    local clusters = clusterGroup(group)
+    for _, cluster in ipairs(clusters) do
+      report.summary.clusters = report.summary.clusters + 1
+
+      -- Source counts (every row contributes to its source's tally so
+      -- the diag header can show "TSM contributed 4327 rows, Native
+      -- contributed 891" etc.).
+      for _, e in ipairs(cluster) do
+        local s = e.source or "?"
+        report.summary.sourceCounts[s] = (report.summary.sourceCounts[s] or 0) + 1
+      end
+
+      if #cluster > 1 then
+        report.summary.multiSourceClusters = report.summary.multiSourceClusters + 1
+
+        local fd = fieldDisagreements(cluster)
+        if #fd > 0 then
+          report.fieldDisagreement[#report.fieldDisagreement + 1] = {
+            cluster = cluster,
+            fields  = fd,
+          }
+          report.summary.fieldDisagreementCount = report.summary.fieldDisagreementCount + 1
+        end
+      end
+
+      -- Gap analysis: if cluster has no Native row, it's a sibling-only
+      -- observation. Categorize by whether Tally was running at that
+      -- time. Gap is recorded against the cluster's anchor atTime
+      -- (first row chronologically); SessionForTime decides.
+      if not clusterHasNative(cluster) then
+        local anchor = cluster[1]
+        local session = self:SessionForTime(anchor.atTime or 0)
+        if session then
+          report.realGap[#report.realGap + 1] = {
+            cluster    = cluster,
+            sessionRef = session,
+          }
+          report.summary.realGapCount = report.summary.realGapCount + 1
+        else
+          report.expectedGap[#report.expectedGap + 1] = { cluster = cluster }
+          report.summary.expectedGapCount = report.summary.expectedGapCount + 1
+        end
+      end
+    end
+  end
+
+  return report
+end
+
+-- ============================================================================
 -- Storage
 -- ============================================================================
 
