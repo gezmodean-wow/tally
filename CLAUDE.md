@@ -15,6 +15,19 @@ Tally is the personal-finance layer of the Cogworks suite — Personal Capital /
 - **Vendored libs.** All libraries except Cogworks-1.0 live directly in `Libs/`. Cogworks-1.0 is pulled at package time via a pinned-tag git external in `.pkgmeta`.
 - **Additive Cogworks API use.** When using Cogworks, only rely on APIs that exist at or below the pinned tag. Bump the tag in `.pkgmeta` to pick up newer features — never rely on unpinned main.
 
+## Standards acknowledgments
+
+Each session, check the top entry of each source against the codes below. If newer, prefix the first response with `Standards updated:` plus a one-line summary per new entry, then update the code below as part of the session's commit.
+
+| Source | Last acknowledged |
+|---|---|
+| [comms conventions](https://github.com/gezmodean-wow/cogworks/blob/main/runbooks/comms-conventions.md) | 2026-05-05a |
+| [branch & release flow](https://github.com/gezmodean-wow/cogworks/blob/main/runbooks/branch-and-release-flow.md) | 2026-05-05a |
+| [doc conventions](https://github.com/gezmodean-wow/cogworks/blob/main/runbooks/doc-conventions.md) | 2026-05-05a |
+| [technical standards](https://github.com/gezmodean-wow/cogworks/blob/main/runbooks/technical-standards.md) | 2026-05-05a |
+| [shared/ file pool](https://github.com/gezmodean-wow/cogworks/blob/main/shared/VERSION) | 2026-05-05a — `bash scripts/sync-standards.sh check` |
+| [standards-sync (this mechanism)](https://github.com/gezmodean-wow/cogworks/blob/main/runbooks/standards-sync.md) | 2026-05-05a |
+
 ## SavedVariables
 
 - `TallyDB` — account-wide
