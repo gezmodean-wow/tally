@@ -653,9 +653,56 @@ end
 -- Filtering by source via filter.source short-circuits reconciliation
 -- (single-source filter → single-row clusters; useful for the LedgerPage
 -- Raw-mode filter chips that select a specific adapter).
+--
+-- Result caching: the Reconcile output for a given filter is cached
+-- in-memory and invalidated by any mutation to the active set or
+-- archives (Insert / InsertMany / InsertManyChunked / Clear /
+-- ClearSource / seal paths). Without this, every UI tab open re-ran
+-- the full clustered scan over hundreds of thousands of rows; the
+-- cache is the structural fix for the per-tab-open freeze on big
+-- ledgers (zpectre 438k, Toeknee Compare hang).
+local _reconcileCache = {}
+
+local function reconcileFilterKey(filter)
+  if not filter then return "" end
+  local keys = {}
+  for k in pairs(filter) do keys[#keys + 1] = k end
+  table.sort(keys)
+  local parts = {}
+  for _, k in ipairs(keys) do
+    local v = filter[k]
+    if type(v) == "table" then
+      local copy = {}
+      for i, item in ipairs(v) do copy[i] = tostring(item) end
+      table.sort(copy)
+      parts[#parts + 1] = k .. "=[" .. table.concat(copy, ",") .. "]"
+    else
+      parts[#parts + 1] = k .. "=" .. tostring(v)
+    end
+  end
+  return table.concat(parts, ";")
+end
+
+local function invalidateReconcileCache()
+  _reconcileCache = {}
+end
+
+-- Public hook for callers that mutate active set or archives outside
+-- the normal Insert / Clear paths (seal, schema-version rebuild, etc.).
+function Ledger:InvalidateReconcileCache()
+  invalidateReconcileCache()
+end
+
 function Ledger:Reconcile(filter)
+  local cacheKey = reconcileFilterKey(filter)
+  local cached = _reconcileCache[cacheKey]
+  if cached then return cached end
+
   local rows = self:Query(filter)
-  if #rows == 0 then return {} end
+  if #rows == 0 then
+    _reconcileCache[cacheKey] = {}
+    return _reconcileCache[cacheKey]
+  end
 
   -- Group by (kind, charKey, itemID). Rows with nil itemID share the
   -- "0" bucket — fine for kinds that don't carry an item (ah-fee, repair,
@@ -686,6 +733,7 @@ function Ledger:Reconcile(filter)
     end
   end
 
+  _reconcileCache[cacheKey] = records
   return records
 end
 
@@ -1222,6 +1270,7 @@ function Ledger:Insert(entry)
   d.byId[entry.id] = true
   d.entries[#d.entries + 1] = entry
   _dirty = true
+  invalidateReconcileCache()
   return true, entry
 end
 
@@ -1239,7 +1288,10 @@ function Ledger:InsertMany(entries)
       skipped = skipped + 1
     end
   end
-  if inserted > 0 then _dirty = true end
+  if inserted > 0 then
+    _dirty = true
+    invalidateReconcileCache()
+  end
   return inserted, skipped
 end
 
@@ -1520,6 +1572,7 @@ function Ledger:InsertManyChunked(entries, opts)
 
   local function step()
     local stop = math.min(idx + chunkSize, total)
+    local chunkInserted = 0
     while idx < stop do
       idx = idx + 1
       local e = entries[idx]
@@ -1527,9 +1580,14 @@ function Ledger:InsertManyChunked(entries, opts)
         d.byId[e.id] = true
         d.entries[#d.entries + 1] = e
         inserted = inserted + 1
+        chunkInserted = chunkInserted + 1
       else
         skipped = skipped + 1
       end
+    end
+    if chunkInserted > 0 then
+      _dirty = true
+      invalidateReconcileCache()
     end
     if opts.onProgress then pcall(opts.onProgress, inserted, total, skipped) end
     if idx < total and C_Timer and C_Timer.After then
@@ -1859,6 +1917,7 @@ function Ledger:Clear()
   _loaded = true
   _dirty = true
   if ns.Archive then ns.Archive:UnloadAll() end
+  invalidateReconcileCache()
 end
 
 -- Drop entries from a specific source across active + every archive.
@@ -1880,7 +1939,10 @@ function Ledger:ClearSource(sourceName)
     end
   end
   d.entries = kept
-  if removed > 0 then _dirty = true end
+  if removed > 0 then
+    _dirty = true
+    invalidateReconcileCache()
+  end
 
   if ns.Archive then
     for _, key in ipairs(ns.Archive:List()) do
@@ -1902,6 +1964,7 @@ function Ledger:ClearSource(sourceName)
             ns.Archive:Save(key, archiveKept)
           end
           removed = removed + archiveRemoved
+          invalidateReconcileCache()
         end
       end
     end
