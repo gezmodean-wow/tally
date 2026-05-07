@@ -38,6 +38,7 @@ local pages = {}        -- { [name] = { create = fn, instance = frame|nil } }
 local pageOrder = {}    -- registration order
 local activePage
 local tabPanel          -- cw:CreateTabPanel instance, lazy-built on first :Show()
+local headerNudge       -- soft-cap "Sealing recommended" banner, shown conditionally
 
 local DEFAULT_WIDTH = 720
 local DEFAULT_HEIGHT = 460
@@ -88,6 +89,68 @@ local function build()
   frame.content:ClearAllPoints()
   frame.content:SetPoint("TOPLEFT",     frame.titleBar, "BOTTOMLEFT",  0, -2)
   frame.content:SetPoint("BOTTOMRIGHT", frame,          "BOTTOMRIGHT", -4, 4)
+
+  -- Soft-cap nudge banner (TLY-51). Hidden by default; shown when
+  -- Ledger:SealPreview reports a non-zero seal cut. Click triggers the
+  -- same seal flow as `/tally seal`. Re-anchors the tab panel below
+  -- itself when shown, restores the default tab anchor when hidden.
+  headerNudge = CreateFrame("Button", nil, frame.content, "BackdropTemplate")
+  headerNudge:SetPoint("TOPLEFT",  frame.content, "TOPLEFT",  8, -2)
+  headerNudge:SetPoint("TOPRIGHT", frame.content, "TOPRIGHT", -8, -2)
+  headerNudge:SetHeight(22)
+  headerNudge:SetBackdrop({
+    bgFile   = "Interface\\Buttons\\WHITE8x8",
+    edgeFile = "Interface\\Buttons\\WHITE8x8",
+    edgeSize = 1,
+  })
+  headerNudge:SetBackdropColor(0.30, 0.22, 0.06, 0.85)
+  headerNudge:SetBackdropBorderColor(0.55, 0.43, 0.10, 1)
+  headerNudge:Hide()
+
+  headerNudge.text = headerNudge:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+  headerNudge.text:SetPoint("LEFT", headerNudge, "LEFT", 8, 0)
+  headerNudge.text:SetPoint("RIGHT", headerNudge, "RIGHT", -100, 0)
+  headerNudge.text:SetJustifyH("LEFT")
+
+  headerNudge.button = headerNudge:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+  headerNudge.button:SetPoint("RIGHT", headerNudge, "RIGHT", -8, 0)
+  headerNudge.button:SetText("|cff80c0ff[Seal now →]|r")
+
+  headerNudge:SetScript("OnClick", function()
+    if not (ns.Ledger and ns.Ledger.Seal) then return end
+    if ns.Ledger:IsMigrationRunning() or ns.Ledger:IsSealRunning() then return end
+    local preview = ns.Ledger:SealPreview()
+    if preview.sealCount == 0 then return end
+
+    StaticPopupDialogs["TALLY_SEAL_CONFIRM_HEADER"] = StaticPopupDialogs["TALLY_SEAL_CONFIRM_HEADER"] or {
+      text = "Seal %d ledger rows older than %s into monthly archives?\n\nKeeps the %d newest rows in the active set. Archives are read-only and lazy-loaded when Compare or Lifecycle ask for full history.",
+      button1 = ACCEPT or "Accept",
+      button2 = CANCEL or "Cancel",
+      timeout = 0,
+      whileDead = true,
+      hideOnEscape = true,
+    }
+    StaticPopupDialogs["TALLY_SEAL_CONFIRM_HEADER"].OnAccept = function()
+      print(string.format("|cff7fbfffTally:|r sealing %d rows into archives…", preview.sealCount))
+      ns.Ledger:Seal({
+        onProgress = function(phase, idx, total, key)
+          if phase == "flush" then
+            print(string.format("  flushing archive %s (%d / %d)", key or "?", idx, total))
+          end
+        end,
+        onComplete = function(sealed, archivesWritten)
+          print(string.format("|cff80ff80Tally:|r sealed %d rows into %d archives. Logout will save the slimmed active set.",
+            sealed, archivesWritten))
+          MainFrame:UpdateHeaderNudge()
+          MainFrame:RefreshActivePage()
+        end,
+      })
+    end
+    StaticPopup_Show("TALLY_SEAL_CONFIRM_HEADER",
+      preview.sealCount,
+      date("%Y-%m-%d", preview.cutTime or time()),
+      preview.keepCount)
+  end)
 
   -- Refresh active page on resize (CreateThemedMainFrame's grip persists
   -- geometry on drag-stop; we add the live-throttled refresh on top).
@@ -171,6 +234,42 @@ local function buildTabPanel()
   return tabPanel
 end
 
+-- Compute the soft-cap state and show/hide the header nudge banner
+-- accordingly. Re-anchors the tab panel below the banner when shown.
+local function updateHeaderNudge()
+  if not (frame and headerNudge) then return end
+  if not (ns.Ledger and ns.Ledger.SealPreview) then
+    headerNudge:Hide()
+    return
+  end
+
+  local ok, preview = pcall(ns.Ledger.SealPreview, ns.Ledger)
+  if not ok or not preview or preview.sealCount == 0 then
+    headerNudge:Hide()
+    if tabPanel then
+      tabPanel:ClearAllPoints()
+      tabPanel:SetPoint("TOPLEFT",     frame.content, "TOPLEFT",     8, -2)
+      tabPanel:SetPoint("BOTTOMRIGHT", frame.content, "BOTTOMRIGHT", -8, 2)
+    end
+    return
+  end
+
+  headerNudge.text:SetText(string.format(
+    "|cffffe080Sealing recommended:|r %d rows older than %s waiting to archive.",
+    preview.sealCount, date("%Y-%m-%d", preview.cutTime or time())))
+  headerNudge:Show()
+
+  if tabPanel then
+    tabPanel:ClearAllPoints()
+    tabPanel:SetPoint("TOPLEFT",     headerNudge,   "BOTTOMLEFT",  -8, -4)
+    tabPanel:SetPoint("BOTTOMRIGHT", frame.content, "BOTTOMRIGHT", -8,  2)
+  end
+end
+
+function MainFrame:UpdateHeaderNudge()
+  updateHeaderNudge()
+end
+
 -- ============================================================================
 -- Public API
 -- ============================================================================
@@ -182,6 +281,7 @@ end
 function MainFrame:Show()
   build()
   buildTabPanel()
+  updateHeaderNudge()
   frame:Show()
 end
 

@@ -1320,6 +1320,70 @@ if Cogworks and Cogworks.RegisterSlashCommands then
         end,
       },
       {
+        name = "seal",
+        args = "[preview|confirm]",
+        help = "Move ledger rows older than 60 days into monthly archives",
+        run = function(rest)
+          if not (ns.Ledger and ns.Ledger.Seal) then
+            print("|cffff4040Tally:|r seal unavailable.")
+            return
+          end
+          if ns.Ledger:IsMigrationRunning() then
+            print("|cffffe080Tally:|r migration in progress — wait for it to finish before sealing.")
+            return
+          end
+          if ns.Ledger:IsSealRunning() then
+            print("|cffffe080Tally:|r seal already running.")
+            return
+          end
+
+          local sub = rest and rest:lower() or ""
+          local preview = ns.Ledger:SealPreview()
+
+          if sub == "preview" or (sub ~= "confirm" and preview.sealCount > 5000) then
+            print(string.format(
+              "|cff7fbfffTally seal preview:|r %d active rows  →  keep %d, archive %d",
+              preview.activeCount, preview.keepCount, preview.sealCount))
+            if preview.cutTime then
+              print(string.format("  Cut: rows older than %s; max active rows %d.",
+                date("%Y-%m-%d", preview.cutTime), preview.maxRows))
+            end
+            if sub ~= "preview" then
+              print("|cffffe080Tally:|r large cut — run |cff7fbfff/tally seal confirm|r to proceed.")
+            end
+            return
+          end
+
+          if preview.sealCount == 0 then
+            print("|cff7fbfffTally:|r nothing to seal — active set is within the soft cap.")
+            return
+          end
+
+          print(string.format("|cff7fbfffTally:|r sealing %d rows into archives…", preview.sealCount))
+          ns.Ledger:Seal({
+            onProgress = function(phase, idx, total, key)
+              if phase == "bucket" and total > 0 and idx % 5000 == 0 then
+                print(string.format("  bucketing %d / %d", idx, total))
+              elseif phase == "flush" then
+                print(string.format("  flushing archive %s (%d / %d)", key or "?", idx, total))
+              end
+            end,
+            onComplete = function(sealed, archivesWritten)
+              print(string.format("|cff80ff80Tally:|r sealed %d rows into %d archives. Logout will save the slimmed active set.",
+                sealed, archivesWritten))
+              if ns.UI and ns.UI.MainFrame then
+                if ns.UI.MainFrame.UpdateHeaderNudge then
+                  pcall(ns.UI.MainFrame.UpdateHeaderNudge, ns.UI.MainFrame)
+                end
+                if ns.UI.MainFrame.RefreshActivePage then
+                  pcall(ns.UI.MainFrame.RefreshActivePage, ns.UI.MainFrame)
+                end
+              end
+            end,
+          })
+        end,
+      },
+      {
         name = "diag", aliases = { "diagnostic" },
         args = "[divergence|chat]",
         -- TLY-45 + alpha10 debug-UX: default opens the structured copy

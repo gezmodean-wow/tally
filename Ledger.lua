@@ -1455,6 +1455,204 @@ function Ledger:StartMigration(opts)
 end
 
 -- ============================================================================
+-- Seal (TLY-51): cut old rows out of active into archives
+-- ============================================================================
+--
+-- Seal is the user-driven mechanism for shrinking the active set when
+-- it exceeds the soft cap. Walks active.entries, partitions into rows
+-- to keep (current-month + ≤maxRows newest) vs rows to archive (older
+-- than cutTime), then routes the archive-bound rows through _staging
+-- and FlushStaging into monthly archive blobs. The kept rows replace
+-- active.entries.
+--
+-- Defaults match the spec's soft cap: cutTime = now - 60d, maxRows =
+-- 25,000. Both can be overridden via opts (the test harness uses
+-- aggressive cuts).
+--
+-- Seal is chunked because the bucket phase + the per-archive
+-- serialise/compress add up on ledgers of the size testers are
+-- hitting. Phase order:
+--   1. Plan (sync)        — partition active into keep + seal lists.
+--   2. Bucket (chunked)   — route seal list into _staging by month.
+--   3. Apply (sync)       — swap active.entries to keep list, rebuild byId.
+--   4. Flush (chunked)    — FlushStaging writes archives, merging with
+--                            any pre-existing archive at each key.
+-- onComplete(sealedRows, archivesWritten) fires after Flush completes.
+
+local _seal = nil  -- in-flight seal state
+
+local sealStep
+sealStep = function()
+  if not _seal then return end
+  local m = _seal
+  local active = db()
+
+  if m.phase == "bucket" then
+    local stop = math.min(m.bucketIdx + m.chunkSize, m.bucketTotal)
+    while m.bucketIdx < stop do
+      m.bucketIdx = m.bucketIdx + 1
+      local e = m.toSeal[m.bucketIdx]
+      if e and e.id then
+        local mkey = (e.atTime and date("%Y-%m", e.atTime)) or "unknown"
+        local bucket = _staging[mkey]
+        if not bucket then
+          bucket = { entries = {}, byId = {} }
+          _staging[mkey] = bucket
+        end
+        if not bucket.byId[e.id] then
+          bucket.byId[e.id] = true
+          bucket.entries[#bucket.entries + 1] = e
+        end
+      end
+    end
+    if m.opts.onProgress then
+      pcall(m.opts.onProgress, "bucket", m.bucketIdx, m.bucketTotal)
+    end
+
+    if m.bucketIdx < m.bucketTotal then
+      if C_Timer and C_Timer.After then
+        C_Timer.After(m.delaySec, sealStep)
+      else
+        sealStep()
+      end
+      return
+    end
+
+    -- Bucket phase done — apply toKeep to active synchronously, then
+    -- enter flush phase via FlushStaging.
+    local newById = {}
+    for _, e in ipairs(m.toKeep) do
+      if e.id then newById[e.id] = true end
+    end
+    active.entries = m.toKeep
+    active.byId    = newById
+    _dirty = true
+    invalidateReconcileCache()
+
+    m.phase = "flush"
+    Ledger:FlushStaging({
+      delaySec = m.delaySec,
+      onProgress = function(idx, total, key, mergedRowCount)
+        if m.opts.onProgress then
+          pcall(m.opts.onProgress, "flush", idx, total, key)
+        end
+      end,
+      onComplete = function(archivesWritten, rowsArchived)
+        local sealed = m.bucketTotal
+        local opts = m.opts
+        _seal = nil
+        if opts.onComplete then
+          pcall(opts.onComplete, sealed, archivesWritten)
+        end
+      end,
+    })
+  end
+end
+
+-- Predict the cut without actually performing it. UI surfaces use this
+-- to show "Seal will archive 12,440 rows from before 2025-12-15" before
+-- the user clicks confirm.
+function Ledger:SealPreview(opts)
+  if not _loaded then loadFromDisk() end
+  opts = opts or {}
+  local now = time()
+  local cutTime = opts.cutTime or (now - 60 * 86400)
+  local maxRows = opts.maxRows or 25000
+
+  local active = db()
+  local keepCount, sealCount = 0, 0
+  for _, e in ipairs(active.entries) do
+    if (e.atTime or 0) >= cutTime then
+      keepCount = keepCount + 1
+    else
+      sealCount = sealCount + 1
+    end
+  end
+  if keepCount > maxRows then
+    sealCount = sealCount + (keepCount - maxRows)
+    keepCount = maxRows
+  end
+  return {
+    activeCount = #active.entries,
+    keepCount   = keepCount,
+    sealCount   = sealCount,
+    cutTime     = cutTime,
+    maxRows     = maxRows,
+  }
+end
+
+function Ledger:IsSealRunning()
+  return _seal ~= nil
+end
+
+-- Run a seal pass. Returns (true) on start, (false, reason) on error
+-- (already running, migration in progress, library missing, etc.).
+--
+-- opts:
+--   cutTime      epoch — rows older than this go to archives. Default now-60d.
+--   maxRows      cap on active size. Default 25000.
+--   chunkSize    rows per bucket-phase tick (default 500)
+--   delaySec     pause between ticks (default 0.05)
+--   onPlan       function(keepCount, sealCount) — fires once after the plan phase
+--   onProgress   function(phase, idx, total, key)
+--                  phase = "bucket" — idx/total over rows being routed
+--                  phase = "flush"  — idx/total over archives being written
+--   onComplete   function(sealedRows, archivesWritten)
+function Ledger:Seal(opts)
+  if _seal then return false, "seal already in progress" end
+  if self:IsMigrationRunning() then return false, "migration in progress" end
+  if not (LibSerialize and LibDeflate) then return false, "compression libs unavailable" end
+  opts = opts or {}
+
+  local now = time()
+  local cutTime = opts.cutTime or (now - 60 * 86400)
+  local maxRows = opts.maxRows or 25000
+
+  local active = db()
+
+  -- Plan phase: partition active.entries into keep + seal.
+  local toKeep, toSeal = {}, {}
+  for _, e in ipairs(active.entries) do
+    if (e.atTime or 0) >= cutTime then
+      toKeep[#toKeep + 1] = e
+    else
+      toSeal[#toSeal + 1] = e
+    end
+  end
+
+  -- Apply maxRows cap by trimming oldest from toKeep into toSeal.
+  if #toKeep > maxRows then
+    table.sort(toKeep, function(a, b) return (a.atTime or 0) > (b.atTime or 0) end)
+    for i = maxRows + 1, #toKeep do
+      toSeal[#toSeal + 1] = toKeep[i]
+    end
+    for i = #toKeep, maxRows + 1, -1 do
+      toKeep[i] = nil
+    end
+  end
+
+  if opts.onPlan then pcall(opts.onPlan, #toKeep, #toSeal) end
+
+  if #toSeal == 0 then
+    if opts.onComplete then pcall(opts.onComplete, 0, 0) end
+    return true
+  end
+
+  _seal = {
+    phase       = "bucket",
+    toKeep      = toKeep,
+    toSeal      = toSeal,
+    bucketIdx   = 0,
+    bucketTotal = #toSeal,
+    chunkSize   = opts.chunkSize or 500,
+    delaySec    = opts.delaySec or 0.05,
+    opts        = opts,
+  }
+  sealStep()
+  return true
+end
+
+-- ============================================================================
 -- Insert
 -- ============================================================================
 --
