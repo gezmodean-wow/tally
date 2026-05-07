@@ -24,6 +24,7 @@ Pricing/Sources.lua
 Inventory/Ownership.lua
 NetWorth/Calculator.lua
 History.lua
+Archive.lua
 Ledger.lua
 Sources/Native.lua
 Sources/Native/AHInvoice.lua
