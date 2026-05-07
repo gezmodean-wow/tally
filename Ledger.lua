@@ -1094,22 +1094,26 @@ local function loadFromDisk()
     return
   end
 
-  -- Migration 1: alpha14/15 single-blob. Promote into active; mark dirty
-  -- so the next save lands the new shape. Retain L.blob on disk until the
-  -- first new-shape save completes (SaveToDisk clears the legacy fields).
+  -- Migration 1: alpha14/15 single-blob. Deserialise into a pending
+  -- migration buffer rather than active — Ledger:StartMigration walks
+  -- the buffer in chunks and routes each row by date. Active stays empty
+  -- until current-month rows route in; legacy blob retained on disk
+  -- until migration completes (mid-migration crash restarts cleanly
+  -- because the legacy blob is the only ground truth until then).
   if L.blob then
     local decompressed = LibDeflate:DecompressDeflate(L.blob)
     if decompressed then
       local ok, payload = LibSerialize:Deserialize(decompressed)
       if ok and type(payload) == "table" then
         _workingMem = {
-          active = {
+          active = { entries = {}, byId = {} },
+          pendingMigration = {
             entries = payload.entries or {},
             byId    = payload.byId or {},
           },
         }
         _loaded = true
-        _dirty = true
+        _dirty = false
         return
       end
     end
@@ -1120,16 +1124,17 @@ local function loadFromDisk()
     return
   end
 
-  -- Migration 2: pre-alpha14 raw entries.
+  -- Migration 2: pre-alpha14 raw entries — same pending-migration path.
   if L.entries then
     _workingMem = {
-      active = {
+      active = { entries = {}, byId = {} },
+      pendingMigration = {
         entries = L.entries,
         byId    = L.byId or {},
       },
     }
     _loaded = true
-    _dirty = true
+    _dirty = false
     return
   end
 
@@ -1159,6 +1164,15 @@ function Ledger:SaveToDisk()
   if not _loaded then return end
   if not _dirty then return end
   if not (LibSerialize and LibDeflate) then return end
+
+  -- Mid-migration: don't save active and don't clear the legacy blob.
+  -- The active set during migration is partial; if we persisted it
+  -- alongside legacy, a crash would leave both populated and the next
+  -- login would re-route already-routed rows. Skipping the save means
+  -- mid-migration logout/crash restarts the migration cleanly from the
+  -- legacy blob, losing only any native events captured in the partial
+  -- active during this session (small window, typically minutes).
+  if _workingMem.pendingMigration then return end
 
   local startMs = (debugprofilestop and debugprofilestop()) or 0
 
@@ -1214,6 +1228,9 @@ function Ledger:StorageInfo()
     cacheCap   = ns.Archive:CacheCap()
   end
 
+  local pendingRows = (_workingMem and _workingMem.pendingMigration
+                       and #_workingMem.pendingMigration.entries) or 0
+
   return {
     libsAvailable    = (LibSerialize and LibDeflate) and true or false,
     loaded           = _loaded,
@@ -1232,12 +1249,194 @@ function Ledger:StorageInfo()
     totalRows        = activeRows + archiveRows,
     cachedArchives   = cachedKeys,
     cacheCap         = cacheCap,
+    pendingMigration = pendingRows > 0,
+    pendingRows      = pendingRows,
     -- Back-compat aliases for callers still using the pre-TLY-51 names:
     blobBytes        = meta and meta.bytes or 0,
     blobCount        = meta and meta.count or 0,
     blobSavedAt      = meta and meta.savedAt or nil,
     legacyPresent    = (L.entries or L.blob) and true or false,
   }
+end
+
+-- ============================================================================
+-- Migration (TLY-51): legacy single-blob → tiered active + archives
+-- ============================================================================
+--
+-- alpha14/15 single-blob users land in loadFromDisk with their entries
+-- in `_workingMem.pendingMigration` instead of active. The migration
+-- pass walks the buffer in chunks and routes each entry by date —
+-- current month → active, prior months → in-memory staging buckets.
+-- After all rows are routed the staging buckets are flushed one at a
+-- time to Archive:Save. Once everything is on disk in the new shape,
+-- the next SaveToDisk clears the legacy blob.
+--
+-- Crash safety: SaveToDisk skips writing while a pendingMigration
+-- buffer is present, so if the user logs out mid-pass the on-disk
+-- state stays "legacy blob, no new active blob, possibly some
+-- archives". The legacy blob is the ground truth on next login —
+-- the partial archives get overwritten when their months are
+-- re-flushed from the re-deserialised legacy blob.
+--
+-- The chunked walk uses the same C_Timer.After / 50ms slice / 500-row
+-- pattern as InsertManyChunked so the input thread stays responsive
+-- through the multi-second routing pass on large legacy ledgers.
+
+local _migration = nil  -- in-flight migration state, see StartMigration
+
+-- Floor `time()` to the first second of the current calendar month
+-- (local time). Rows ≥ this go into active; older rows route to
+-- monthly staging buckets keyed on `os.date("%Y-%m", e.atTime)`.
+local function migrationCurrentMonthStart()
+  local t = time()
+  local d = date("*t", t)
+  return time({ year = d.year, month = d.month, day = 1, hour = 0, min = 0, sec = 0 })
+end
+
+local migrationStep
+migrationStep = function()
+  if not _migration then return end
+  local m = _migration
+
+  -- Phase 2: flush staging buckets one per tick. Each Archive:Save is
+  -- a serialise + compress + write call; spreading them across timer
+  -- ticks lets the input thread breathe between ~30k-row buckets.
+  if not _workingMem.pendingMigration then
+    if m.flushIdx < #m.flushKeys then
+      m.flushIdx = m.flushIdx + 1
+      local key = m.flushKeys[m.flushIdx]
+      local bucket = m.staging[key]
+      if bucket and ns.Archive then
+        ns.Archive:Save(key, bucket.entries, { byId = bucket.byId })
+      end
+      m.staging[key] = nil  -- free bucket memory once written
+      invalidateReconcileCache()  -- new archive on disk affects "all"/"<n>m" queries
+      if m.opts.onProgress then
+        pcall(m.opts.onProgress, "flush", m.flushIdx, #m.flushKeys, key)
+      end
+      if C_Timer and C_Timer.After then
+        C_Timer.After(m.delaySec, migrationStep)
+      else
+        migrationStep()
+      end
+      return
+    end
+
+    -- All buckets flushed. Migration complete.
+    local activeRows = #_workingMem.active.entries
+    local archiveCount = #m.flushKeys
+    local archiveRows = m.archiveRowCount or 0
+    _migration = nil
+    _dirty = true
+    invalidateReconcileCache()
+    if m.opts.onComplete then
+      pcall(m.opts.onComplete, activeRows, archiveCount, archiveRows)
+    end
+    return
+  end
+
+  -- Phase 1: route entries. Pull a chunk from pendingMigration.entries,
+  -- decide active vs staging[month] for each, append.
+  local pending = _workingMem.pendingMigration
+  local active = _workingMem.active
+  local stop = math.min(m.idx + m.chunkSize, m.total)
+  while m.idx < stop do
+    m.idx = m.idx + 1
+    local e = pending.entries[m.idx]
+    if e and e.id then
+      if (e.atTime or 0) >= m.currentMonthStart or not e.atTime then
+        if not active.byId[e.id] then
+          active.byId[e.id] = true
+          active.entries[#active.entries + 1] = e
+        end
+      else
+        local mkey = date("%Y-%m", e.atTime)
+        local bucket = m.staging[mkey]
+        if not bucket then
+          bucket = { entries = {}, byId = {} }
+          m.staging[mkey] = bucket
+        end
+        if not bucket.byId[e.id] then
+          bucket.byId[e.id] = true
+          bucket.entries[#bucket.entries + 1] = e
+        end
+      end
+    end
+  end
+
+  -- Per-chunk cache invalidation so any in-session UI refresh sees the
+  -- routed rows (active grew, possibly archives gain entries on flush).
+  invalidateReconcileCache()
+  if m.opts.onProgress then
+    pcall(m.opts.onProgress, "route", m.idx, m.total)
+  end
+
+  if m.idx >= m.total then
+    -- Routing done. Discard pending buffer (it's all routed now) and
+    -- prep the flush list. Sort keys ascending so flushes land in
+    -- chronological order — useful for both UI progress feel and the
+    -- archiveIndex's sort-stable iteration.
+    _workingMem.pendingMigration = nil
+    m.flushKeys = {}
+    m.archiveRowCount = 0
+    for k, bucket in pairs(m.staging) do
+      m.flushKeys[#m.flushKeys + 1] = k
+      m.archiveRowCount = m.archiveRowCount + #bucket.entries
+    end
+    table.sort(m.flushKeys)
+    m.flushIdx = 0
+  end
+
+  if C_Timer and C_Timer.After then
+    C_Timer.After(m.delaySec, migrationStep)
+  else
+    migrationStep()
+  end
+end
+
+-- True between the loadFromDisk that detected a legacy blob and the
+-- final flush of all staging buckets. UI surfaces use this to show a
+-- "migration in progress" footer; Core's PLAYER_LOGIN handler kicks
+-- StartMigration when this is true.
+function Ledger:IsMigrationPending()
+  if not _loaded then loadFromDisk() end
+  return (_workingMem and _workingMem.pendingMigration and
+          #_workingMem.pendingMigration.entries > 0) and true or false
+end
+
+function Ledger:IsMigrationRunning()
+  return _migration ~= nil
+end
+
+-- Kick off the chunked migration pass. Idempotent — second call while
+-- a migration is already running is a no-op. Returns true if a pass
+-- was started (or one was already running).
+--
+-- opts:
+--   chunkSize    rows per timer tick (default 500)
+--   delaySec     pause between ticks (default 0.05)
+--   onProgress   function(phase, idx, total, key)
+--                  phase = "route" — idx/total over pendingMigration
+--                  phase = "flush" — idx/total over staging buckets, key set
+--   onComplete   function(activeRows, archiveCount, archiveRows)
+function Ledger:StartMigration(opts)
+  if not _loaded then loadFromDisk() end
+  if not (_workingMem and _workingMem.pendingMigration) then return false end
+  if _migration then return true end
+  opts = opts or {}
+  _migration = {
+    idx       = 0,
+    total     = #_workingMem.pendingMigration.entries,
+    chunkSize = opts.chunkSize or 500,
+    delaySec  = opts.delaySec or 0.05,
+    currentMonthStart = migrationCurrentMonthStart(),
+    staging   = {},
+    flushKeys = {},
+    flushIdx  = 0,
+    opts      = opts,
+  }
+  migrationStep()
+  return true
 end
 
 -- ============================================================================
@@ -1973,13 +2172,19 @@ function Ledger:ClearSource(sourceName)
   return removed
 end
 
--- Total row count across active + archives. Archive counts come from
--- the archive metadata (no blob loads required).
+-- Total row count across active + archives + any pending-migration
+-- buffer. Archive counts come from the metadata (no blob loads). The
+-- pending-migration term keeps the grandfather check (Core's
+-- PLAYER_LOGIN) accurate for users mid-upgrade — their data is real,
+-- it just hasn't been routed into the new shape yet.
 function Ledger:Count()
   local total = #db().entries
   TallyDB = TallyDB or {}
   local archives = TallyDB.ledger and TallyDB.ledger.archives or {}
   for _, rec in pairs(archives) do total = total + (rec.count or 0) end
+  if _workingMem and _workingMem.pendingMigration then
+    total = total + #_workingMem.pendingMigration.entries
+  end
   return total
 end
 

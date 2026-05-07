@@ -129,6 +129,30 @@ function ns:PLAYER_LOGIN()
     TallyDB.setup.completedAt = TallyDB.setup.completedAt or time()
   end
 
+  -- Auto-start the legacy-blob → tiered-storage migration if loadFromDisk
+  -- detected one. Chunked C_Timer pass; chat-line progress until the UI
+  -- toast wires up. SaveToDisk skips writes during the pass so a
+  -- mid-migration logout restarts cleanly from the legacy blob on next
+  -- login.
+  if ns.Ledger and ns.Ledger.IsMigrationPending and ns.Ledger:IsMigrationPending() then
+    print("|cffffe080Tally:|r Migrating ledger to tiered storage. Your client stays responsive — this runs in the background.")
+    ns.Ledger:StartMigration({
+      onProgress = function(phase, idx, total, key)
+        if phase == "route" and total > 0 and idx % 10000 == 0 then
+          print(string.format("|cff80a0ffTally:|r migration routing %d / %d (%d%%)",
+            idx, total, math.floor(100 * idx / total)))
+        elseif phase == "flush" then
+          print(string.format("|cff80a0ffTally:|r migration flushing archive %s (%d / %d)",
+            key or "?", idx, total))
+        end
+      end,
+      onComplete = function(activeRows, archiveCount, archiveRows)
+        print(string.format("|cff80ff80Tally:|r migration complete — %d active rows, %d archives, %d archived rows. The new shape saves on logout.",
+          activeRows, archiveCount, archiveRows))
+      end,
+    })
+  end
+
   -- TLY-21: defer the initial sibling-source backfill 5s after login so
   -- character-select / first-zone-load isn't fighting a multi-MB TSM CSV
   -- parse for the player's input thread. Native source is event-driven
@@ -137,9 +161,14 @@ function ns:PLAYER_LOGIN()
   -- TLY-25: gated on the setup-complete flag. Fresh installs and
   -- post-reset users see the wizard first; nothing flows into the
   -- ledger until they finish it.
+  --
+  -- Skipped while a migration is running so backfill doesn't race the
+  -- chunked legacy-blob walk. The migration's onComplete is the natural
+  -- moment to retry, but in practice native events keep flowing during
+  -- migration and the next login fires the deferred backfill cleanly.
   if ns.Ledger and ns.Ledger.ImportFromAllSources and C_Timer and C_Timer.After then
     C_Timer.After(5, function()
-      if ns.Ledger:IsSetupComplete() then
+      if ns.Ledger:IsSetupComplete() and not ns.Ledger:IsMigrationRunning() then
         ns.Ledger:ImportFromAllSources()
       end
     end)
@@ -706,6 +735,9 @@ local function diagPrintChat()
       st.dirty and "yes" or "no",
       st.schemaVer or 0,
       st.legacyPresent and " |cffffa050[legacy blob still on disk]|r" or ""))
+    if st.pendingMigration then
+      print(string.format("  |cffffe080Migration pending:|r %d rows in pendingMigration buffer", st.pendingRows or 0))
+    end
     print(string.format("  Active: %d rows, %d bytes", st.activeRows or 0, st.activeBytes or 0))
     if st.activeSavedAt and st.activeSavedAt > 0 then
       print(string.format("    saved %s  (serialise %dms + compress %dms; serialised %d bytes)",
