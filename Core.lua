@@ -65,10 +65,10 @@ frame:SetScript("OnEvent", function(_, event, ...)
   if handler then handler(ns, ...) end
 end)
 
--- TLY-49: PLAYER_LOGOUT is the canonical "save the working memory back
--- to disk" point. WoW writes SavedVariables after every addon's
--- PLAYER_LOGOUT handler returns, so this is our chance to compress the
--- in-memory ledger into TallyDB.ledger.blob before WoW persists it.
+-- PLAYER_LOGOUT is the canonical "save the working memory back to disk"
+-- point. WoW writes SavedVariables after every addon's PLAYER_LOGOUT
+-- handler returns, so this is our chance to serialise the active set
+-- before WoW persists the SV chunk.
 function ns:PLAYER_LOGOUT()
   if ns.Ledger and ns.Ledger.SaveToDisk then
     pcall(ns.Ledger.SaveToDisk, ns.Ledger)
@@ -118,11 +118,9 @@ function ns:PLAYER_LOGIN()
   -- just-reset user on their next login as a returning upgrader and
   -- silently re-opened the gate. Ledger rows survive nothing except a
   -- legitimate prior Tally session.
-  -- TLY-49: ledger storage moved from a raw entries[] array to a
-  -- compressed blob, so probe via Ledger:Count() instead of
-  -- TallyDB.ledger.entries directly. Count triggers the lazy load,
-  -- which also performs the legacy-entries → blob migration if
-  -- this is the first session on the new code.
+  -- Probe via Ledger:Count() so the lazy-load path (and any pending
+  -- storage-shape migration) runs as a side effect — the count is the
+  -- same value either way.
   if ns.Ledger and ns.Ledger.Count and ns.Ledger:Count() > 0
      and not (TallyDB.setup and TallyDB.setup.completed) then
     TallyDB.setup = TallyDB.setup or {}
@@ -519,10 +517,10 @@ local function inspectLedger()
   return { rowCount = stats.count, bySource = stats.bySource }
 end
 
--- TLY-49: blob storage inspector. Confirms LibSerialize + LibDeflate
--- loaded, lazy-load completed, dirty state, and (after first save) the
--- on-disk compressed blob's size — testers comparing pre/post should
--- see blobBytes shrink dramatically vs the legacy raw-table footprint.
+-- Storage inspector. Surfaces the tiered active set + archive cohort:
+-- LibSerialize + LibDeflate availability, lazy-load + dirty state,
+-- active row count + on-disk active blob size, archive count + total
+-- archive bytes, and the LRU cache state.
 local function inspectStorage()
   if not (ns.Ledger and ns.Ledger.StorageInfo) then return nil end
   return ns.Ledger:StorageInfo()
@@ -702,19 +700,28 @@ local function diagPrintChat()
   local st = inspectStorage()
   if st then
     print(string.format(
-      "Storage: libs=%s loaded=%s dirty=%s mem=%d entries  blob=%d bytes (%d entries)%s",
+      "Storage: libs=%s loaded=%s dirty=%s schema=v%d%s",
       st.libsAvailable and "yes" or "|cffff8080NO|r",
       st.loaded and "yes" or "no",
       st.dirty and "yes" or "no",
-      st.inMemoryCount,
-      st.blobBytes,
-      st.blobCount,
-      st.legacyPresent and " |cffffa050[legacy entries still on disk]|r" or ""))
-    if st.blobSavedAt and st.blobSavedAt > 0 then
-      print(string.format("  blob last saved: %s  (serialise %dms + compress %dms; serialised %d bytes)",
-        date("%Y-%m-%d %H:%M:%S", st.blobSavedAt),
+      st.schemaVer or 0,
+      st.legacyPresent and " |cffffa050[legacy blob still on disk]|r" or ""))
+    print(string.format("  Active: %d rows, %d bytes", st.activeRows or 0, st.activeBytes or 0))
+    if st.activeSavedAt and st.activeSavedAt > 0 then
+      print(string.format("    saved %s  (serialise %dms + compress %dms; serialised %d bytes)",
+        date("%Y-%m-%d %H:%M:%S", st.activeSavedAt),
         st.serialiseMs or 0, st.compressMs or 0, st.serialisedBytes or 0))
     end
+    if (st.archiveCount or 0) > 0 then
+      print(string.format("  Archives: %d archives, %d rows, %d bytes",
+        st.archiveCount, st.archiveRows or 0, st.archiveBytes or 0))
+      local cached = st.cachedArchives or {}
+      if #cached > 0 then
+        print(string.format("    Cache: %d/%d loaded — %s",
+          #cached, st.cacheCap or 3, table.concat(cached, ", ")))
+      end
+    end
+    print(string.format("  Total rows: %d (active + archives)", st.totalRows or st.activeRows or 0))
   end
 
   local sk = inspectSkipCounters()

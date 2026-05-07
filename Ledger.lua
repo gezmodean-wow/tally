@@ -952,81 +952,137 @@ function Ledger:DivergenceReport(filter)
 end
 
 -- ============================================================================
--- Storage (TLY-49: compressed blob)
+-- Storage (TLY-49 compressed blob, TLY-51 tiered active + archives)
 -- ============================================================================
 --
--- On disk: TallyDB.ledger.blob is a deflated LibSerialize blob containing
--- the entries array and byId set. One Lua constant in the SV chunk no
--- matter how many ledger entries it represents — so even ledgers with
--- hundreds of thousands of rows don't push the SV's constant pool past
--- Lua's per-chunk 2^18 limit (which was wholesale-failing TallyDB load on
--- big-tester accounts pre-fix; see TLY-32).
+-- On disk (TallyDB.ledger):
+--   active       = <serialised+deflated blob>          -- mutable hot path
+--   activeMeta   = { count, savedAt, bytes, serialiseMs, compressMs, ... }
+--   archives     = { ["YYYY-MM"|"YYYY-MM-wN"] = { blob, count, fromTs, toTs, bytes, schemaVer, savedAt } }
+--   archiveIndex = { ["YYYY-MM"|"YYYY-MM-wN"] = { itemIDs, charKeys, kindCounts, monthlyAggregates, ... } }
 --
--- In memory: _workingMem holds the deserialised { entries, byId }. Lazy
--- loaded on first db() call; reserialised on PLAYER_LOGOUT (or any
--- explicit Ledger:SaveToDisk()). All ledger reads/writes share one
--- _workingMem so callers continue to operate on the same table refs that
--- the pre-blob db() returned.
+-- The active set is the only mutable structure. Archives are write-once
+-- at seal time (Archive.lua) and lazy-loaded into Archive's LRU(3) cache
+-- when a query expands beyond the default `filter.window = "active"`.
+-- archiveIndex stays resident permanently — it's tiny relative to the
+-- archive blobs and lets the query layer skip whole archives without
+-- touching the compressed payload.
 --
--- Dirty tracking: Insert / InsertMany / Clear / ClearSource flip _dirty.
--- SaveToDisk early-exits if not dirty so logout doesn't pay the serialise
--- cost on read-only sessions.
+-- In memory: _workingMem holds the deserialised active { entries, byId }.
+-- Lazy loaded on first db() call; reserialised on PLAYER_LOGOUT (or any
+-- explicit Ledger:SaveToDisk()).
 --
--- Migration: pre-blob users land here with TallyDB.ledger.entries still
--- populated as a raw table. loadFromDisk detects that, treats it as the
--- working memory, and marks dirty so the next save promotes it to blob
--- form (and clears the legacy field to stop WoW from persisting it
--- through the SV chunk's overflowing constant pool). Legacy fields stay
--- on disk until the first successful save so a crash mid-migration
--- doesn't lose data.
+-- Dirty tracking: Insert / InsertMany / Clear / ClearSource / seal flip
+-- _dirty. SaveToDisk early-exits if not dirty so logout doesn't pay the
+-- serialise cost on read-only sessions. Archives are never dirty after
+-- their initial seal write — re-saving an archive happens explicitly via
+-- Archive:Save() during seal or ClearSource cleanup.
+--
+-- Migration paths handled in loadFromDisk:
+--   1. Modern shape (TallyDB.ledger.active blob present): deserialise into
+--      _workingMem.active. _dirty = false.
+--   2. alpha14/15 single-blob (TallyDB.ledger.blob): deserialise the
+--      legacy blob, promote into _workingMem.active, mark dirty so the
+--      next save lands the new shape. Legacy blob retained on disk until
+--      the first successful new-shape save (belt-and-suspenders, same
+--      pattern TLY-49 used).
+--   3. Pre-alpha14 raw entries (TallyDB.ledger.entries): same handling as
+--      legacy blob — promote into active and mark dirty.
+--
+-- Phase 1 (alpha16) loads everything into the active set even if it's
+-- 438k rows. The route-by-date migration that splits a legacy blob into
+-- active + archives is a separate Phase 1 task (TLY-51 #8); this commit
+-- is the storage-shape change only. Until that lands, alpha14/15 users
+-- get the new shape but with a fat active set.
 
 local LibSerialize = LibStub and LibStub("LibSerialize", true)
 local LibDeflate   = LibStub and LibStub("LibDeflate", true)
 
-local _workingMem  -- { entries = { ... }, byId = { ... } } once loaded
+-- Bumped when active+archive entry shape changes incompatibly. Mirrors
+-- Archive.SCHEMA_VERSION; Archive blobs are tagged with the same value.
+Ledger.SCHEMA_VERSION = 1
+
+local _workingMem  -- { active = { entries = {...}, byId = {...} } }
 local _loaded = false
 local _dirty = false
 
 local function defaultMem()
-  return { entries = {}, byId = {} }
+  return { active = { entries = {}, byId = {} } }
 end
 
 local function loadFromDisk()
   TallyDB = TallyDB or {}
   TallyDB.ledger = TallyDB.ledger or {}
+  local L = TallyDB.ledger
 
-  -- Migration: legacy entries present (no blob yet). Promote in place.
-  -- Don't clear the legacy fields here — saveToDisk does that on the
-  -- first successful save so a crash mid-migration leaves the disk copy
-  -- intact for the next session to retry.
-  if TallyDB.ledger.entries and not TallyDB.ledger.blob then
-    _workingMem = {
-      entries = TallyDB.ledger.entries,
-      byId    = TallyDB.ledger.byId or {},
-    }
+  if not (LibSerialize and LibDeflate) then
+    _workingMem = defaultMem()
     _loaded = true
-    _dirty = true
+    _dirty = false
     return
   end
 
-  -- Modern path: deserialise the blob.
-  if TallyDB.ledger.blob and LibSerialize and LibDeflate then
-    local decompressed = LibDeflate:DecompressDeflate(TallyDB.ledger.blob)
+  -- Modern (TLY-51) path: tiered active + archives.
+  if L.active then
+    local decompressed = LibDeflate:DecompressDeflate(L.active)
     if decompressed then
       local ok, payload = LibSerialize:Deserialize(decompressed)
       if ok and type(payload) == "table" then
         _workingMem = {
-          entries = payload.entries or {},
-          byId    = payload.byId or {},
+          active = {
+            entries = payload.entries or {},
+            byId    = payload.byId or {},
+          },
         }
         _loaded = true
         _dirty = false
         return
       end
     end
-    -- Blob failed to deserialise — corrupt or written by an incompatible
-    -- lib version. Warn and start fresh; user can /tally setup to backfill.
+    print("|cffff8080Tally:|r ledger active set failed to load — starting fresh. Run /tally setup to backfill from sibling sources.")
+    _workingMem = defaultMem()
+    _loaded = true
+    _dirty = false
+    return
+  end
+
+  -- Migration 1: alpha14/15 single-blob. Promote into active; mark dirty
+  -- so the next save lands the new shape. Retain L.blob on disk until the
+  -- first new-shape save completes (SaveToDisk clears the legacy fields).
+  if L.blob then
+    local decompressed = LibDeflate:DecompressDeflate(L.blob)
+    if decompressed then
+      local ok, payload = LibSerialize:Deserialize(decompressed)
+      if ok and type(payload) == "table" then
+        _workingMem = {
+          active = {
+            entries = payload.entries or {},
+            byId    = payload.byId or {},
+          },
+        }
+        _loaded = true
+        _dirty = true
+        return
+      end
+    end
     print("|cffff8080Tally:|r ledger storage failed to load — starting fresh. Run /tally setup to backfill from sibling sources.")
+    _workingMem = defaultMem()
+    _loaded = true
+    _dirty = false
+    return
+  end
+
+  -- Migration 2: pre-alpha14 raw entries.
+  if L.entries then
+    _workingMem = {
+      active = {
+        entries = L.entries,
+        byId    = L.byId or {},
+      },
+    }
+    _loaded = true
+    _dirty = true
+    return
   end
 
   _workingMem = defaultMem()
@@ -1036,22 +1092,21 @@ end
 
 local function db()
   if not _loaded then loadFromDisk() end
-  return _workingMem
+  return _workingMem.active
 end
 
--- Public: serialise + compress _workingMem and write to TallyDB.ledger.blob.
--- Called from Core.lua's PLAYER_LOGOUT handler. No-op when nothing dirty
--- so read-only sessions don't pay the cost.
+-- Public: serialise + compress _workingMem.active and write to
+-- TallyDB.ledger.active. Called from Core.lua's PLAYER_LOGOUT handler.
+-- No-op when nothing dirty so read-only sessions don't pay the cost.
 --
--- Compression level (TLY-50): LibDeflate at level 5 was costing testers
--- with big ledgers (~98k entries) multiple seconds of pure-Lua compress
--- on every logout — visible as a "stuck" UI freeze before the 20s
--- logout countdown finished. Dropped to level 1: fastest setting LibDeflate
--- offers without disabling compression entirely, ~5-10x faster than
--- level 5 on the same input. Output is ~20-30% larger but still one Lua
--- constant in the SV chunk so the constant-pool cap (the original
--- TLY-49 motivation) is unchanged. The serialise step is unavoidable
--- and is the irreducible cost; compress was the dominant tunable.
+-- Compression level (TLY-50): LibDeflate at level 1, the fastest setting.
+-- Once tiering ships (TLY-51) the active set is bounded ≤25k rows so
+-- compression cost is well within fast-compress territory at any level;
+-- level 1 gives the most headroom for future scale.
+--
+-- Archives are never re-saved by this function — they're write-once at
+-- seal time via Archive:Save(). The active blob is the only thing that
+-- gets refreshed on every logout cycle.
 function Ledger:SaveToDisk()
   if not _loaded then return end
   if not _dirty then return end
@@ -1059,7 +1114,8 @@ function Ledger:SaveToDisk()
 
   local startMs = (debugprofilestop and debugprofilestop()) or 0
 
-  local payload    = { entries = _workingMem.entries, byId = _workingMem.byId }
+  local active = _workingMem.active
+  local payload    = { entries = active.entries, byId = active.byId }
   local serialised = LibSerialize:Serialize(payload)
   local serialisedMs = (debugprofilestop and debugprofilestop()) or 0
   local compressed = LibDeflate:CompressDeflate(serialised, { level = 1 })
@@ -1067,41 +1123,72 @@ function Ledger:SaveToDisk()
 
   TallyDB = TallyDB or {}
   TallyDB.ledger = TallyDB.ledger or {}
-  TallyDB.ledger.blob = compressed
-  TallyDB.ledger.blobMeta = {
-    count             = #_workingMem.entries,
+  TallyDB.ledger.active = compressed
+  TallyDB.ledger.activeMeta = {
+    count             = #active.entries,
     savedAt           = time(),
     bytes             = #compressed,
     serialisedBytes   = #serialised,
     serialiseMs       = math.floor(serialisedMs - startMs),
     compressMs        = math.floor(compressedMs - serialisedMs),
+    schemaVer         = self.SCHEMA_VERSION,
   }
-  -- Migration completion: clear the legacy fields once the blob is
-  -- safely on disk. From here on WoW only persists blob + blobMeta.
+  -- Migration completion: clear legacy fields once the new-shape save
+  -- lands. From here on WoW persists active + activeMeta + archives only.
+  TallyDB.ledger.blob = nil
+  TallyDB.ledger.blobMeta = nil
   TallyDB.ledger.entries = nil
   TallyDB.ledger.byId    = nil
 
   _dirty = false
 end
 
--- Diagnostic surface: returns the post-load blob meta + working-memory
--- shape so /tally diag can show what storage looks like.
+-- Diagnostic surface: returns the post-load active meta + archive count
+-- + cache state so /tally diag Storage section can show what storage
+-- looks like.
 function Ledger:StorageInfo()
   if not _loaded then loadFromDisk() end
   TallyDB = TallyDB or {}
-  local meta = TallyDB.ledger and TallyDB.ledger.blobMeta or nil
+  local L = TallyDB.ledger or {}
+  local meta = L.activeMeta or L.blobMeta or nil
+  local activeRows = (_workingMem and _workingMem.active and #_workingMem.active.entries) or 0
+
+  local archiveCount, archiveBytes, archiveRows = 0, 0, 0
+  for _, rec in pairs(L.archives or {}) do
+    archiveCount = archiveCount + 1
+    archiveBytes = archiveBytes + (rec.bytes or 0)
+    archiveRows  = archiveRows + (rec.count or 0)
+  end
+
+  local cachedKeys, cacheCap = {}, 0
+  if ns.Archive then
+    cachedKeys = ns.Archive:CachedKeys()
+    cacheCap   = ns.Archive:CacheCap()
+  end
+
   return {
     libsAvailable    = (LibSerialize and LibDeflate) and true or false,
     loaded           = _loaded,
     dirty            = _dirty,
-    inMemoryCount    = _workingMem and #_workingMem.entries or 0,
-    blobBytes        = meta and meta.bytes or 0,
-    blobCount        = meta and meta.count or 0,
-    blobSavedAt      = meta and meta.savedAt or nil,
+    schemaVer        = self.SCHEMA_VERSION,
+    inMemoryCount    = activeRows,
+    activeRows       = activeRows,
+    activeBytes      = meta and meta.bytes or 0,
+    activeSavedAt    = meta and meta.savedAt or nil,
     serialisedBytes  = meta and meta.serialisedBytes or 0,
     serialiseMs      = meta and meta.serialiseMs or 0,
     compressMs       = meta and meta.compressMs or 0,
-    legacyPresent    = (TallyDB.ledger and TallyDB.ledger.entries) and true or false,
+    archiveCount     = archiveCount,
+    archiveBytes     = archiveBytes,
+    archiveRows      = archiveRows,
+    totalRows        = activeRows + archiveRows,
+    cachedArchives   = cachedKeys,
+    cacheCap         = cacheCap,
+    -- Back-compat aliases for callers still using the pre-TLY-51 names:
+    blobBytes        = meta and meta.bytes or 0,
+    blobCount        = meta and meta.count or 0,
+    blobSavedAt      = meta and meta.savedAt or nil,
+    legacyPresent    = (L.entries or L.blob) and true or false,
   }
 end
 
@@ -1159,10 +1246,67 @@ end
 -- ============================================================================
 -- Query
 -- ============================================================================
+--
+-- filter.window controls how much history the query covers:
+--   "active" (default)  — only the in-memory active set (≤25k rows / 60d)
+--   "<n>m"              — active + archives whose range overlaps the last
+--                          N months (Compare opt-in, Lifecycle drill)
+--   "all"               — active + every archive (full-history sweep;
+--                          slow path, deliberately user-triggered)
+--
+-- Pages that don't pass filter.window get the snappy default. The "all"
+-- path costs proportional to total archive row count and lazy-loads
+-- every archive blob into Archive's LRU(3) cache as it walks.
+
+-- Return the row source(s) a query should iterate. Lazy-loads any
+-- archives needed to satisfy filter.window. Active is always included;
+-- archives are appended in chronological order by key (oldest first).
+local function gatherRows(filter)
+  local d = db()
+  local window = filter.window or "active"
+  if window == "active" then return d.entries end
+
+  TallyDB = TallyDB or {}
+  TallyDB.ledger = TallyDB.ledger or {}
+  local archives = TallyDB.ledger.archives or {}
+
+  -- "<n>m" hints the lookback window for archive selection. Doesn't
+  -- override an explicit filter.atTimeFrom — that always wins.
+  local archiveFrom = filter.atTimeFrom
+  if not archiveFrom and type(window) == "string" then
+    local n = window:match("^(%d+)m$")
+    if n then archiveFrom = time() - tonumber(n) * 30 * 86400 end
+  end
+
+  -- Sort keys ascending so the concatenated list stays in roughly
+  -- chronological order (active is always newest at end).
+  local archiveKeys = {}
+  for k in pairs(archives) do archiveKeys[#archiveKeys + 1] = k end
+  table.sort(archiveKeys)
+
+  local rows = {}
+  for _, key in ipairs(archiveKeys) do
+    local meta = archives[key]
+    local skip = false
+    if archiveFrom and meta.toTs and meta.toTs < archiveFrom then skip = true end
+    if filter.atTimeTo and meta.fromTs and meta.fromTs > filter.atTimeTo then skip = true end
+    if not skip and ns.Archive then
+      local archive = ns.Archive:Load(key)
+      if archive and archive.entries then
+        for i = 1, #archive.entries do rows[#rows + 1] = archive.entries[i] end
+      end
+    end
+  end
+
+  -- Active set is appended last so newest-first sorts at the UI layer
+  -- pull from the most recently accumulated rows first.
+  for i = 1, #d.entries do rows[#rows + 1] = d.entries[i] end
+  return rows
+end
 
 -- filter: optional table with any combination of:
 --   kind, kinds (list), itemID, itemKey, charKey, source,
---   atTimeFrom, atTimeTo
+--   atTimeFrom, atTimeTo, window ("active" | "<n>m" | "all")
 -- Returns a list of matching entries (refs into storage; do not mutate).
 function Ledger:Query(filter)
   filter = filter or {}
@@ -1173,7 +1317,7 @@ function Ledger:Query(filter)
   end
 
   local out = {}
-  for _, e in ipairs(db().entries) do
+  for _, e in ipairs(gatherRows(filter)) do
     local ok = true
     if filter.kind and e.kind ~= filter.kind then ok = false end
     if ok and kindSet and not kindSet[e.kind] then ok = false end
@@ -1706,17 +1850,23 @@ end
 -- Maintenance
 -- ============================================================================
 
--- Wipe all entries. Sources can be re-imported afterward.
+-- Wipe all entries — active set, every archive, and the archive index.
+-- Sources can be re-imported afterward via /tally setup.
 function Ledger:Clear()
   TallyDB = TallyDB or {}
-  TallyDB.ledger = { blob = nil, blobMeta = nil, entries = nil, byId = nil }
+  TallyDB.ledger = {}  -- drop active blob + activeMeta + archives + archiveIndex
   _workingMem = defaultMem()
   _loaded = true
   _dirty = true
+  if ns.Archive then ns.Archive:UnloadAll() end
 end
 
--- Drop entries from a specific source. Useful when an adapter changes its
--- id scheme and we need to re-import cleanly.
+-- Drop entries from a specific source across active + every archive.
+-- Useful when an adapter changes its id scheme and we need to re-import
+-- cleanly. Synchronous walk over archives is acceptable because this
+-- is rarely-fired admin maintenance, but the cost scales with total
+-- archive count — a future optimisation could defer archive rewrites
+-- to the next seal cycle. Returns the number of entries removed.
 function Ledger:ClearSource(sourceName)
   local d = db()
   local kept = {}
@@ -1731,10 +1881,43 @@ function Ledger:ClearSource(sourceName)
   end
   d.entries = kept
   if removed > 0 then _dirty = true end
+
+  if ns.Archive then
+    for _, key in ipairs(ns.Archive:List()) do
+      local archive = ns.Archive:Load(key)
+      if archive and archive.entries then
+        local archiveKept = {}
+        local archiveRemoved = 0
+        for _, e in ipairs(archive.entries) do
+          if e.source == sourceName then
+            archiveRemoved = archiveRemoved + 1
+          else
+            archiveKept[#archiveKept + 1] = e
+          end
+        end
+        if archiveRemoved > 0 then
+          if #archiveKept == 0 then
+            ns.Archive:Delete(key)
+          else
+            ns.Archive:Save(key, archiveKept)
+          end
+          removed = removed + archiveRemoved
+        end
+      end
+    end
+  end
+
+  return removed
 end
 
+-- Total row count across active + archives. Archive counts come from
+-- the archive metadata (no blob loads required).
 function Ledger:Count()
-  return #db().entries
+  local total = #db().entries
+  TallyDB = TallyDB or {}
+  local archives = TallyDB.ledger and TallyDB.ledger.archives or {}
+  for _, rec in pairs(archives) do total = total + (rec.count or 0) end
+  return total
 end
 
 -- ============================================================================
