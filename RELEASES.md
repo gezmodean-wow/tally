@@ -8,6 +8,61 @@ The engineering-detail companion lives in `CHANGELOG.md` (commit-readerese — f
 
 ## Unreleased
 
+The big structural overhaul to how Tally stores its ledger. Players with very large transaction histories — hundreds of thousands of rows accumulated across years of trading — were hitting a freeze every time they switched tabs in Tally's main window. This release fixes that for good by splitting the ledger into a small "active" set (the recent stuff every screen normally cares about) plus monthly archive blobs that load on demand only when you ask for long-form history. Day-to-day Tally feels snappy regardless of how much history you've accumulated; the deep-dive views still get the full picture when you ask for it.
+
+### Tally is fast on huge histories now
+
+Pre-fix, every time you opened the Ledger tab, Settings, or switched the Compare source dropdown, Tally re-walked your entire history from scratch — a few hundred thousand rows of clustered comparison happening in pure Lua, every click. On big accounts that ran multiple seconds of UI freeze; on the largest tester accounts the client locked up entirely.
+
+This release changes the storage model: only the recent active window stays loaded at all times. Older months sit on disk as compressed archive blobs that nothing touches unless you specifically ask for full-history scope. The active window is bounded — at most ~25,000 rows, never more than 60 days back — so the per-tab clustered scan that was the freeze cause now runs against a small, predictable working set. Tab switches feel instant. Logout-time saves only re-write the active blob, so they stay fast as your archives accumulate.
+
+### How the migration works
+
+If you've been running alpha14 or alpha15, your first login on this build kicks off a one-time migration in the background. You'll see a chat line:
+
+```
+Tally: Migrating ledger to tiered storage. Your client stays responsive — this runs in the background.
+```
+
+For most accounts the migration completes in seconds. For the biggest accounts (hundreds of thousands of rows from years of TSM/Journalator/FlipQueue history) it takes a few minutes — Tally chunks the work across timer ticks so it never blocks the input thread. Progress prints to chat every 10,000 rows during the routing phase and once per archive during the flush phase. When it's done you'll see:
+
+```
+Tally: migration complete — N active rows, M archives, X archived rows. The new shape saves on logout.
+```
+
+If you log out before the migration completes, no problem — the original data stays on disk untouched, and the migration restarts cleanly on next login.
+
+### Sealing keeps the active window manageable
+
+If your active set ever exceeds the soft cap (25,000 rows or 60 days old), Tally surfaces a banner at the top of the main window: **"Sealing recommended: N rows older than ... waiting to archive."** Click it to seal — Tally moves the older rows into a monthly archive on disk and shrinks the active set back down. There's also a manual command (`/tally seal`) and a **Seal old data into archives** button under Settings → Maintenance for power users who want to control the timing.
+
+The seal operation is chunked the same way the migration is, so it never freezes the client. A confirmation dialog appears before any cut larger than 5,000 rows so you don't accidentally archive your recent activity.
+
+### Compare gains an "Include archives" opt-in
+
+The Compare tab (Source A vs Source B side-by-side diff) now defaults to comparing only the active 60-day window. That keeps the tab snappy on big accounts even when picking sources that previously caused freezes. A new **Include archives** checkbox flips Compare into full-history mode — every monthly archive lazy-loads and the whole ledger gets compared. The summary line shows the current scope so you always know what window you're looking at.
+
+The default-active behaviour also flows into the rest of the UI — Ledger, Settings, Inventory, Net Worth, and the Lifecycle drill-down all read from the active set unless you specifically ask for wider scope. (Lifecycle and the Research panel will gain their own opt-in archive loads in a follow-up release.)
+
+### How to verify it's working
+
+Run `/tally diag` and look for the **Storage** section. The new layout reports:
+
+```
+Storage: libs=yes loaded=yes dirty=no schema=v1
+  Active: 6,238 rows, 124,567 bytes
+    saved 2026-05-07 13:02:11  (serialise 12ms + compress 8ms; serialised 380000 bytes)
+  Archives: 14 archives, 432,557 rows, 8,742,109 bytes
+  Total rows: 438,795 (active + archives)
+```
+
+The headline numbers to watch:
+- **Active rows** should be in the low thousands once migration completes — current month plus a bit of carry-over.
+- **serialise / compress times** on the active save should be tens of milliseconds, not seconds. That's the per-logout cost, now bounded.
+- **Archive count** scales with how many months of history you have. Each archive is small relative to the total — they decompress only when a query asks for them.
+
+If you ever see a `[legacy blob still on disk]` warning marker, that means the migration hasn't yet completed a successful new-shape save. Log out and back in once and it should clear.
+
 ## v0.1.0-alpha15
 
 Quick perf fix on top of alpha14.
