@@ -738,6 +738,10 @@ local function diagPrintChat()
     if st.pendingMigration then
       print(string.format("  |cffffe080Migration pending:|r %d rows in pendingMigration buffer", st.pendingRows or 0))
     end
+    if st.stagingRows and st.stagingRows > 0 then
+      print(string.format("  |cffffe080Staging:|r %d rows across %d buckets — flush on import completion",
+        st.stagingRows, st.stagingKeys and #st.stagingKeys or 0))
+    end
     print(string.format("  Active: %d rows, %d bytes", st.activeRows or 0, st.activeBytes or 0))
     if st.activeSavedAt and st.activeSavedAt > 0 then
       print(string.format("    saved %s  (serialise %dms + compress %dms; serialised %d bytes)",

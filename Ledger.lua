@@ -1231,6 +1231,9 @@ function Ledger:StorageInfo()
   local pendingRows = (_workingMem and _workingMem.pendingMigration
                        and #_workingMem.pendingMigration.entries) or 0
 
+  local stagingKeys = self:GetStagingKeys()
+  local stagingRows = self:GetStagingRowCount()
+
   return {
     libsAvailable    = (LibSerialize and LibDeflate) and true or false,
     loaded           = _loaded,
@@ -1251,6 +1254,8 @@ function Ledger:StorageInfo()
     cacheCap         = cacheCap,
     pendingMigration = pendingRows > 0,
     pendingRows      = pendingRows,
+    stagingKeys      = stagingKeys,
+    stagingRows      = stagingRows,
     -- Back-compat aliases for callers still using the pre-TLY-51 names:
     blobBytes        = meta and meta.bytes or 0,
     blobCount        = meta and meta.count or 0,
@@ -1284,14 +1289,24 @@ end
 
 local _migration = nil  -- in-flight migration state, see StartMigration
 
--- Floor `time()` to the first second of the current calendar month
--- (local time). Rows ≥ this go into active; older rows route to
--- monthly staging buckets keyed on `os.date("%Y-%m", e.atTime)`.
-local function migrationCurrentMonthStart()
+-- Routed-import staging buckets. Bulk-import paths (the wizard backfill +
+-- any other route-by-date insert flow) drop prior-month rows into here
+-- keyed on YYYY-MM, then flush at end-of-import via Ledger:FlushStaging.
+-- Survives across InsertManyChunkedRouted calls within a single driver
+-- run; left empty after a successful flush. Distinct from _migration's
+-- own staging — the migration owns its buckets internally because its
+-- input is the legacy blob, not a sequence of source-supplied chunks.
+local _staging = {}
+
+local function getCurrentMonthStart()
   local t = time()
   local d = date("*t", t)
   return time({ year = d.year, month = d.month, day = 1, hour = 0, min = 0, sec = 0 })
 end
+
+-- Migration uses the shared getCurrentMonthStart helper (above) — rows
+-- with atTime ≥ that boundary go into active; older rows route to
+-- monthly staging buckets keyed on `date("%Y-%m", e.atTime)`.
 
 local migrationStep
 migrationStep = function()
@@ -1429,7 +1444,7 @@ function Ledger:StartMigration(opts)
     total     = #_workingMem.pendingMigration.entries,
     chunkSize = opts.chunkSize or 500,
     delaySec  = opts.delaySec or 0.05,
-    currentMonthStart = migrationCurrentMonthStart(),
+    currentMonthStart = getCurrentMonthStart(),
     staging   = {},
     flushKeys = {},
     flushIdx  = 0,
@@ -1799,6 +1814,202 @@ function Ledger:InsertManyChunked(entries, opts)
   step()
 end
 
+-- ============================================================================
+-- Routed chunked import — date-aware variant for backfill paths
+-- ============================================================================
+--
+-- Same chunked-tick pattern as InsertManyChunked, but each row is routed
+-- by atTime: current-month rows append to active (with dedupe) and prior-
+-- month rows accumulate in the module-private _staging buckets keyed on
+-- YYYY-MM. Rows missing atTime (rare; defensive) fall through to active.
+--
+-- This keeps the active set bounded during the wizard's sibling-addon
+-- backfill — historic rows never inflate active, so a 438k-row TSM CSV
+-- doesn't reproduce the pre-TLY-51 freeze.
+--
+-- The driver MUST call Ledger:FlushStaging after the last source completes
+-- so the accumulated staging buckets become archives on disk. Until that
+-- flush runs, prior-month rows live in memory only — a logout before
+-- flush loses them.
+--
+-- opts:
+--   chunkSize, delaySec   same as InsertManyChunked.
+--   onProgress(insertedSoFar, total, skippedSoFar)
+--   onDone(inserted, skipped, insertedActive, insertedStaging)
+function Ledger:InsertManyChunkedRouted(entries, opts)
+  opts = opts or {}
+  local chunkSize = opts.chunkSize or 500
+  local delaySec  = opts.delaySec or 0.05
+
+  if type(entries) ~= "table" or #entries == 0 then
+    if opts.onDone then pcall(opts.onDone, 0, 0, 0, 0) end
+    return
+  end
+
+  local total = #entries
+  local idx = 0
+  local insertedActive, insertedStaging, skipped = 0, 0, 0
+  local currentMonthStart = getCurrentMonthStart()
+
+  local function step()
+    local stop = math.min(idx + chunkSize, total)
+    local chunkActive = 0
+    while idx < stop do
+      idx = idx + 1
+      local e = entries[idx]
+      if not isValidEntry(e) then
+        skipped = skipped + 1
+      else
+        local active = db()
+        local atT = e.atTime or 0
+        if atT >= currentMonthStart or atT == 0 then
+          if active.byId[e.id] then
+            skipped = skipped + 1
+          else
+            active.byId[e.id] = true
+            active.entries[#active.entries + 1] = e
+            insertedActive = insertedActive + 1
+            chunkActive = chunkActive + 1
+          end
+        else
+          local mkey = date("%Y-%m", atT)
+          local bucket = _staging[mkey]
+          if not bucket then
+            bucket = { entries = {}, byId = {} }
+            _staging[mkey] = bucket
+          end
+          if bucket.byId[e.id] then
+            skipped = skipped + 1
+          else
+            bucket.byId[e.id] = true
+            bucket.entries[#bucket.entries + 1] = e
+            insertedStaging = insertedStaging + 1
+          end
+        end
+      end
+    end
+    if chunkActive > 0 then
+      _dirty = true
+      invalidateReconcileCache()
+    end
+    if opts.onProgress then
+      pcall(opts.onProgress, insertedActive + insertedStaging, total, skipped)
+    end
+    if idx < total and C_Timer and C_Timer.After then
+      C_Timer.After(delaySec, step)
+    else
+      if opts.onDone then
+        pcall(opts.onDone, insertedActive + insertedStaging, skipped, insertedActive, insertedStaging)
+      end
+    end
+  end
+
+  step()
+end
+
+-- ============================================================================
+-- FlushStaging — write _staging buckets out as archives
+-- ============================================================================
+--
+-- Walks _staging keys one per tick. For each, merges with the existing
+-- archive at the same key (deduping by entry id) and saves the combined
+-- result. Frees each bucket as it lands.
+--
+-- Merging matters when the same backfill run produces rows for a month
+-- that already has an archive on disk (e.g., user adds a new source mid-
+-- life; their existing archives stay, the new source's rows get folded
+-- in). For a fresh-install backfill there's nothing to merge against
+-- and the merge is a no-op.
+--
+-- opts:
+--   delaySec    pause between bucket flushes (default 0.05)
+--   onProgress  function(idx, total, key, mergedRowCount)
+--   onComplete  function(archivesWritten, rowsArchived)
+
+function Ledger:GetStagingKeys()
+  local out = {}
+  for k in pairs(_staging) do out[#out + 1] = k end
+  table.sort(out)
+  return out
+end
+
+function Ledger:GetStagingRowCount()
+  local total = 0
+  for _, bucket in pairs(_staging) do total = total + #bucket.entries end
+  return total
+end
+
+function Ledger:FlushStaging(opts)
+  opts = opts or {}
+  local delaySec = opts.delaySec or 0.05
+  local keys = self:GetStagingKeys()
+
+  if #keys == 0 then
+    if opts.onComplete then pcall(opts.onComplete, 0, 0) end
+    return
+  end
+
+  local idx = 0
+  local archivesWritten, rowsArchived = 0, 0
+
+  local function flushOne()
+    idx = idx + 1
+    if idx > #keys then
+      invalidateReconcileCache()
+      if opts.onComplete then pcall(opts.onComplete, archivesWritten, rowsArchived) end
+      return
+    end
+
+    local key = keys[idx]
+    local bucket = _staging[key]
+    if not bucket or not ns.Archive then
+      _staging[key] = nil
+      if C_Timer and C_Timer.After then
+        C_Timer.After(delaySec, flushOne)
+      else
+        flushOne()
+      end
+      return
+    end
+
+    -- Merge with existing archive at the same key, dedupe by entry id.
+    local mergedEntries, mergedById = {}, {}
+    local existing = ns.Archive:Load(key)
+    if existing then
+      for _, e in ipairs(existing.entries) do
+        if e.id and not mergedById[e.id] then
+          mergedById[e.id] = true
+          mergedEntries[#mergedEntries + 1] = e
+        end
+      end
+    end
+    for _, e in ipairs(bucket.entries) do
+      if e.id and not mergedById[e.id] then
+        mergedById[e.id] = true
+        mergedEntries[#mergedEntries + 1] = e
+      end
+    end
+
+    ns.Archive:Save(key, mergedEntries, { byId = mergedById })
+    archivesWritten = archivesWritten + 1
+    rowsArchived = rowsArchived + #bucket.entries
+    _staging[key] = nil
+    invalidateReconcileCache()
+
+    if opts.onProgress then
+      pcall(opts.onProgress, idx, #keys, key, #mergedEntries)
+    end
+
+    if C_Timer and C_Timer.After then
+      C_Timer.After(delaySec, flushOne)
+    else
+      flushOne()
+    end
+  end
+
+  flushOne()
+end
+
 -- Multi-source chunked driver. Walks registered sources in order, awaiting
 -- each source's parse + chunked insert before starting the next. Designed to
 -- be called from the setup wizard's onComplete; surfaces per-source progress
@@ -1808,14 +2019,22 @@ end
 -- only the legacy importFn (Native — event-driven, near-zero rows) run
 -- synchronously between chunked sources.
 --
+-- After every chunked source completes, the driver fires Ledger:FlushStaging
+-- once at the end so prior-month rows that accumulated during the import
+-- land on disk as archives before opts.onComplete is delivered to the
+-- caller. The wizard's progress widget gets a final "flushing archives"
+-- phase via opts.onSourceProgress("__flush", idx, total, key) callbacks.
+--
 -- opts:
---   chunkSize    forwarded to InsertManyChunked
---   delaySec     forwarded to InsertManyChunked
+--   chunkSize    forwarded to InsertManyChunkedRouted
+--   delaySec     forwarded to InsertManyChunkedRouted
 --   sourceDelay  default 0.5 — pause between sources so the input thread
 --                doesn't stay starved across an entire import.
 --   onSourceStart    function(name, label, parsedCount)
 --   onSourceProgress function(name, insertedSoFar, total, skippedSoFar)
 --   onSourceDone     function(name, inserted, skipped)
+--   onFlushStart     function(archiveCount)
+--   onFlushProgress  function(idx, total, key, mergedRowCount)
 --   onComplete       function(results) — results = list of per-source rows
 function Ledger:ImportFromAllSourcesChunked(opts)
   opts = opts or {}
@@ -1824,11 +2043,28 @@ function Ledger:ImportFromAllSourcesChunked(opts)
   local results = {}
   local sourceIdx = 0
 
+  -- Final phase: flush any staging buckets accumulated during routed
+  -- imports, then fire the user's onComplete with the per-source results.
+  local function finishWithFlush()
+    local stagingKeys = self:GetStagingKeys()
+    if opts.onFlushStart then pcall(opts.onFlushStart, #stagingKeys) end
+    self:FlushStaging({
+      delaySec = opts.delaySec,
+      onProgress = function(idx, total, key, mergedRowCount)
+        if opts.onFlushProgress then
+          pcall(opts.onFlushProgress, idx, total, key, mergedRowCount)
+        end
+      end,
+      onComplete = function(archivesWritten, rowsArchived)
+        if opts.onComplete then pcall(opts.onComplete, results, archivesWritten, rowsArchived) end
+      end,
+    })
+  end
+
   local function nextSource()
     sourceIdx = sourceIdx + 1
     if sourceIdx > #sourceOrder then
-      if opts.onComplete then pcall(opts.onComplete, results) end
-      return
+      return finishWithFlush()
     end
 
     local name = sourceOrder[sourceIdx]
@@ -1855,17 +2091,19 @@ function Ledger:ImportFromAllSourcesChunked(opts)
       parseSkipped = parseSkipped or 0
       if opts.onSourceStart then pcall(opts.onSourceStart, name, s.label, #entries) end
 
-      self:InsertManyChunked(entries, {
+      self:InsertManyChunkedRouted(entries, {
         chunkSize = opts.chunkSize,
         delaySec = opts.delaySec,
         onProgress = function(inserted, total, skipped)
           if opts.onSourceProgress then pcall(opts.onSourceProgress, name, inserted, total, skipped) end
         end,
-        onDone = function(inserted, skipped)
+        onDone = function(inserted, skipped, insertedActive, insertedStaging)
           results[#results + 1] = {
             source = name,
             inserted = inserted,
             skipped = skipped + parseSkipped,
+            insertedActive = insertedActive,
+            insertedStaging = insertedStaging,
           }
           if opts.onSourceDone then pcall(opts.onSourceDone, name, inserted, skipped + parseSkipped) end
           if C_Timer and C_Timer.After then
@@ -1877,7 +2115,9 @@ function Ledger:ImportFromAllSourcesChunked(opts)
       })
     else
       -- Legacy path: synchronous. Native lives here (0-N invoice rows from
-      -- the open inbox; cheap regardless).
+      -- the open inbox; cheap regardless). importFn writes to active via
+      -- InsertMany — historic atTimes from a synchronous Native scan are
+      -- rare enough that we don't need to route this path for Phase 1.
       if opts.onSourceStart then pcall(opts.onSourceStart, name, s.label, nil) end
       local ok, inserted, skipped = pcall(s.importFn or function() return 0, 0 end)
       if not ok then
@@ -2115,6 +2355,7 @@ function Ledger:Clear()
   _workingMem = defaultMem()
   _loaded = true
   _dirty = true
+  _staging = {}
   if ns.Archive then ns.Archive:UnloadAll() end
   invalidateReconcileCache()
 end
