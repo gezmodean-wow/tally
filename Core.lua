@@ -398,6 +398,194 @@ end
 ns.Reset = resetData
 
 -- ============================================================================
+-- /tally seed — synthetic ledger generator for TLY-51 stress testing
+-- ============================================================================
+--
+-- Two modes, both used to exercise the alpha16 storage paths without
+-- needing a real tester's 438k-row account:
+--
+--   /tally seed N
+--     Generates N synthetic entries spread across the last 12 months
+--     and chunked-inserts them via the live route — current-month
+--     rows go to active, prior-month rows go to staging buckets, then
+--     FlushStaging writes archives. Exercises the routed-import +
+--     archive-creation paths.
+--
+--   /tally seed legacy N
+--     Generates N entries, packs them as an alpha14/15 single-blob
+--     directly into TallyDB.ledger.blob, and clears the new-shape
+--     fields. Run /reload after — Tally's loadFromDisk treats it like
+--     a real legacy upgrader and kicks off the migration pass.
+--     Exercises the migration path.
+--
+--   /tally seed clear
+--     Removes every entry whose source == "__seed" from active and
+--     archives. Use to clean up after stress testing.
+--
+-- Distribution is intentionally uniform over time + crude on item /
+-- char / kind variety — enough to make Reconcile's clustering
+-- realistic but not trying to model real trader behaviour. The
+-- pseudo-source name "__seed" keeps these rows quarantined from real
+-- ledger views (filter by source = "__seed" to inspect them; ClearSource
+-- "__seed" wipes them).
+
+local SEED_SOURCE = "__seed"
+
+local SEED_KINDS = {
+  "sale", "purchase", "ah-cancel", "ah-expire",
+  "vendor-sell", "vendor-buy", "ah-fee",
+}
+
+local SEED_CHARS = {
+  "Stress1-StressTest", "Stress2-StressTest", "Stress3-StressTest",
+  "Stress4-StressTest", "Stress5-StressTest",
+}
+
+local function generateSeedEntries(count, monthsBack)
+  count = count or 100000
+  monthsBack = monthsBack or 12
+  local now = time()
+  local rangeSec = monthsBack * 30 * 86400
+  local entries = {}
+  for i = 1, count do
+    local atTime = now - math.random(1, rangeSec)
+    local kind = SEED_KINDS[((i - 1) % #SEED_KINDS) + 1]
+    local copper
+    if kind == "ah-cancel" or kind == "ah-expire" then
+      copper = 0
+    elseif kind == "ah-fee" then
+      copper = math.random(100, 500000)
+    else
+      copper = math.random(1000, 100000000)
+    end
+    entries[i] = {
+      id       = SEED_SOURCE .. ":" .. tostring(i),
+      atTime   = atTime,
+      kind     = kind,
+      itemID   = 100000 + ((i * 17) % 5000),
+      itemKey  = tostring(100000 + ((i * 17) % 5000)),
+      charKey  = SEED_CHARS[((i - 1) % #SEED_CHARS) + 1],
+      copper   = copper,
+      count    = math.random(1, 5),
+      source   = SEED_SOURCE,
+      sourceId = tostring(i),
+      meta     = { name = "Stress test item " .. tostring((i % 200) + 1) },
+    }
+  end
+  return entries
+end
+
+local function handleSeed(rest)
+  rest = rest or ""
+  local sub, arg = rest:match("^(%S*)%s*(.-)$")
+  sub = sub or ""
+
+  -- /tally seed clear
+  if sub == "clear" then
+    if not (ns.Ledger and ns.Ledger.ClearSource) then
+      print("|cffff4040Tally:|r ledger unavailable.")
+      return
+    end
+    local removed = ns.Ledger:ClearSource(SEED_SOURCE)
+    print(string.format("|cff7fbfffTally:|r cleared %d seeded entries from active + archives.", removed or 0))
+    if ns.UI and ns.UI.MainFrame then
+      if ns.UI.MainFrame.UpdateHeaderNudge then
+        pcall(ns.UI.MainFrame.UpdateHeaderNudge, ns.UI.MainFrame)
+      end
+      if ns.UI.MainFrame.RefreshActivePage then
+        pcall(ns.UI.MainFrame.RefreshActivePage, ns.UI.MainFrame)
+      end
+    end
+    return
+  end
+
+  -- /tally seed legacy N
+  if sub == "legacy" then
+    local n = tonumber(arg) or 100000
+    local LibSerialize = LibStub and LibStub("LibSerialize", true)
+    local LibDeflate   = LibStub and LibStub("LibDeflate", true)
+    if not (LibSerialize and LibDeflate) then
+      print("|cffff4040Tally:|r LibSerialize / LibDeflate unavailable.")
+      return
+    end
+
+    print(string.format("|cff7fbfffTally:|r generating %d synthetic entries…", n))
+    local entries = generateSeedEntries(n)
+    local byId = {}
+    for _, e in ipairs(entries) do byId[e.id] = true end
+
+    local serialised = LibSerialize:Serialize({ entries = entries, byId = byId })
+    local compressed = LibDeflate:CompressDeflate(serialised, { level = 1 })
+
+    TallyDB = TallyDB or {}
+    TallyDB.ledger = TallyDB.ledger or {}
+    TallyDB.ledger.blob = compressed
+    TallyDB.ledger.blobMeta = {
+      count   = #entries,
+      savedAt = time(),
+      bytes   = #compressed,
+    }
+    -- Clear new-shape fields so loadFromDisk routes through the legacy path.
+    TallyDB.ledger.active       = nil
+    TallyDB.ledger.activeMeta   = nil
+    TallyDB.ledger.archives     = nil
+    TallyDB.ledger.archiveIndex = nil
+
+    print(string.format("|cff80ff80Tally:|r wrote %d entries to legacy blob (%d bytes compressed, %d serialised).",
+      n, #compressed, #serialised))
+    print("|cff80ff80Tally:|r run |cff80c0ff/reload|r — loadFromDisk will detect the legacy blob and start the migration pass.")
+    return
+  end
+
+  -- /tally seed N (default)
+  local n = tonumber(sub) or tonumber(rest) or 100000
+  if n < 1 then n = 100000 end
+
+  if not (ns.Ledger and ns.Ledger.InsertManyChunkedRouted) then
+    print("|cffff4040Tally:|r tiered storage unavailable — InsertManyChunkedRouted missing.")
+    return
+  end
+
+  print(string.format("|cff7fbfffTally:|r generating %d synthetic entries spread over the last 12 months…", n))
+  local entries = generateSeedEntries(n)
+
+  print(string.format("|cff7fbfffTally:|r routing into active + staging…"))
+  ns.Ledger:InsertManyChunkedRouted(entries, {
+    chunkSize = 1000,
+    delaySec  = 0.02,
+    onProgress = function(inserted, total)
+      if inserted % 25000 == 0 then
+        print(string.format("  %d / %d (%d%%)", inserted, total, math.floor(100 * inserted / total)))
+      end
+    end,
+    onDone = function(inserted, skipped, insertedActive, insertedStaging)
+      print(string.format("|cff80ff80Tally:|r seeded %d entries — %d to active, %d to staging buckets (%d skipped).",
+        inserted, insertedActive or 0, insertedStaging or 0, skipped or 0))
+      if ns.Ledger.GetStagingRowCount and ns.Ledger:GetStagingRowCount() > 0 then
+        print("|cff7fbfffTally:|r flushing staging buckets to archives…")
+        ns.Ledger:FlushStaging({
+          delaySec = 0.05,
+          onProgress = function(idx, total, key)
+            print(string.format("  flushing %s (%d / %d)", key or "?", idx, total))
+          end,
+          onComplete = function(archivesWritten, rowsArchived)
+            print(string.format("|cff80ff80Tally:|r flush complete — %d archives, %d archived rows.",
+              archivesWritten, rowsArchived))
+            if ns.UI and ns.UI.MainFrame and ns.UI.MainFrame.UpdateHeaderNudge then
+              pcall(ns.UI.MainFrame.UpdateHeaderNudge, ns.UI.MainFrame)
+            end
+          end,
+        })
+      else
+        if ns.UI and ns.UI.MainFrame and ns.UI.MainFrame.UpdateHeaderNudge then
+          pcall(ns.UI.MainFrame.UpdateHeaderNudge, ns.UI.MainFrame)
+        end
+      end
+    end,
+  })
+end
+
+-- ============================================================================
 -- /tally diag — one-shot diagnostic dump
 -- ============================================================================
 --
@@ -1318,6 +1506,12 @@ if Cogworks and Cogworks.RegisterSlashCommands then
             print("|cffff4040Tally:|r compare view unavailable.")
           end
         end,
+      },
+      {
+        name = "seed",
+        args = "[N | legacy N | clear]",
+        help = "Generate synthetic ledger entries for stress-testing (debug only)",
+        run = function(rest) handleSeed(rest) end,
       },
       {
         name = "seal",
