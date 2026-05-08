@@ -188,15 +188,22 @@ function Archive:Load(key)
     cacheBump(key)
     return _cache[key]
   end
-  if not (LibSerialize and LibDeflate) then return nil end
+  if not LibSerialize then return nil end
 
   local rec = archivesTable()[key]
   if not rec or not rec.blob then return nil end
   if rec.schemaVer and rec.schemaVer ~= self.SCHEMA_VERSION then return nil end
 
-  local decompressed = LibDeflate:DecompressDeflate(rec.blob)
-  if not decompressed then return nil end
-  local ok, payload = LibSerialize:Deserialize(decompressed)
+  -- Pre-existing archives (rec.compressed == nil or true) carry deflate
+  -- compression on top of the LibSerialize bytes; archives written by
+  -- this build set rec.compressed = false and skip the decompress.
+  local stream = rec.blob
+  if rec.compressed ~= false then
+    if not LibDeflate then return nil end
+    stream = LibDeflate:DecompressDeflate(rec.blob)
+    if not stream then return nil end
+  end
+  local ok, payload = LibSerialize:Deserialize(stream)
   if not ok or type(payload) ~= "table" then return nil end
 
   local cached = {
@@ -226,7 +233,7 @@ function Archive:LoadAsync(key, opts)
     if opts.onComplete then pcall(opts.onComplete, _cache[key]) end
     return
   end
-  if not (LibSerialize and LibDeflate) then
+  if not LibSerialize then
     if opts.onComplete then pcall(opts.onComplete, nil) end
     return
   end
@@ -241,16 +248,26 @@ function Archive:LoadAsync(key, opts)
     return
   end
 
-  local decompressed = LibDeflate:DecompressDeflate(rec.blob)
-  if not decompressed then
-    if opts.onComplete then pcall(opts.onComplete, nil) end
-    return
+  -- Pre-existing archives (rec.compressed == nil or true) need deflate
+  -- decompression first; archives written by this build stored raw
+  -- serialised bytes and skip this step.
+  local stream = rec.blob
+  if rec.compressed ~= false then
+    if not LibDeflate then
+      if opts.onComplete then pcall(opts.onComplete, nil) end
+      return
+    end
+    stream = LibDeflate:DecompressDeflate(rec.blob)
+    if not stream then
+      if opts.onComplete then pcall(opts.onComplete, nil) end
+      return
+    end
   end
 
   local YIELD_EVERY = 1024
   local handler
   local ok, err = pcall(function()
-    handler = LibSerialize:DeserializeAsync(decompressed, {
+    handler = LibSerialize:DeserializeAsync(stream, {
       yieldCheck = function(scratch)
         scratch.count = (scratch.count or 0) + 1
         if scratch.count >= YIELD_EVERY then
@@ -330,10 +347,18 @@ end
 -- serialise step can block the input thread visibly. Phase 1 callers
 -- on the bulk-write path (FlushStaging, seal flush, migration flush)
 -- should use SaveAsync below so the work spreads across ticks.
+-- Note on compression: archives store the raw LibSerialize binary
+-- output without LibDeflate on top. The compress step was 30-100ms
+-- of synchronous CPU per archive at flush time on slower CPUs, and
+-- the alpha14 constant-pool concern doesn't apply per-archive (each
+-- archive is one Lua string constant in TallyDB regardless of byte
+-- size). Trade-off: archives are ~3-4x larger on disk but flush
+-- visibly smoother. Pre-existing compressed archives still load
+-- correctly via the rec.compressed flag check in Load.
 function Archive:Save(key, entries, opts)
   if type(key) ~= "string" or key == "" then return false, "invalid key" end
   if type(entries) ~= "table" then return false, "entries must be a table" end
-  if not (LibSerialize and LibDeflate) then return false, "libs unavailable" end
+  if not LibSerialize then return false, "libs unavailable" end
   opts = opts or {}
 
   local byId = opts.byId
@@ -345,18 +370,18 @@ function Archive:Save(key, entries, opts)
   end
 
   local serialised = LibSerialize:Serialize({ entries = entries, byId = byId })
-  local compressed = LibDeflate:CompressDeflate(serialised, { level = 1 })
 
   local index = computeIndex(entries)
 
   local rec = {
-    blob      = compressed,
-    count     = #entries,
-    fromTs    = index.fromTs,
-    toTs      = index.toTs,
-    bytes     = #compressed,
-    schemaVer = self.SCHEMA_VERSION,
-    savedAt   = time(),
+    blob       = serialised,
+    count      = #entries,
+    fromTs     = index.fromTs,
+    toTs       = index.toTs,
+    bytes      = #serialised,
+    compressed = false,
+    schemaVer  = self.SCHEMA_VERSION,
+    savedAt    = time(),
   }
 
   archivesTable()[key] = rec
@@ -389,7 +414,7 @@ function Archive:SaveAsync(key, entries, opts)
     if opts and opts.onComplete then pcall(opts.onComplete, false, 0, "entries must be a table") end
     return
   end
-  if not (LibSerialize and LibDeflate) then
+  if not LibSerialize then
     if opts and opts.onComplete then pcall(opts.onComplete, false, 0, "libs unavailable") end
     return
   end
@@ -450,19 +475,18 @@ function Archive:SaveAsync(key, entries, opts)
       return
     end
 
-    -- Async serialise complete; do the (much smaller) compress in one
-    -- final tick. For most archives compress is well under a frame.
-    local compressed = LibDeflate:CompressDeflate(serialised, { level = 1 })
-
+    -- Async serialise complete. No compress step — archives are stored
+    -- as raw LibSerialize bytes (see comment on Archive:Save).
     local index = computeIndex(entries)
     local rec = {
-      blob      = compressed,
-      count     = #entries,
-      fromTs    = index.fromTs,
-      toTs      = index.toTs,
-      bytes     = #compressed,
-      schemaVer = Archive.SCHEMA_VERSION,
-      savedAt   = time(),
+      blob       = serialised,
+      count      = #entries,
+      fromTs     = index.fromTs,
+      toTs       = index.toTs,
+      bytes      = #serialised,
+      compressed = false,
+      schemaVer  = Archive.SCHEMA_VERSION,
+      savedAt    = time(),
     }
 
     archivesTable()[key] = rec
