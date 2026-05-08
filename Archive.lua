@@ -169,6 +169,20 @@ end
 -- Decompress + deserialise an archive blob. Caches in LRU. Returns
 -- { entries = {...}, byId = {...} } on success, nil if the archive is
 -- missing, on a schema mismatch, or if libs are unavailable.
+-- Backfill sourceCounts on archiveIndex entries that predate the
+-- sourceCounts addition. Cheap (one walk over the loaded entries) and
+-- idempotent. After this runs once per archive, future ClearSource /
+-- diag / NetWorth queries that key off sourceCounts hit the fast path.
+local function backfillSourceCounts(key, entries)
+  local idx = indexTable()[key]
+  if not idx or idx.sourceCounts then return end
+  local sourceCounts = {}
+  for _, e in ipairs(entries) do
+    if e.source then sourceCounts[e.source] = (sourceCounts[e.source] or 0) + 1 end
+  end
+  idx.sourceCounts = sourceCounts
+end
+
 function Archive:Load(key)
   if _cache[key] then
     cacheBump(key)
@@ -189,6 +203,7 @@ function Archive:Load(key)
     entries = payload.entries or {},
     byId    = payload.byId or {},
   }
+  backfillSourceCounts(key, cached.entries)
   cacheEvictOldestIfFull()
   _cache[key] = cached
   _cacheOrder[#_cacheOrder + 1] = key
@@ -275,6 +290,7 @@ function Archive:LoadAsync(key, opts)
       entries = payload.entries or {},
       byId    = payload.byId or {},
     }
+    backfillSourceCounts(key, cached.entries)
     cacheEvictOldestIfFull()
     _cache[key] = cached
     _cacheOrder[#_cacheOrder + 1] = key
