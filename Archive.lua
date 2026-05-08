@@ -213,10 +213,15 @@ end
 --
 -- opts (optional):
 --   byId         pre-built byId map; computed from entries if absent
---   onComplete   function(ok, bytes) — fired after the write (sync; the
---                callback is here for parity with chunked sealers)
+--   onComplete   function(ok, bytes) — fired after the write (synchronous
+--                — see SaveAsync below for the chunked variant)
 --
 -- Returns (true, byteCount) on success, (false, reason) on failure.
+--
+-- For archives over ~5,000 rows on slower machines, the synchronous
+-- serialise step can block the input thread visibly. Phase 1 callers
+-- on the bulk-write path (FlushStaging, seal flush, migration flush)
+-- should use SaveAsync below so the work spreads across ticks.
 function Archive:Save(key, entries, opts)
   if type(key) ~= "string" or key == "" then return false, "invalid key" end
   if type(entries) ~= "table" then return false, "entries must be a table" end
@@ -254,6 +259,90 @@ function Archive:Save(key, entries, opts)
 
   if opts.onComplete then pcall(opts.onComplete, true, rec.bytes) end
   return true, rec.bytes
+end
+
+-- Chunked variant of Save. Drives LibSerialize's async coroutine across
+-- C_Timer ticks (default yields every 4096 items per the lib), then
+-- runs the smaller LibDeflate compress step in one final tick. For
+-- archives in the tens of thousands of rows, this keeps each tick well
+-- under one frame on slower machines — the synchronous Save above
+-- becomes a multi-second freeze in that range.
+--
+-- onComplete(ok, bytes) fires once when everything is on disk. opts.onProgress
+-- (optional) fires after each async-serialise yield with the cumulative
+-- string length so far (handler doesn't expose item progress directly,
+-- so this is a coarse heartbeat).
+function Archive:SaveAsync(key, entries, opts)
+  if type(key) ~= "string" or key == "" then
+    if opts and opts.onComplete then pcall(opts.onComplete, false, 0, "invalid key") end
+    return
+  end
+  if type(entries) ~= "table" then
+    if opts and opts.onComplete then pcall(opts.onComplete, false, 0, "entries must be a table") end
+    return
+  end
+  if not (LibSerialize and LibDeflate) then
+    if opts and opts.onComplete then pcall(opts.onComplete, false, 0, "libs unavailable") end
+    return
+  end
+  opts = opts or {}
+  local delaySec = opts.delaySec or 0.05
+
+  local byId = opts.byId
+  if not byId then
+    byId = {}
+    for _, e in ipairs(entries) do
+      if e.id then byId[e.id] = true end
+    end
+  end
+
+  local handler
+  local ok, err = pcall(function()
+    handler = LibSerialize:SerializeAsync({ entries = entries, byId = byId })
+  end)
+  if not ok or not handler then
+    if opts.onComplete then pcall(opts.onComplete, false, 0, "SerializeAsync failed: " .. tostring(err)) end
+    return
+  end
+
+  local function step()
+    local resumeOk, completed, serialised = pcall(handler)
+    if not resumeOk then
+      if opts.onComplete then pcall(opts.onComplete, false, 0, "serialise resume failed: " .. tostring(completed)) end
+      return
+    end
+    if not completed then
+      if C_Timer and C_Timer.After then
+        C_Timer.After(delaySec, step)
+      else
+        step()
+      end
+      return
+    end
+
+    -- Async serialise complete; do the (much smaller) compress in one
+    -- final tick. For most archives compress is well under a frame.
+    local compressed = LibDeflate:CompressDeflate(serialised, { level = 1 })
+
+    local index = computeIndex(entries)
+    local rec = {
+      blob      = compressed,
+      count     = #entries,
+      fromTs    = index.fromTs,
+      toTs      = index.toTs,
+      bytes     = #compressed,
+      schemaVer = Archive.SCHEMA_VERSION,
+      savedAt   = time(),
+    }
+
+    archivesTable()[key] = rec
+    indexTable()[key] = index
+    Archive:Unload(key)
+
+    if opts.onComplete then pcall(opts.onComplete, true, rec.bytes) end
+  end
+
+  step()
 end
 
 -- Permanently remove an archive from disk + cache. Intended for

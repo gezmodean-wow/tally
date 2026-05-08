@@ -514,26 +514,50 @@ local function handleSeed(rest)
     local byId = {}
     for _, e in ipairs(entries) do byId[e.id] = true end
 
-    local serialised = LibSerialize:Serialize({ entries = entries, byId = byId })
-    local compressed = LibDeflate:CompressDeflate(serialised, { level = 1 })
+    -- Serialise async — for large N a synchronous serialise busts WoW's
+    -- ~10s script execution timer (LibSerialize is pure-Lua and walks
+    -- every entry in one pass). The async handler yields every 4096
+    -- items so the work spreads across ticks. After completion, run
+    -- the (smaller, faster) compress synchronously.
+    print("|cff7fbfffTally:|r serialising async (yields every 4096 items)…")
+    local handler = LibSerialize:SerializeAsync({ entries = entries, byId = byId })
+    local function step()
+      local ok, completed, serialised = pcall(handler)
+      if not ok then
+        print("|cffff4040Tally:|r serialise failed: " .. tostring(completed))
+        return
+      end
+      if not completed then
+        if C_Timer and C_Timer.After then
+          C_Timer.After(0.05, step)
+        else
+          step()
+        end
+        return
+      end
 
-    TallyDB = TallyDB or {}
-    TallyDB.ledger = TallyDB.ledger or {}
-    TallyDB.ledger.blob = compressed
-    TallyDB.ledger.blobMeta = {
-      count   = #entries,
-      savedAt = time(),
-      bytes   = #compressed,
-    }
-    -- Clear new-shape fields so loadFromDisk routes through the legacy path.
-    TallyDB.ledger.active       = nil
-    TallyDB.ledger.activeMeta   = nil
-    TallyDB.ledger.archives     = nil
-    TallyDB.ledger.archiveIndex = nil
+      print(string.format("|cff7fbfffTally:|r serialise complete (%d bytes); compressing…", #serialised))
+      local compressed = LibDeflate:CompressDeflate(serialised, { level = 1 })
 
-    print(string.format("|cff80ff80Tally:|r wrote %d entries to legacy blob (%d bytes compressed, %d serialised).",
-      n, #compressed, #serialised))
-    print("|cff80ff80Tally:|r run |cff80c0ff/reload|r — loadFromDisk will detect the legacy blob and start the migration pass.")
+      TallyDB = TallyDB or {}
+      TallyDB.ledger = TallyDB.ledger or {}
+      TallyDB.ledger.blob = compressed
+      TallyDB.ledger.blobMeta = {
+        count   = n,
+        savedAt = time(),
+        bytes   = #compressed,
+      }
+      -- Clear new-shape fields so loadFromDisk routes through the legacy path.
+      TallyDB.ledger.active       = nil
+      TallyDB.ledger.activeMeta   = nil
+      TallyDB.ledger.archives     = nil
+      TallyDB.ledger.archiveIndex = nil
+
+      print(string.format("|cff80ff80Tally:|r wrote %d entries to legacy blob (%d bytes compressed, %d serialised).",
+        n, #compressed, #serialised))
+      print("|cff80ff80Tally:|r run |cff80c0ff/reload|r — loadFromDisk will detect the legacy blob and start the migration pass.")
+    end
+    step()
     return
   end
 
@@ -551,8 +575,8 @@ local function handleSeed(rest)
 
   print(string.format("|cff7fbfffTally:|r routing into active + staging…"))
   ns.Ledger:InsertManyChunkedRouted(entries, {
-    chunkSize = 1000,
-    delaySec  = 0.02,
+    chunkSize = 500,
+    delaySec  = 0.05,
     onProgress = function(inserted, total)
       if inserted % 25000 == 0 then
         print(string.format("  %d / %d (%d%%)", inserted, total, math.floor(100 * inserted / total)))

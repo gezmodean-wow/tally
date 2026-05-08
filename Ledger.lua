@@ -1313,46 +1313,15 @@ migrationStep = function()
   if not _migration then return end
   local m = _migration
 
-  -- Phase 2: flush staging buckets one per tick. Each Archive:Save is
-  -- a serialise + compress + write call; spreading them across timer
-  -- ticks lets the input thread breathe between ~30k-row buckets.
-  if not _workingMem.pendingMigration then
-    if m.flushIdx < #m.flushKeys then
-      m.flushIdx = m.flushIdx + 1
-      local key = m.flushKeys[m.flushIdx]
-      local bucket = m.staging[key]
-      if bucket and ns.Archive then
-        ns.Archive:Save(key, bucket.entries, { byId = bucket.byId })
-      end
-      m.staging[key] = nil  -- free bucket memory once written
-      invalidateReconcileCache()  -- new archive on disk affects "all"/"<n>m" queries
-      if m.opts.onProgress then
-        pcall(m.opts.onProgress, "flush", m.flushIdx, #m.flushKeys, key)
-      end
-      if C_Timer and C_Timer.After then
-        C_Timer.After(m.delaySec, migrationStep)
-      else
-        migrationStep()
-      end
-      return
-    end
-
-    -- All buckets flushed. Migration complete.
-    local activeRows = #_workingMem.active.entries
-    local archiveCount = #m.flushKeys
-    local archiveRows = m.archiveRowCount or 0
-    _migration = nil
-    _dirty = true
-    invalidateReconcileCache()
-    if m.opts.onComplete then
-      pcall(m.opts.onComplete, activeRows, archiveCount, archiveRows)
-    end
-    return
-  end
-
-  -- Phase 1: route entries. Pull a chunk from pendingMigration.entries,
-  -- decide active vs staging[month] for each, append.
+  -- Routing phase: pull a chunk from pendingMigration.entries, decide
+  -- active vs staging[month] for each, append. When routing finishes,
+  -- transfer the migration's internal staging buckets into the module-
+  -- private _staging table and hand off to Ledger:FlushStaging — that
+  -- way the migration writes go through the same async-serialise +
+  -- auto-subdivide flush path the wizard backfill uses.
   local pending = _workingMem.pendingMigration
+  if not pending then return end  -- defensive; shouldn't happen with the new control flow
+
   local active = _workingMem.active
   local stop = math.min(m.idx + m.chunkSize, m.total)
   while m.idx < stop do
@@ -1380,26 +1349,41 @@ migrationStep = function()
   end
 
   -- Per-chunk cache invalidation so any in-session UI refresh sees the
-  -- routed rows (active grew, possibly archives gain entries on flush).
+  -- routed rows.
   invalidateReconcileCache()
   if m.opts.onProgress then
     pcall(m.opts.onProgress, "route", m.idx, m.total)
   end
 
   if m.idx >= m.total then
-    -- Routing done. Discard pending buffer (it's all routed now) and
-    -- prep the flush list. Sort keys ascending so flushes land in
-    -- chronological order — useful for both UI progress feel and the
-    -- archiveIndex's sort-stable iteration.
+    -- Routing done. Drop the pending buffer (all rows are placed now)
+    -- and transfer migration's internal staging into module-private
+    -- _staging, then hand off to FlushStaging.
     _workingMem.pendingMigration = nil
-    m.flushKeys = {}
-    m.archiveRowCount = 0
     for k, bucket in pairs(m.staging) do
-      m.flushKeys[#m.flushKeys + 1] = k
-      m.archiveRowCount = m.archiveRowCount + #bucket.entries
+      _staging[k] = bucket
     end
-    table.sort(m.flushKeys)
-    m.flushIdx = 0
+    m.staging = {}
+
+    Ledger:FlushStaging({
+      delaySec = m.delaySec,
+      onProgress = function(flushIdx, flushTotal, key, mergedRowCount)
+        if m.opts.onProgress then
+          pcall(m.opts.onProgress, "flush", flushIdx, flushTotal, key)
+        end
+      end,
+      onComplete = function(archivesWritten, rowsArchived)
+        local activeRows = #_workingMem.active.entries
+        local opts = m.opts
+        _migration = nil
+        _dirty = true
+        invalidateReconcileCache()
+        if opts.onComplete then
+          pcall(opts.onComplete, activeRows, archivesWritten, rowsArchived)
+        end
+      end,
+    })
+    return
   end
 
   if C_Timer and C_Timer.After then
@@ -1446,8 +1430,6 @@ function Ledger:StartMigration(opts)
     delaySec  = opts.delaySec or 0.05,
     currentMonthStart = getCurrentMonthStart(),
     staging   = {},
-    flushKeys = {},
-    flushIdx  = 0,
     opts      = opts,
   }
   migrationStep()
@@ -2109,9 +2091,13 @@ end
 -- FlushStaging — write _staging buckets out as archives
 -- ============================================================================
 --
--- Walks _staging keys one per tick. For each, merges with the existing
--- archive at the same key (deduping by entry id) and saves the combined
--- result. Frees each bucket as it lands.
+-- Walks a flush plan one entry per turn. Each plan entry is a
+-- (key, entries, byId) tuple; large staging buckets are split into
+-- numbered parts (`YYYY-MM-pN`) so no single archive write exceeds the
+-- soft cap. For each entry, merges with any existing archive at the
+-- same key (deduping by entry id) and saves the combined result via
+-- the async serialise path so the per-archive serialise step never
+-- blocks the input thread for more than one yieldCheck slice.
 --
 -- Merging matters when the same backfill run produces rows for a month
 -- that already has an archive on disk (e.g., user adds a new source mid-
@@ -2119,10 +2105,21 @@ end
 -- in). For a fresh-install backfill there's nothing to merge against
 -- and the merge is a no-op.
 --
+-- Subdivision rationale: a 50k-row monthly bucket serialises in one
+-- ~5-second freeze on slower machines even with the async API, because
+-- the resulting Lua string is large and LibDeflate compress is the
+-- final blocking step. Capping each part at PART_CAP rows keeps the
+-- final compress under ~100ms while the async serialise stays bounded
+-- per yield. Spec calls this out as "auto-subdivide weekly if a month
+-- exceeds 50k rows"; Phase 1 uses a smaller threshold + a "-pN" suffix
+-- since archive granularity is opaque to the rest of the system.
+--
 -- opts:
 --   delaySec    pause between bucket flushes (default 0.05)
 --   onProgress  function(idx, total, key, mergedRowCount)
 --   onComplete  function(archivesWritten, rowsArchived)
+
+local PART_CAP = 5000
 
 function Ledger:GetStagingKeys()
   local out = {}
@@ -2147,32 +2144,88 @@ function Ledger:FlushStaging(opts)
     return
   end
 
+  -- Build the flush plan: subdivide oversized buckets into parts so no
+  -- single Archive:SaveAsync call processes more than PART_CAP rows.
+  -- Each plan entry will become one async-serialise pass.
+  local plan = {}
+  for _, key in ipairs(keys) do
+    local bucket = _staging[key]
+    if bucket and #bucket.entries > 0 then
+      if #bucket.entries <= PART_CAP then
+        plan[#plan + 1] = { key = key, bucket = bucket }
+      else
+        local parts = math.ceil(#bucket.entries / PART_CAP)
+        for p = 1, parts do
+          local startIdx = (p - 1) * PART_CAP + 1
+          local endIdx   = math.min(p * PART_CAP, #bucket.entries)
+          local partEntries, partById = {}, {}
+          for i = startIdx, endIdx do
+            local e = bucket.entries[i]
+            partEntries[#partEntries + 1] = e
+            if e.id then partById[e.id] = true end
+          end
+          plan[#plan + 1] = {
+            key       = key .. "-p" .. tostring(p),
+            partOfKey = key,
+            entries   = partEntries,
+            byId      = partById,
+            bucket    = nil,
+          }
+        end
+        -- Clear the original bucket — its rows are now distributed across
+        -- parts. Each part holds its own entries/byId.
+        _staging[key] = nil
+      end
+    end
+  end
+
+  -- Drop any keys we already cleared from staging.
+  if #plan == 0 then
+    if opts.onComplete then pcall(opts.onComplete, 0, 0) end
+    return
+  end
+
   local idx = 0
   local archivesWritten, rowsArchived = 0, 0
 
-  local function flushOne()
-    idx = idx + 1
-    if idx > #keys then
+  local function next()
+    if idx >= #plan then
       invalidateReconcileCache()
       if opts.onComplete then pcall(opts.onComplete, archivesWritten, rowsArchived) end
       return
     end
+    idx = idx + 1
+    local entry = plan[idx]
 
-    local key = keys[idx]
-    local bucket = _staging[key]
-    if not bucket or not ns.Archive then
-      _staging[key] = nil
-      if C_Timer and C_Timer.After then
-        C_Timer.After(delaySec, flushOne)
-      else
-        flushOne()
+    -- Resolve the entries/byId for this plan slot. Single-bucket entries
+    -- pull from staging; subdivided parts have inline entries already.
+    local entries, byId
+    if entry.bucket then
+      entries, byId = entry.bucket.entries, entry.bucket.byId
+    else
+      entries, byId = entry.entries, entry.byId
+    end
+
+    if not (ns.Archive and ns.Archive.SaveAsync) then
+      -- Fallback: synchronous Save for the rare no-async case.
+      if ns.Archive and ns.Archive.Save then
+        ns.Archive:Save(entry.key, entries, { byId = byId })
       end
+      archivesWritten = archivesWritten + 1
+      rowsArchived = rowsArchived + #entries
+      if entry.bucket then _staging[entry.partOfKey or entry.key] = nil end
+      if opts.onProgress then pcall(opts.onProgress, idx, #plan, entry.key, #entries) end
+      if C_Timer and C_Timer.After then C_Timer.After(delaySec, next) else next() end
       return
     end
 
-    -- Merge with existing archive at the same key, dedupe by entry id.
+    -- Merge with existing archive at the same key (dedupe by entry id).
+    -- For numbered parts (e.g. "2025-12-p1"), each part has its own key,
+    -- so the merge is normally a no-op the first time the part is
+    -- written. It matters on re-flush of a key that already had a
+    -- part of the same number (e.g. seal followed by a re-import).
     local mergedEntries, mergedById = {}, {}
-    local existing = ns.Archive:Load(key)
+    local existing = ns.Archive:Load(entry.key)
     if existing then
       for _, e in ipairs(existing.entries) do
         if e.id and not mergedById[e.id] then
@@ -2181,31 +2234,37 @@ function Ledger:FlushStaging(opts)
         end
       end
     end
-    for _, e in ipairs(bucket.entries) do
+    for _, e in ipairs(entries) do
       if e.id and not mergedById[e.id] then
         mergedById[e.id] = true
         mergedEntries[#mergedEntries + 1] = e
       end
     end
 
-    ns.Archive:Save(key, mergedEntries, { byId = mergedById })
-    archivesWritten = archivesWritten + 1
-    rowsArchived = rowsArchived + #bucket.entries
-    _staging[key] = nil
-    invalidateReconcileCache()
-
-    if opts.onProgress then
-      pcall(opts.onProgress, idx, #keys, key, #mergedEntries)
-    end
-
-    if C_Timer and C_Timer.After then
-      C_Timer.After(delaySec, flushOne)
-    else
-      flushOne()
-    end
+    local rowCount = #entries
+    ns.Archive:SaveAsync(entry.key, mergedEntries, {
+      byId     = mergedById,
+      delaySec = delaySec,
+      onComplete = function(ok, bytes, err)
+        archivesWritten = archivesWritten + 1
+        rowsArchived = rowsArchived + rowCount
+        if entry.bucket then
+          _staging[entry.partOfKey or entry.key] = nil
+        end
+        invalidateReconcileCache()
+        if opts.onProgress then
+          pcall(opts.onProgress, idx, #plan, entry.key, #mergedEntries)
+        end
+        if C_Timer and C_Timer.After then
+          C_Timer.After(delaySec, next)
+        else
+          next()
+        end
+      end,
+    })
   end
 
-  flushOne()
+  next()
 end
 
 -- Multi-source chunked driver. Walks registered sources in order, awaiting
