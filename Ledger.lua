@@ -1084,18 +1084,13 @@ local function loadFromDisk()
         }
         _loaded = true
         _dirty = false
-        -- One-shot migration of any legacy single-blob archives sitting
-        -- in TallyDB.ledger.archives (from prior alpha16-candidate
-        -- builds before the multi-SV switch). Each archive's blob gets
-        -- decompressed + deserialised + assigned to a slot global.
-        -- Idempotent — already-migrated archives are no-ops.
-        if ns.Archive and ns.Archive.MigrateAllLegacy then
-          local migrated = ns.Archive:MigrateAllLegacy()
-          if migrated and migrated > 0 then
-            print(string.format("|cff80a0ffTally:|r migrated %d archive blob(s) to slot storage.", migrated))
-            _dirty = true  -- TallyDB.ledger.archives was mutated; persist on logout
-          end
-        end
+        -- Legacy archives (TallyDB.ledger.archives[key].blob from prior
+        -- alpha16-candidate builds before the multi-SV switch) migrate
+        -- lazily to slots on first Archive:Load(key). Most operations
+        -- that touch archives (ClearSourceAsync's Delete fast-path,
+        -- gatherRows' GetIndex skip-test) avoid the load entirely when
+        -- archiveIndex carries sourceCounts. Eager migration would
+        -- freeze login by ~150-300ms per archive on the way in.
         return
       end
     end
