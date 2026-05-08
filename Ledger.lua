@@ -2617,12 +2617,28 @@ function Ledger:Clear()
   invalidateReconcileCache()
 end
 
--- Drop entries from a specific source across active + every archive.
--- Useful when an adapter changes its id scheme and we need to re-import
--- cleanly. Synchronous walk over archives is acceptable because this
--- is rarely-fired admin maintenance, but the cost scales with total
--- archive count — a future optimisation could defer archive rewrites
--- to the next seal cycle. Returns the number of entries removed.
+-- Drop entries from a specific source. Two variants:
+--
+--   ClearSource(sourceName)
+--     Synchronous wipe of active rows only. Returns the number of
+--     active rows removed. Archive rows for the same source are
+--     untouched — call ClearSourceAsync below to reach archives too.
+--     Suitable for small ledgers and call sites that don't tolerate
+--     async (e.g. wizard reset where the caller drives next-step
+--     transitions immediately).
+--
+--   ClearSourceAsync(sourceName, opts)
+--     Walks active synchronously (fast — bounded by active size cap),
+--     then walks each archive across C_Timer ticks: load, filter,
+--     either Delete (if all rows removed) or SaveAsync (if some
+--     remain). The async per-archive Save means each tick stays
+--     within the input-thread budget even when 30+ archives need
+--     rewriting on a big-ledger source clear.
+--
+--     opts:
+--       delaySec    pause between archive ticks (default 0.05)
+--       onProgress  function(idx, total, key, removedSoFar)
+--       onComplete  function(totalRemoved)
 function Ledger:ClearSource(sourceName)
   local d = db()
   local kept = {}
@@ -2640,34 +2656,91 @@ function Ledger:ClearSource(sourceName)
     _dirty = true
     invalidateReconcileCache()
   end
+  return removed
+end
 
-  if ns.Archive then
-    for _, key in ipairs(ns.Archive:List()) do
-      local archive = ns.Archive:Load(key)
-      if archive and archive.entries then
-        local archiveKept = {}
-        local archiveRemoved = 0
-        for _, e in ipairs(archive.entries) do
-          if e.source == sourceName then
-            archiveRemoved = archiveRemoved + 1
-          else
-            archiveKept[#archiveKept + 1] = e
-          end
-        end
-        if archiveRemoved > 0 then
-          if #archiveKept == 0 then
-            ns.Archive:Delete(key)
-          else
-            ns.Archive:Save(key, archiveKept)
-          end
-          removed = removed + archiveRemoved
-          invalidateReconcileCache()
-        end
+function Ledger:ClearSourceAsync(sourceName, opts)
+  opts = opts or {}
+  local delaySec = opts.delaySec or 0.05
+
+  -- Phase 1: active. Synchronous; bounded by the active soft cap.
+  local removed = self:ClearSource(sourceName)
+
+  if not ns.Archive then
+    if opts.onComplete then pcall(opts.onComplete, removed) end
+    return
+  end
+
+  local keys = ns.Archive:List()
+  if #keys == 0 then
+    if opts.onComplete then pcall(opts.onComplete, removed) end
+    return
+  end
+
+  local idx = 0
+  local function nextArchive()
+    if idx >= #keys then
+      if opts.onComplete then pcall(opts.onComplete, removed) end
+      return
+    end
+    idx = idx + 1
+    local key = keys[idx]
+
+    local archive = ns.Archive:Load(key)
+    if not archive or not archive.entries then
+      if opts.onProgress then pcall(opts.onProgress, idx, #keys, key, removed) end
+      if C_Timer and C_Timer.After then C_Timer.After(delaySec, nextArchive) else nextArchive() end
+      return
+    end
+
+    local archiveKept, archiveRemoved = {}, 0
+    for _, e in ipairs(archive.entries) do
+      if e.source == sourceName then
+        archiveRemoved = archiveRemoved + 1
+      else
+        archiveKept[#archiveKept + 1] = e
       end
+    end
+
+    if archiveRemoved == 0 then
+      -- No rows to remove from this archive; skip the rewrite.
+      if opts.onProgress then pcall(opts.onProgress, idx, #keys, key, removed) end
+      if C_Timer and C_Timer.After then C_Timer.After(delaySec, nextArchive) else nextArchive() end
+      return
+    end
+
+    removed = removed + archiveRemoved
+
+    if #archiveKept == 0 then
+      -- Empty archive — delete the file outright. Cheap, synchronous.
+      ns.Archive:Delete(key)
+      invalidateReconcileCache()
+      if opts.onProgress then pcall(opts.onProgress, idx, #keys, key, removed) end
+      if C_Timer and C_Timer.After then C_Timer.After(delaySec, nextArchive) else nextArchive() end
+      return
+    end
+
+    -- Partial — rewrite the archive via SaveAsync so the per-archive
+    -- serialise step doesn't block the input thread. Chain via
+    -- onComplete so the next archive starts only after this one lands.
+    if ns.Archive.SaveAsync then
+      ns.Archive:SaveAsync(key, archiveKept, {
+        delaySec = delaySec,
+        onComplete = function(ok, bytes)
+          invalidateReconcileCache()
+          if opts.onProgress then pcall(opts.onProgress, idx, #keys, key, removed) end
+          if C_Timer and C_Timer.After then C_Timer.After(delaySec, nextArchive) else nextArchive() end
+        end,
+      })
+    else
+      ns.Archive:Save(key, archiveKept)
+      invalidateReconcileCache()
+      if opts.onProgress then pcall(opts.onProgress, idx, #keys, key, removed) end
+      if C_Timer and C_Timer.After then C_Timer.After(delaySec, nextArchive) else nextArchive() end
     end
   end
 
-  return removed
+  nextArchive()
 end
 
 -- Total row count across active + archives + any pending-migration

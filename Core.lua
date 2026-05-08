@@ -525,20 +525,31 @@ local function handleSeed(rest)
 
   -- /tally seed clear
   if sub == "clear" then
-    if not (ns.Ledger and ns.Ledger.ClearSource) then
+    if not (ns.Ledger and ns.Ledger.ClearSourceAsync) then
       print("|cffff4040Tally:|r ledger unavailable.")
       return
     end
-    local removed = ns.Ledger:ClearSource(SEED_SOURCE)
-    print(string.format("|cff7fbfffTally:|r cleared %d seeded entries from active + archives.", removed or 0))
-    if ns.UI and ns.UI.MainFrame then
-      if ns.UI.MainFrame.UpdateHeaderNudge then
-        pcall(ns.UI.MainFrame.UpdateHeaderNudge, ns.UI.MainFrame)
-      end
-      if ns.UI.MainFrame.RefreshActivePage then
-        pcall(ns.UI.MainFrame.RefreshActivePage, ns.UI.MainFrame)
-      end
-    end
+    print("|cff7fbfffTally:|r clearing seeded entries (chunked across archives)…")
+    ns.Ledger:ClearSourceAsync(SEED_SOURCE, {
+      onProgress = function(idx, total, key, removedSoFar)
+        if idx % 5 == 0 or idx == total then
+          print(string.format("  scanned %s (%d / %d), %d removed so far",
+            key or "?", idx, total, removedSoFar or 0))
+        end
+      end,
+      onComplete = function(totalRemoved)
+        print(string.format("|cff80ff80Tally:|r cleared %d seeded entries from active + archives.",
+          totalRemoved or 0))
+        if ns.UI and ns.UI.MainFrame then
+          if ns.UI.MainFrame.UpdateHeaderNudge then
+            pcall(ns.UI.MainFrame.UpdateHeaderNudge, ns.UI.MainFrame)
+          end
+          if ns.UI.MainFrame.RefreshActivePage then
+            pcall(ns.UI.MainFrame.RefreshActivePage, ns.UI.MainFrame)
+          end
+        end
+      end,
+    })
     return
   end
 
