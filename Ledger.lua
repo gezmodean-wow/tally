@@ -1427,7 +1427,7 @@ function Ledger:StartMigration(opts)
     idx       = 0,
     total     = #_workingMem.pendingMigration.entries,
     chunkSize = opts.chunkSize or 500,
-    delaySec  = opts.delaySec or 0.05,
+    delaySec  = opts.delaySec or 0.005,
     currentMonthStart = getCurrentMonthStart(),
     staging   = {},
     opts      = opts,
@@ -1627,7 +1627,7 @@ function Ledger:Seal(opts)
     bucketIdx   = 0,
     bucketTotal = #toSeal,
     chunkSize   = opts.chunkSize or 500,
-    delaySec    = opts.delaySec or 0.05,
+    delaySec    = opts.delaySec or 0.005,
     opts        = opts,
   }
   sealStep()
@@ -1951,7 +1951,7 @@ end
 function Ledger:InsertManyChunked(entries, opts)
   opts = opts or {}
   local chunkSize = opts.chunkSize or 500
-  local delaySec = opts.delaySec or 0.05
+  local delaySec = opts.delaySec or 0.005
 
   if type(entries) ~= "table" or #entries == 0 then
     if opts.onDone then pcall(opts.onDone, 0, 0) end
@@ -2019,7 +2019,7 @@ end
 function Ledger:InsertManyChunkedRouted(entries, opts)
   opts = opts or {}
   local chunkSize = opts.chunkSize or 500
-  local delaySec  = opts.delaySec or 0.05
+  local delaySec  = opts.delaySec or 0.005
 
   if type(entries) ~= "table" or #entries == 0 then
     if opts.onDone then pcall(opts.onDone, 0, 0, 0, 0) end
@@ -2136,7 +2136,7 @@ end
 
 function Ledger:FlushStaging(opts)
   opts = opts or {}
-  local delaySec = opts.delaySec or 0.05
+  local delaySec = opts.delaySec or 0.005
   local keys = self:GetStagingKeys()
 
   if #keys == 0 then
@@ -2670,7 +2670,7 @@ end
 
 function Ledger:ClearSourceAsync(sourceName, opts)
   opts = opts or {}
-  local delaySec = opts.delaySec or 0.05
+  local delaySec = opts.delaySec or 0.005
 
   -- Phase 1: active. Synchronous; bounded by the active soft cap.
   local removed = self:ClearSource(sourceName)
@@ -2695,10 +2695,40 @@ function Ledger:ClearSourceAsync(sourceName, opts)
     idx = idx + 1
     local key = keys[idx]
 
-    -- Both Load and Save are async — Load via DeserializeAsync,
-    -- Save via SerializeAsync. Each archive cycle becomes a chain of
-    -- chunked yields rather than two big synchronous steps that each
-    -- ran ~100ms+ and dropped frame rate to single digits.
+    -- Fast paths via archiveIndex. computeIndex tracks sourceCounts
+    -- per archive, so we can answer "do I need to deserialise this
+    -- archive at all?" without touching the blob:
+    --   * sourceCount == 0 → archive has no rows from sourceName;
+    --                         skip the Load entirely.
+    --   * sourceCount == archive.count → archive is exclusively this
+    --                         source; Delete without Load.
+    --   * otherwise → fall through to the Load+filter+SaveAsync path.
+    --
+    -- Big speedup for /tally seed clear (every seeded archive is 100%
+    -- __seed → straight Delete) and for real ClearSource("tsm") on
+    -- a ledger where some archives only have FlipQueue/Native rows.
+    local index = ns.Archive.GetIndex and ns.Archive:GetIndex(key) or nil
+    if index and index.sourceCounts then
+      local srcCount = index.sourceCounts[sourceName] or 0
+      if srcCount == 0 then
+        if opts.onProgress then pcall(opts.onProgress, idx, #keys, key, removed) end
+        if C_Timer and C_Timer.After then C_Timer.After(delaySec, nextArchive) else nextArchive() end
+        return
+      elseif srcCount >= (index.count or 0) then
+        ns.Archive:Delete(key)
+        removed = removed + srcCount
+        invalidateReconcileCache()
+        if opts.onProgress then pcall(opts.onProgress, idx, #keys, key, removed) end
+        if C_Timer and C_Timer.After then C_Timer.After(delaySec, nextArchive) else nextArchive() end
+        return
+      end
+      -- Mixed-source archive — fall through to Load+filter+Save.
+    end
+
+    -- Slow path: archive contains at least one source-X row plus other
+    -- sources, OR archiveIndex doesn't have sourceCounts (legacy
+    -- archive predating this change). Load via DeserializeAsync,
+    -- filter, rewrite via SerializeAsync.
     local function continueAfterLoad(archive)
       if not archive or not archive.entries then
         if opts.onProgress then pcall(opts.onProgress, idx, #keys, key, removed) end

@@ -493,7 +493,7 @@ local function generateSeedEntriesChunked(count, monthsBack, opts)
   monthsBack = monthsBack or 12
   opts = opts or {}
   local chunkSize = opts.chunkSize or 1500
-  local delaySec  = opts.delaySec or 0.05
+  local delaySec  = opts.delaySec or 0.005
   local now = time()
   local rangeSec = monthsBack * 30 * 86400
 
@@ -593,7 +593,7 @@ local function handleSeed(rest)
           end
           if not completed then
             if C_Timer and C_Timer.After then
-              C_Timer.After(0.05, step)
+              C_Timer.After(0.005, step)
             else
               step()
             end
@@ -647,7 +647,7 @@ local function handleSeed(rest)
       print("|cff7fbfffTally:|r routing into active + staging…")
       ns.Ledger:InsertManyChunkedRouted(entries, {
         chunkSize = 500,
-        delaySec  = 0.05,
+        delaySec  = 0.005,
         onProgress = function(inserted, total)
           if inserted % 25000 == 0 then
             print(string.format("  routed %d / %d (%d%%)", inserted, total, math.floor(100 * inserted / total)))
@@ -659,7 +659,7 @@ local function handleSeed(rest)
           if ns.Ledger.GetStagingRowCount and ns.Ledger:GetStagingRowCount() > 0 then
             print("|cff7fbfffTally:|r flushing staging buckets to archives…")
             ns.Ledger:FlushStaging({
-              delaySec = 0.05,
+              delaySec = 0.005,
               onProgress = function(idx, total, key)
                 print(string.format("  flushing %s (%d / %d)", key or "?", idx, total))
               end,

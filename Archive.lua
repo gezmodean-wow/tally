@@ -91,6 +91,7 @@ local function computeIndex(entries)
   local itemIDs = {}
   local charKeys = {}
   local kindCounts = {}
+  local sourceCounts = {}
   local fromTs, toTs
   local netCopper, sales, purchases = 0, 0, 0
 
@@ -98,6 +99,7 @@ local function computeIndex(entries)
     if e.itemID then itemIDs[e.itemID] = true end
     if e.charKey then charKeys[e.charKey] = true end
     if e.kind then kindCounts[e.kind] = (kindCounts[e.kind] or 0) + 1 end
+    if e.source then sourceCounts[e.source] = (sourceCounts[e.source] or 0) + 1 end
     if e.atTime then
       if not fromTs or e.atTime < fromTs then fromTs = e.atTime end
       if not toTs or e.atTime > toTs then toTs = e.atTime end
@@ -121,6 +123,7 @@ local function computeIndex(entries)
     itemIDs           = itemIDs,
     charKeys          = charKeys,
     kindCounts        = kindCounts,
+    sourceCounts      = sourceCounts,
     monthlyAggregates = {
       netCopper = netCopper,
       sales     = sales,
@@ -201,7 +204,7 @@ end
 -- extra ticks). Same LRU semantics as Load on a cache miss.
 function Archive:LoadAsync(key, opts)
   opts = opts or {}
-  local delaySec = opts.delaySec or 0.05
+  local delaySec = opts.delaySec or 0.005
 
   if _cache[key] then
     cacheBump(key)
@@ -375,7 +378,13 @@ function Archive:SaveAsync(key, entries, opts)
     return
   end
   opts = opts or {}
-  local delaySec = opts.delaySec or 0.05
+  -- delaySec defaults to 0.005 (5ms). The yieldCheck at 1024 items
+  -- already keeps each tick under one frame; the inter-tick wait only
+  -- needs to be large enough to let C_Timer reschedule for next frame.
+  -- The previous 50ms default meant 60% of wall-clock was idle wait
+  -- between active yields — fine for smoothness but minutes of total
+  -- runtime on multi-archive operations.
+  local delaySec = opts.delaySec or 0.005
 
   local byId = opts.byId
   if not byId then
