@@ -192,6 +192,95 @@ function Archive:Load(key)
   return cached
 end
 
+-- Async variant of Load. Decompresses synchronously (cheap relative
+-- to deserialise) and then drives LibSerialize:DeserializeAsync across
+-- ticks with the same 1024-item yieldCheck the SaveAsync write path
+-- uses. Caller passes opts.onComplete(cachedOrNil) for the result.
+--
+-- For the cache-hit fast path the callback fires synchronously (no
+-- extra ticks). Same LRU semantics as Load on a cache miss.
+function Archive:LoadAsync(key, opts)
+  opts = opts or {}
+  local delaySec = opts.delaySec or 0.05
+
+  if _cache[key] then
+    cacheBump(key)
+    if opts.onComplete then pcall(opts.onComplete, _cache[key]) end
+    return
+  end
+  if not (LibSerialize and LibDeflate) then
+    if opts.onComplete then pcall(opts.onComplete, nil) end
+    return
+  end
+
+  local rec = archivesTable()[key]
+  if not rec or not rec.blob then
+    if opts.onComplete then pcall(opts.onComplete, nil) end
+    return
+  end
+  if rec.schemaVer and rec.schemaVer ~= self.SCHEMA_VERSION then
+    if opts.onComplete then pcall(opts.onComplete, nil) end
+    return
+  end
+
+  local decompressed = LibDeflate:DecompressDeflate(rec.blob)
+  if not decompressed then
+    if opts.onComplete then pcall(opts.onComplete, nil) end
+    return
+  end
+
+  local YIELD_EVERY = 1024
+  local handler
+  local ok, err = pcall(function()
+    handler = LibSerialize:DeserializeAsync(decompressed, {
+      yieldCheck = function(scratch)
+        scratch.count = (scratch.count or 0) + 1
+        if scratch.count >= YIELD_EVERY then
+          scratch.count = 0
+          return true
+        end
+        return false
+      end,
+    })
+  end)
+  if not ok or not handler then
+    if opts.onComplete then pcall(opts.onComplete, nil) end
+    return
+  end
+
+  local function step()
+    local resumeOk, completed, success, payload = pcall(handler)
+    if not resumeOk then
+      if opts.onComplete then pcall(opts.onComplete, nil) end
+      return
+    end
+    if not completed then
+      if C_Timer and C_Timer.After then
+        C_Timer.After(delaySec, step)
+      else
+        step()
+      end
+      return
+    end
+
+    if not success or type(payload) ~= "table" then
+      if opts.onComplete then pcall(opts.onComplete, nil) end
+      return
+    end
+
+    local cached = {
+      entries = payload.entries or {},
+      byId    = payload.byId or {},
+    }
+    cacheEvictOldestIfFull()
+    _cache[key] = cached
+    _cacheOrder[#_cacheOrder + 1] = key
+    if opts.onComplete then pcall(opts.onComplete, cached) end
+  end
+
+  step()
+end
+
 function Archive:Unload(key)
   for i = #_cacheOrder, 1, -1 do
     if _cacheOrder[i] == key then

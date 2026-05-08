@@ -2220,48 +2220,57 @@ function Ledger:FlushStaging(opts)
     end
 
     -- Merge with existing archive at the same key (dedupe by entry id).
-    -- For numbered parts (e.g. "2025-12-p1"), each part has its own key,
-    -- so the merge is normally a no-op the first time the part is
-    -- written. It matters on re-flush of a key that already had a
-    -- part of the same number (e.g. seal followed by a re-import).
-    local mergedEntries, mergedById = {}, {}
-    local existing = ns.Archive:Load(entry.key)
-    if existing then
-      for _, e in ipairs(existing.entries) do
+    -- LoadAsync drives the merge-load deserialise across ticks so each
+    -- per-archive cycle stays smooth; the synchronous Load call here
+    -- previously dropped frame rate to ~10 fps on slower CPUs.
+    local rowCount = #entries
+    local function continueAfterLoad(existing)
+      local mergedEntries, mergedById = {}, {}
+      if existing and existing.entries then
+        for _, e in ipairs(existing.entries) do
+          if e.id and not mergedById[e.id] then
+            mergedById[e.id] = true
+            mergedEntries[#mergedEntries + 1] = e
+          end
+        end
+      end
+      for _, e in ipairs(entries) do
         if e.id and not mergedById[e.id] then
           mergedById[e.id] = true
           mergedEntries[#mergedEntries + 1] = e
         end
       end
-    end
-    for _, e in ipairs(entries) do
-      if e.id and not mergedById[e.id] then
-        mergedById[e.id] = true
-        mergedEntries[#mergedEntries + 1] = e
-      end
+
+      ns.Archive:SaveAsync(entry.key, mergedEntries, {
+        byId     = mergedById,
+        delaySec = delaySec,
+        onComplete = function(ok, bytes, err)
+          archivesWritten = archivesWritten + 1
+          rowsArchived = rowsArchived + rowCount
+          if entry.bucket then
+            _staging[entry.partOfKey or entry.key] = nil
+          end
+          invalidateReconcileCache()
+          if opts.onProgress then
+            pcall(opts.onProgress, idx, #plan, entry.key, #mergedEntries)
+          end
+          if C_Timer and C_Timer.After then
+            C_Timer.After(delaySec, next)
+          else
+            next()
+          end
+        end,
+      })
     end
 
-    local rowCount = #entries
-    ns.Archive:SaveAsync(entry.key, mergedEntries, {
-      byId     = mergedById,
-      delaySec = delaySec,
-      onComplete = function(ok, bytes, err)
-        archivesWritten = archivesWritten + 1
-        rowsArchived = rowsArchived + rowCount
-        if entry.bucket then
-          _staging[entry.partOfKey or entry.key] = nil
-        end
-        invalidateReconcileCache()
-        if opts.onProgress then
-          pcall(opts.onProgress, idx, #plan, entry.key, #mergedEntries)
-        end
-        if C_Timer and C_Timer.After then
-          C_Timer.After(delaySec, next)
-        else
-          next()
-        end
-      end,
-    })
+    if ns.Archive.LoadAsync then
+      ns.Archive:LoadAsync(entry.key, {
+        delaySec = delaySec,
+        onComplete = continueAfterLoad,
+      })
+    else
+      continueAfterLoad(ns.Archive:Load(entry.key))
+    end
   end
 
   next()
@@ -2686,44 +2695,42 @@ function Ledger:ClearSourceAsync(sourceName, opts)
     idx = idx + 1
     local key = keys[idx]
 
-    local archive = ns.Archive:Load(key)
-    if not archive or not archive.entries then
-      if opts.onProgress then pcall(opts.onProgress, idx, #keys, key, removed) end
-      if C_Timer and C_Timer.After then C_Timer.After(delaySec, nextArchive) else nextArchive() end
-      return
-    end
-
-    local archiveKept, archiveRemoved = {}, 0
-    for _, e in ipairs(archive.entries) do
-      if e.source == sourceName then
-        archiveRemoved = archiveRemoved + 1
-      else
-        archiveKept[#archiveKept + 1] = e
+    -- Both Load and Save are async — Load via DeserializeAsync,
+    -- Save via SerializeAsync. Each archive cycle becomes a chain of
+    -- chunked yields rather than two big synchronous steps that each
+    -- ran ~100ms+ and dropped frame rate to single digits.
+    local function continueAfterLoad(archive)
+      if not archive or not archive.entries then
+        if opts.onProgress then pcall(opts.onProgress, idx, #keys, key, removed) end
+        if C_Timer and C_Timer.After then C_Timer.After(delaySec, nextArchive) else nextArchive() end
+        return
       end
-    end
 
-    if archiveRemoved == 0 then
-      -- No rows to remove from this archive; skip the rewrite.
-      if opts.onProgress then pcall(opts.onProgress, idx, #keys, key, removed) end
-      if C_Timer and C_Timer.After then C_Timer.After(delaySec, nextArchive) else nextArchive() end
-      return
-    end
+      local archiveKept, archiveRemoved = {}, 0
+      for _, e in ipairs(archive.entries) do
+        if e.source == sourceName then
+          archiveRemoved = archiveRemoved + 1
+        else
+          archiveKept[#archiveKept + 1] = e
+        end
+      end
 
-    removed = removed + archiveRemoved
+      if archiveRemoved == 0 then
+        if opts.onProgress then pcall(opts.onProgress, idx, #keys, key, removed) end
+        if C_Timer and C_Timer.After then C_Timer.After(delaySec, nextArchive) else nextArchive() end
+        return
+      end
 
-    if #archiveKept == 0 then
-      -- Empty archive — delete the file outright. Cheap, synchronous.
-      ns.Archive:Delete(key)
-      invalidateReconcileCache()
-      if opts.onProgress then pcall(opts.onProgress, idx, #keys, key, removed) end
-      if C_Timer and C_Timer.After then C_Timer.After(delaySec, nextArchive) else nextArchive() end
-      return
-    end
+      removed = removed + archiveRemoved
 
-    -- Partial — rewrite the archive via SaveAsync so the per-archive
-    -- serialise step doesn't block the input thread. Chain via
-    -- onComplete so the next archive starts only after this one lands.
-    if ns.Archive.SaveAsync then
+      if #archiveKept == 0 then
+        ns.Archive:Delete(key)
+        invalidateReconcileCache()
+        if opts.onProgress then pcall(opts.onProgress, idx, #keys, key, removed) end
+        if C_Timer and C_Timer.After then C_Timer.After(delaySec, nextArchive) else nextArchive() end
+        return
+      end
+
       ns.Archive:SaveAsync(key, archiveKept, {
         delaySec = delaySec,
         onComplete = function(ok, bytes)
@@ -2732,11 +2739,15 @@ function Ledger:ClearSourceAsync(sourceName, opts)
           if C_Timer and C_Timer.After then C_Timer.After(delaySec, nextArchive) else nextArchive() end
         end,
       })
+    end
+
+    if ns.Archive.LoadAsync then
+      ns.Archive:LoadAsync(key, {
+        delaySec = delaySec,
+        onComplete = continueAfterLoad,
+      })
     else
-      ns.Archive:Save(key, archiveKept)
-      invalidateReconcileCache()
-      if opts.onProgress then pcall(opts.onProgress, idx, #keys, key, removed) end
-      if C_Timer and C_Timer.After then C_Timer.After(delaySec, nextArchive) else nextArchive() end
+      continueAfterLoad(ns.Archive:Load(key))
     end
   end
 

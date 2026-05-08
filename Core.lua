@@ -484,11 +484,15 @@ end
 -- Chunked generator. Builds the entry list across C_Timer ticks so a
 -- 200k-row seed doesn't freeze the input thread before routing even
 -- begins. Calls onComplete(entries) when done.
+--
+-- Default chunkSize 1500 keeps each tick under ~15ms on slower CPUs
+-- (each entry build is ~9μs — 1500 entries ≈ 13ms = under one frame
+-- at 60fps; 5000 entries was hitting ~45ms = ~23fps in tester reports).
 local function generateSeedEntriesChunked(count, monthsBack, opts)
   count = count or 100000
   monthsBack = monthsBack or 12
   opts = opts or {}
-  local chunkSize = opts.chunkSize or 5000
+  local chunkSize = opts.chunkSize or 1500
   local delaySec  = opts.delaySec or 0.05
   local now = time()
   local rangeSec = monthsBack * 30 * 86400
