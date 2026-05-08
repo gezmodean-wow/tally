@@ -3,7 +3,7 @@
 ## Notes: Personal Capital for WoW — ledger, net-worth, and per-item research across all your characters and accounts.
 ## Author: Gezmodean
 ## Version: @project-version@
-## SavedVariables: TallyDB, CogworksSharedDB
+## SavedVariables: TallyDB, CogworksSharedDB, TallyA001, TallyA002, TallyA003, TallyA004, TallyA005, TallyA006, TallyA007, TallyA008, TallyA009, TallyA010, TallyA011, TallyA012, TallyA013, TallyA014, TallyA015, TallyA016, TallyA017, TallyA018, TallyA019, TallyA020, TallyA021, TallyA022, TallyA023, TallyA024, TallyA025, TallyA026, TallyA027, TallyA028, TallyA029, TallyA030, TallyA031, TallyA032, TallyA033, TallyA034, TallyA035, TallyA036, TallyA037, TallyA038, TallyA039, TallyA040, TallyA041, TallyA042, TallyA043, TallyA044, TallyA045, TallyA046, TallyA047, TallyA048, TallyA049, TallyA050, TallyA051, TallyA052, TallyA053, TallyA054, TallyA055, TallyA056, TallyA057, TallyA058, TallyA059, TallyA060
 ## SavedVariablesPerCharacter: TallyCharDB
 ## Dependencies: Syndicator
 ## X-Category: Miscellaneous

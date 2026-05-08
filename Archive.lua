@@ -3,28 +3,48 @@
 -- Per-month (and optionally per-week) archive storage for sealed ledger
 -- entries. See TLY-51 for the locked design spec.
 --
--- Storage layout (TallyDB.ledger):
---   active       = <serialised+deflated blob>          -- mutable, hot path (Ledger.lua)
---   activeMeta   = { count, savedAt, ... }
---   archives     = {
---     ["2025-10"]    = { blob, count, fromTs, toTs, bytes, schemaVer, savedAt },
---     ["2025-12-w1"] = { ... },                         -- subdivided when month >50k rows
---     ...
---   }
---   archiveIndex = {
---     ["2025-10"] = { itemIDs, charKeys, kindCounts, monthlyAggregates, count, fromTs, toTs },
---     ...
+-- ============================================================================
+-- Storage layout (multi-SV)
+-- ============================================================================
+--
+-- alpha16 splits archives across multiple SavedVariables files. Each
+-- archive lives in its own slot global (TallyA001 .. TallyA060), and
+-- because each SV file is its own Lua chunk, each slot's contents only
+-- contributes to that file's constant pool — sidesteps the alpha13
+-- chunk-cap (262,144 unique constants) overflow that motivated the
+-- alpha14 LibSerialize+LibDeflate compression. With slots, we can
+-- store entries as raw Lua tables (no serialise / no compress) and
+-- archive writes become near-instant table assignments instead of
+-- multi-second serialise+compress cycles.
+--
+-- Per-slot shape (set by Save):
+--   _G[TallyA<NNN>] = {
+--     key       = "2025-12-p1" | "2025-12" | ...,
+--     entries   = { ... raw entry tables ... },
+--     byId      = { [id] = true, ... },
+--     count, fromTs, toTs, schemaVer, savedAt,
 --   }
 --
--- Archives are write-once at seal time, read-only thereafter (until a
--- schema-version bump triggers a full rebuild). archiveIndex stays
--- resident in memory at all times — it's small (per-archive itemID set
--- + charKey set + per-kind counts + monthly aggregates) and lets the
--- query layer answer "do I need to deserialise this archive?" without
--- touching the blob.
+-- Slot allocation (small, persisted in TallyDB):
+--   TallyDB.ledger.archiveSlots = { [archiveKey] = slotNum, ... }
+--   TallyDB.ledger.nextSlot     = N    (high-water mark for new keys)
+--   TallyDB.ledger.archiveIndex = { [archiveKey] = { itemIDs, charKeys,
+--                                                     kindCounts,
+--                                                     sourceCounts,
+--                                                     monthlyAggregates,
+--                                                     count, fromTs, toTs } }
 --
--- This file is the storage primitive only. Sealing policy (when to cut
--- entries from active → archives) lives in Ledger.lua's seal path.
+-- archiveIndex stays resident in memory at all times (it's tiny relative
+-- to the slot blobs) and lets the query layer answer "do I need to load
+-- this archive?" without touching the slot. ClearSourceAsync uses
+-- sourceCounts as a structural fast-path: archives where the cleared
+-- source has 0 rows skip the load entirely; archives where the source
+-- is 100% of rows get Deleted without load.
+--
+-- Backward compat: pre-multi-SV archive shapes (TallyDB.ledger.archives[key]
+-- with rec.blob compressed/serialised) still load via Archive:Load's
+-- legacy branch. They're migrated to slots on first read in the new
+-- code (see migrateLegacyArchive below).
 
 local addonName, ns = ...
 
@@ -34,18 +54,23 @@ ns.Archive = Archive
 local LibSerialize = LibStub and LibStub("LibSerialize", true)
 local LibDeflate   = LibStub and LibStub("LibDeflate", true)
 
--- Bumps when the cluster algorithm or entry shape changes in a way that
--- invalidates already-sealed archives. Load() returns nil for any
--- mismatched archive and the caller is expected to re-seal from active.
--- For alpha16 there is no prior version, so this is purely forward-compat.
+-- Bumped when the entry shape on disk changes incompatibly. Slots tagged
+-- with a different schemaVer return nil from Load and the caller is
+-- expected to re-seal. For alpha16 there is no prior version, so this is
+-- purely forward-compat.
 Archive.SCHEMA_VERSION = 1
 
--- LRU(3) cache. Loaded archives stay resident until evicted; cap matches
--- the spec ("at most 3 archives held"). Cache is keyed on the same key
--- the archive uses on disk ("2025-10" / "2025-12-w1" / ...).
+-- Number of slot SVs declared in the TOC. If we run out, Save returns
+-- (false, "no free slots"). Bump in tally.toc + here together.
+Archive.SLOT_COUNT = 60
+
+-- LRU(3) cache. Cached entries point at the same table refs the slot
+-- global holds, so the cache is mostly a "tracked-as-loaded" set for
+-- diag purposes; reads go through it but the slot global is already in
+-- memory either way (WoW deserialised it at game startup).
 local CACHE_CAP = 3
-local _cache = {}        -- key -> { entries, byId }
-local _cacheOrder = {}   -- list of keys, oldest first
+local _cache = {}
+local _cacheOrder = {}
 
 local function cacheBump(key)
   for i = #_cacheOrder, 1, -1 do
@@ -68,22 +93,63 @@ end
 -- Persistence access helpers
 -- ============================================================================
 
-local function archivesTable()
+local function ledgerTable()
   TallyDB = TallyDB or {}
   TallyDB.ledger = TallyDB.ledger or {}
-  TallyDB.ledger.archives = TallyDB.ledger.archives or {}
-  return TallyDB.ledger.archives
+  return TallyDB.ledger
+end
+
+local function archiveSlotsTable()
+  local L = ledgerTable()
+  L.archiveSlots = L.archiveSlots or {}
+  return L.archiveSlots
 end
 
 local function indexTable()
-  TallyDB = TallyDB or {}
-  TallyDB.ledger = TallyDB.ledger or {}
-  TallyDB.ledger.archiveIndex = TallyDB.ledger.archiveIndex or {}
-  return TallyDB.ledger.archiveIndex
+  local L = ledgerTable()
+  L.archiveIndex = L.archiveIndex or {}
+  return L.archiveIndex
+end
+
+local function legacyArchivesTable()
+  local L = ledgerTable()
+  return L.archives  -- nil if never populated; that's fine
+end
+
+local function slotGlobalName(slotNum)
+  return string.format("TallyA%03d", slotNum)
+end
+
+-- Resolve archiveKey -> slot number, allocating a new slot if needed.
+-- Returns (slotNum, globalName) on success, (nil, errMsg) if all slots
+-- are occupied.
+local function resolveSlot(key)
+  local slots = archiveSlotsTable()
+  local existing = slots[key]
+  if existing then return existing, slotGlobalName(existing) end
+
+  local L = ledgerTable()
+  L.nextSlot = L.nextSlot or 0
+  if L.nextSlot >= Archive.SLOT_COUNT then
+    return nil, "no free archive slots — bump SLOT_COUNT in tally.toc + Archive.lua"
+  end
+  L.nextSlot = L.nextSlot + 1
+  slots[key] = L.nextSlot
+  return L.nextSlot, slotGlobalName(L.nextSlot)
+end
+
+local function getSlotGlobal(key)
+  local slot = archiveSlotsTable()[key]
+  if not slot then return nil end
+  return _G[slotGlobalName(slot)], slot
+end
+
+local function clearSlotGlobal(slotNum)
+  _G[slotGlobalName(slotNum)] = nil
 end
 
 -- ============================================================================
--- Index computation (small, plain-table — never compressed)
+-- Index computation
 -- ============================================================================
 
 local function computeIndex(entries)
@@ -132,47 +198,8 @@ local function computeIndex(entries)
   }
 end
 
--- ============================================================================
--- Public API
--- ============================================================================
-
-function Archive:Has(key)
-  return archivesTable()[key] ~= nil
-end
-
--- Sorted ascending — keys are ISO-month strings ("2025-10") with optional
--- "-wN" suffix; lexicographic sort matches chronological order.
-function Archive:List()
-  local out = {}
-  for k in pairs(archivesTable()) do out[#out + 1] = k end
-  table.sort(out)
-  return out
-end
-
-function Archive:GetIndex(key)
-  return indexTable()[key]
-end
-
-function Archive:GetMeta(key)
-  local rec = archivesTable()[key]
-  if not rec then return nil end
-  return {
-    count     = rec.count,
-    fromTs    = rec.fromTs,
-    toTs      = rec.toTs,
-    bytes     = rec.bytes,
-    schemaVer = rec.schemaVer,
-    savedAt   = rec.savedAt,
-  }
-end
-
--- Decompress + deserialise an archive blob. Caches in LRU. Returns
--- { entries = {...}, byId = {...} } on success, nil if the archive is
--- missing, on a schema mismatch, or if libs are unavailable.
--- Backfill sourceCounts on archiveIndex entries that predate the
--- sourceCounts addition. Cheap (one walk over the loaded entries) and
--- idempotent. After this runs once per archive, future ClearSource /
--- diag / NetWorth queries that key off sourceCounts hit the fast path.
+-- Backfill sourceCounts on legacy archiveIndex entries that predate the
+-- sourceCounts addition. Idempotent walk over the loaded entries.
 local function backfillSourceCounts(key, entries)
   local idx = indexTable()[key]
   if not idx or idx.sourceCounts then return end
@@ -183,138 +210,185 @@ local function backfillSourceCounts(key, entries)
   idx.sourceCounts = sourceCounts
 end
 
-function Archive:Load(key)
-  if _cache[key] then
-    cacheBump(key)
-    return _cache[key]
-  end
+-- ============================================================================
+-- Legacy archive migration (current-branch blob shape -> slot shape)
+-- ============================================================================
+--
+-- Pre-multi-SV archives lived as TallyDB.ledger.archives[key] = { blob,
+-- count, ... }. On first read in the multi-SV code we deserialise the
+-- blob (decompress if compressed) and assign the resulting entries to
+-- a freshly-allocated slot. The TallyDB.ledger.archives entry gets
+-- removed once the slot lands so the next save doesn't have to migrate
+-- it again. archiveIndex stays untouched (already keyed correctly).
+
+local function migrateLegacyArchive(key, legacyRec)
   if not LibSerialize then return nil end
+  if not legacyRec or not legacyRec.blob then return nil end
 
-  local rec = archivesTable()[key]
-  if not rec or not rec.blob then return nil end
-  if rec.schemaVer and rec.schemaVer ~= self.SCHEMA_VERSION then return nil end
-
-  -- Pre-existing archives (rec.compressed == nil or true) carry deflate
-  -- compression on top of the LibSerialize bytes; archives written by
-  -- this build set rec.compressed = false and skip the decompress.
-  local stream = rec.blob
-  if rec.compressed ~= false then
+  -- Pre-existing compressed archives need LibDeflate; uncompressed
+  -- branches that briefly shipped with rec.compressed = false skip the
+  -- decompress.
+  local stream = legacyRec.blob
+  if legacyRec.compressed ~= false then
     if not LibDeflate then return nil end
-    stream = LibDeflate:DecompressDeflate(rec.blob)
+    stream = LibDeflate:DecompressDeflate(legacyRec.blob)
     if not stream then return nil end
   end
   local ok, payload = LibSerialize:Deserialize(stream)
   if not ok or type(payload) ~= "table" then return nil end
 
-  local cached = {
-    entries = payload.entries or {},
-    byId    = payload.byId or {},
+  local entries = payload.entries or {}
+  local byId    = payload.byId or {}
+
+  local slot, globalName = resolveSlot(key)
+  if not slot then return nil end
+
+  _G[globalName] = {
+    key       = key,
+    entries   = entries,
+    byId      = byId,
+    count     = #entries,
+    fromTs    = legacyRec.fromTs,
+    toTs      = legacyRec.toTs,
+    schemaVer = Archive.SCHEMA_VERSION,
+    savedAt   = legacyRec.savedAt or time(),
   }
-  backfillSourceCounts(key, cached.entries)
-  cacheEvictOldestIfFull()
-  _cache[key] = cached
-  _cacheOrder[#_cacheOrder + 1] = key
-  return cached
+
+  -- Drop the legacy entry. Index entry is preserved (already populated;
+  -- backfill sourceCounts now if it wasn't).
+  local L = ledgerTable()
+  if L.archives then L.archives[key] = nil end
+  backfillSourceCounts(key, entries)
+
+  return _G[globalName]
 end
 
--- Async variant of Load. Decompresses synchronously (cheap relative
--- to deserialise) and then drives LibSerialize:DeserializeAsync across
--- ticks with the same 1024-item yieldCheck the SaveAsync write path
--- uses. Caller passes opts.onComplete(cachedOrNil) for the result.
---
--- For the cache-hit fast path the callback fires synchronously (no
--- extra ticks). Same LRU semantics as Load on a cache miss.
-function Archive:LoadAsync(key, opts)
-  opts = opts or {}
-  local delaySec = opts.delaySec or 0.005
+-- Walk every legacy archive and migrate to slots in one pass. Called by
+-- Ledger:loadFromDisk on first multi-SV login. Synchronous; per-archive
+-- cost is one decompress + deserialise (the same cost that Compare /
+-- Lifecycle would have paid lazily). For zpectre-scale ledgers this is
+-- the once-only pain point of the multi-SV migration.
+function Archive:MigrateAllLegacy()
+  local legacy = legacyArchivesTable()
+  if not legacy then return 0 end
+  local count = 0
+  -- Sort keys so slots get allocated in chronological order — readable
+  -- in /tally diag output.
+  local keys = {}
+  for k in pairs(legacy) do keys[#keys + 1] = k end
+  table.sort(keys)
+  for _, key in ipairs(keys) do
+    if migrateLegacyArchive(key, legacy[key]) then
+      count = count + 1
+    end
+  end
+  -- Defensive: if legacy still has entries (migration failed for some),
+  -- leave them alone — they'll continue to work via the legacy Load
+  -- branch below until the user resolves them manually.
+  return count
+end
 
+-- ============================================================================
+-- Public API — Save (synchronous, fast)
+-- ============================================================================
+--
+-- With slots, Save is a single table assignment plus an index update.
+-- No serialise step, no compress step. The async variant exists for
+-- API compatibility with the chunked flush path but delegates to Save
+-- since there's no per-tick yielding to do.
+
+function Archive:Save(key, entries, opts)
+  if type(key) ~= "string" or key == "" then return false, "invalid key" end
+  if type(entries) ~= "table" then return false, "entries must be a table" end
+  opts = opts or {}
+
+  local byId = opts.byId
+  if not byId then
+    byId = {}
+    for _, e in ipairs(entries) do
+      if e.id then byId[e.id] = true end
+    end
+  end
+
+  local slot, globalName = resolveSlot(key)
+  if not slot then
+    if opts.onComplete then pcall(opts.onComplete, false, 0, globalName) end
+    return false, globalName  -- error message in second slot
+  end
+
+  local index = computeIndex(entries)
+
+  _G[globalName] = {
+    key       = key,
+    entries   = entries,
+    byId      = byId,
+    count     = #entries,
+    fromTs    = index.fromTs,
+    toTs      = index.toTs,
+    schemaVer = self.SCHEMA_VERSION,
+    savedAt   = time(),
+  }
+  indexTable()[key] = index
+
+  -- Drop any cache entry so subsequent reads pick up the rewrite.
+  self:Unload(key)
+
+  if opts.onComplete then pcall(opts.onComplete, true, 0) end
+  return true, 0
+end
+
+-- API-compatible with the previous async signature. Now synchronous-
+-- but-fast — slot writes don't need yielding.
+function Archive:SaveAsync(key, entries, opts)
+  return self:Save(key, entries, opts)
+end
+
+-- ============================================================================
+-- Public API — Load
+-- ============================================================================
+
+function Archive:Load(key)
   if _cache[key] then
     cacheBump(key)
-    if opts.onComplete then pcall(opts.onComplete, _cache[key]) end
-    return
-  end
-  if not LibSerialize then
-    if opts.onComplete then pcall(opts.onComplete, nil) end
-    return
+    return _cache[key]
   end
 
-  local rec = archivesTable()[key]
-  if not rec or not rec.blob then
-    if opts.onComplete then pcall(opts.onComplete, nil) end
-    return
-  end
-  if rec.schemaVer and rec.schemaVer ~= self.SCHEMA_VERSION then
-    if opts.onComplete then pcall(opts.onComplete, nil) end
-    return
-  end
-
-  -- Pre-existing archives (rec.compressed == nil or true) need deflate
-  -- decompression first; archives written by this build stored raw
-  -- serialised bytes and skip this step.
-  local stream = rec.blob
-  if rec.compressed ~= false then
-    if not LibDeflate then
-      if opts.onComplete then pcall(opts.onComplete, nil) end
-      return
-    end
-    stream = LibDeflate:DecompressDeflate(rec.blob)
-    if not stream then
-      if opts.onComplete then pcall(opts.onComplete, nil) end
-      return
-    end
-  end
-
-  local YIELD_EVERY = 1024
-  local handler
-  local ok, err = pcall(function()
-    handler = LibSerialize:DeserializeAsync(stream, {
-      yieldCheck = function(scratch)
-        scratch.count = (scratch.count or 0) + 1
-        if scratch.count >= YIELD_EVERY then
-          scratch.count = 0
-          return true
-        end
-        return false
-      end,
-    })
-  end)
-  if not ok or not handler then
-    if opts.onComplete then pcall(opts.onComplete, nil) end
-    return
-  end
-
-  local function step()
-    local resumeOk, completed, success, payload = pcall(handler)
-    if not resumeOk then
-      if opts.onComplete then pcall(opts.onComplete, nil) end
-      return
-    end
-    if not completed then
-      if C_Timer and C_Timer.After then
-        C_Timer.After(delaySec, step)
-      else
-        step()
-      end
-      return
-    end
-
-    if not success or type(payload) ~= "table" then
-      if opts.onComplete then pcall(opts.onComplete, nil) end
-      return
-    end
-
-    local cached = {
-      entries = payload.entries or {},
-      byId    = payload.byId or {},
-    }
+  -- Slot path (post-multi-SV).
+  local rec, slot = getSlotGlobal(key)
+  if rec and rec.entries then
+    if rec.schemaVer and rec.schemaVer ~= self.SCHEMA_VERSION then return nil end
+    local cached = { entries = rec.entries, byId = rec.byId or {} }
     backfillSourceCounts(key, cached.entries)
     cacheEvictOldestIfFull()
     _cache[key] = cached
     _cacheOrder[#_cacheOrder + 1] = key
-    if opts.onComplete then pcall(opts.onComplete, cached) end
+    return cached
   end
 
-  step()
+  -- Legacy path: TallyDB.ledger.archives[key].blob still present.
+  -- Migrate it lazily and return.
+  local legacy = legacyArchivesTable()
+  if legacy and legacy[key] then
+    local migrated = migrateLegacyArchive(key, legacy[key])
+    if migrated then
+      local cached = { entries = migrated.entries, byId = migrated.byId or {} }
+      cacheEvictOldestIfFull()
+      _cache[key] = cached
+      _cacheOrder[#_cacheOrder + 1] = key
+      return cached
+    end
+  end
+
+  return nil
+end
+
+-- Async variant — synchronous-but-fast for slot-resident archives. The
+-- onComplete callback fires immediately. Kept for API compatibility
+-- with callers that chained async Save/Load operations.
+function Archive:LoadAsync(key, opts)
+  opts = opts or {}
+  local cached = self:Load(key)
+  if opts.onComplete then pcall(opts.onComplete, cached) end
 end
 
 function Archive:Unload(key)
@@ -332,179 +406,90 @@ function Archive:UnloadAll()
   _cacheOrder = {}
 end
 
--- Serialise + compress a list of entries and write them to disk under
--- `key`. Builds and persists archiveIndex[key] from the same entries.
--- Always evicts any cached copy so subsequent reads pick up the rewrite.
---
--- opts (optional):
---   byId         pre-built byId map; computed from entries if absent
---   onComplete   function(ok, bytes) — fired after the write (synchronous
---                — see SaveAsync below for the chunked variant)
---
--- Returns (true, byteCount) on success, (false, reason) on failure.
---
--- For archives over ~5,000 rows on slower machines, the synchronous
--- serialise step can block the input thread visibly. Phase 1 callers
--- on the bulk-write path (FlushStaging, seal flush, migration flush)
--- should use SaveAsync below so the work spreads across ticks.
--- Note on compression: archives store the raw LibSerialize binary
--- output without LibDeflate on top. The compress step was 30-100ms
--- of synchronous CPU per archive at flush time on slower CPUs, and
--- the alpha14 constant-pool concern doesn't apply per-archive (each
--- archive is one Lua string constant in TallyDB regardless of byte
--- size). Trade-off: archives are ~3-4x larger on disk but flush
--- visibly smoother. Pre-existing compressed archives still load
--- correctly via the rec.compressed flag check in Load.
-function Archive:Save(key, entries, opts)
-  if type(key) ~= "string" or key == "" then return false, "invalid key" end
-  if type(entries) ~= "table" then return false, "entries must be a table" end
-  if not LibSerialize then return false, "libs unavailable" end
-  opts = opts or {}
+-- ============================================================================
+-- Public API — list / metadata / delete
+-- ============================================================================
 
-  local byId = opts.byId
-  if not byId then
-    byId = {}
-    for _, e in ipairs(entries) do
-      if e.id then byId[e.id] = true end
-    end
-  end
-
-  local serialised = LibSerialize:Serialize({ entries = entries, byId = byId })
-
-  local index = computeIndex(entries)
-
-  local rec = {
-    blob       = serialised,
-    count      = #entries,
-    fromTs     = index.fromTs,
-    toTs       = index.toTs,
-    bytes      = #serialised,
-    compressed = false,
-    schemaVer  = self.SCHEMA_VERSION,
-    savedAt    = time(),
-  }
-
-  archivesTable()[key] = rec
-  indexTable()[key] = index
-
-  -- Drop any cached copy so the next Load picks up the new blob.
-  self:Unload(key)
-
-  if opts.onComplete then pcall(opts.onComplete, true, rec.bytes) end
-  return true, rec.bytes
+function Archive:Has(key)
+  if archiveSlotsTable()[key] then return true end
+  local legacy = legacyArchivesTable()
+  return legacy and legacy[key] ~= nil or false
 end
 
--- Chunked variant of Save. Drives LibSerialize's async coroutine across
--- C_Timer ticks (default yields every 4096 items per the lib), then
--- runs the smaller LibDeflate compress step in one final tick. For
--- archives in the tens of thousands of rows, this keeps each tick well
--- under one frame on slower machines — the synchronous Save above
--- becomes a multi-second freeze in that range.
---
--- onComplete(ok, bytes) fires once when everything is on disk. opts.onProgress
--- (optional) fires after each async-serialise yield with the cumulative
--- string length so far (handler doesn't expose item progress directly,
--- so this is a coarse heartbeat).
-function Archive:SaveAsync(key, entries, opts)
-  if type(key) ~= "string" or key == "" then
-    if opts and opts.onComplete then pcall(opts.onComplete, false, 0, "invalid key") end
-    return
-  end
-  if type(entries) ~= "table" then
-    if opts and opts.onComplete then pcall(opts.onComplete, false, 0, "entries must be a table") end
-    return
-  end
-  if not LibSerialize then
-    if opts and opts.onComplete then pcall(opts.onComplete, false, 0, "libs unavailable") end
-    return
-  end
-  opts = opts or {}
-  -- delaySec defaults to 0.005 (5ms). The yieldCheck at 1024 items
-  -- already keeps each tick under one frame; the inter-tick wait only
-  -- needs to be large enough to let C_Timer reschedule for next frame.
-  -- The previous 50ms default meant 60% of wall-clock was idle wait
-  -- between active yields — fine for smoothness but minutes of total
-  -- runtime on multi-archive operations.
-  local delaySec = opts.delaySec or 0.005
-
-  local byId = opts.byId
-  if not byId then
-    byId = {}
-    for _, e in ipairs(entries) do
-      if e.id then byId[e.id] = true end
+-- Sorted ascending — keys are ISO-month strings ("2025-10") with
+-- optional "-pN" or "-wN" suffix; lexicographic sort matches
+-- chronological order for normal usage. Includes both slot-resident
+-- and unmigrated legacy archives.
+function Archive:List()
+  local out = {}
+  local seen = {}
+  for k in pairs(archiveSlotsTable()) do
+    if not seen[k] then
+      seen[k] = true
+      out[#out + 1] = k
     end
   end
-
-  -- Custom yieldCheck — yield every YIELD_EVERY items rather than the
-  -- lib default 4096. The default is fine on fast hardware but gives
-  -- visible per-tick bumps (~100-150ms CPU per yield) on the slower
-  -- machines testers report from. 1024 items per yield brings each
-  -- tick under ~30ms (roughly one frame at 60fps). Trade-off: more
-  -- ticks total wall-clock, smoother per-tick experience.
-  local YIELD_EVERY = 1024
-  local handler
-  local ok, err = pcall(function()
-    handler = LibSerialize:SerializeAsyncEx({
-      yieldCheck = function(scratch)
-        scratch.count = (scratch.count or 0) + 1
-        if scratch.count >= YIELD_EVERY then
-          scratch.count = 0
-          return true
-        end
-        return false
-      end,
-    }, { entries = entries, byId = byId })
-  end)
-  if not ok or not handler then
-    if opts.onComplete then pcall(opts.onComplete, false, 0, "SerializeAsync failed: " .. tostring(err)) end
-    return
-  end
-
-  local function step()
-    local resumeOk, completed, serialised = pcall(handler)
-    if not resumeOk then
-      if opts.onComplete then pcall(opts.onComplete, false, 0, "serialise resume failed: " .. tostring(completed)) end
-      return
-    end
-    if not completed then
-      if C_Timer and C_Timer.After then
-        C_Timer.After(delaySec, step)
-      else
-        step()
+  local legacy = legacyArchivesTable()
+  if legacy then
+    for k in pairs(legacy) do
+      if not seen[k] then
+        seen[k] = true
+        out[#out + 1] = k
       end
-      return
     end
-
-    -- Async serialise complete. No compress step — archives are stored
-    -- as raw LibSerialize bytes (see comment on Archive:Save).
-    local index = computeIndex(entries)
-    local rec = {
-      blob       = serialised,
-      count      = #entries,
-      fromTs     = index.fromTs,
-      toTs       = index.toTs,
-      bytes      = #serialised,
-      compressed = false,
-      schemaVer  = Archive.SCHEMA_VERSION,
-      savedAt    = time(),
-    }
-
-    archivesTable()[key] = rec
-    indexTable()[key] = index
-    Archive:Unload(key)
-
-    if opts.onComplete then pcall(opts.onComplete, true, rec.bytes) end
   end
-
-  step()
+  table.sort(out)
+  return out
 end
 
--- Permanently remove an archive from disk + cache. Intended for
--- ClearSource cleanup paths where an archive ends up empty after
--- removing all rows of a given source.
+function Archive:GetIndex(key)
+  return indexTable()[key]
+end
+
+function Archive:GetMeta(key)
+  local rec, slot = getSlotGlobal(key)
+  if rec then
+    return {
+      count     = rec.count,
+      fromTs    = rec.fromTs,
+      toTs      = rec.toTs,
+      schemaVer = rec.schemaVer,
+      savedAt   = rec.savedAt,
+      slot      = slot,
+    }
+  end
+  local legacy = legacyArchivesTable()
+  local lrec = legacy and legacy[key]
+  if lrec then
+    return {
+      count     = lrec.count,
+      fromTs    = lrec.fromTs,
+      toTs      = lrec.toTs,
+      bytes     = lrec.bytes,
+      schemaVer = lrec.schemaVer,
+      savedAt   = lrec.savedAt,
+      legacy    = true,
+    }
+  end
+  return nil
+end
+
+-- Permanently remove an archive from disk + cache. Used by the
+-- ClearSource and seal cleanup paths when an archive ends up empty.
+-- Frees the slot for reuse by the next allocation that needs one.
 function Archive:Delete(key)
-  archivesTable()[key] = nil
+  local slots = archiveSlotsTable()
+  local slot = slots[key]
+  if slot then
+    clearSlotGlobal(slot)
+    slots[key] = nil
+    -- Don't decrement nextSlot — we don't reuse freed slots in Phase 1
+    -- to keep allocation deterministic. Slot exhaustion is unlikely
+    -- with SLOT_COUNT = 60; bump if it becomes an issue.
+  end
   indexTable()[key] = nil
+  local legacy = legacyArchivesTable()
+  if legacy then legacy[key] = nil end
   self:Unload(key)
 end
 
@@ -523,20 +508,39 @@ end
 -- ============================================================================
 
 function Archive:DiagInfo()
-  local archives = archivesTable()
-  local archiveCount, archiveBytes, totalRows = 0, 0, 0
-  for _, rec in pairs(archives) do
-    archiveCount = archiveCount + 1
-    archiveBytes = archiveBytes + (rec.bytes or 0)
-    totalRows    = totalRows + (rec.count or 0)
+  local slots = archiveSlotsTable()
+  local L = ledgerTable()
+
+  local archiveCount, totalRows = 0, 0
+  for key, slot in pairs(slots) do
+    local rec = _G[slotGlobalName(slot)]
+    if rec then
+      archiveCount = archiveCount + 1
+      totalRows = totalRows + (rec.count or 0)
+    end
   end
+
+  local legacyCount, legacyRows, legacyBytes = 0, 0, 0
+  local legacy = legacyArchivesTable()
+  if legacy then
+    for _, rec in pairs(legacy) do
+      legacyCount = legacyCount + 1
+      legacyRows = legacyRows + (rec.count or 0)
+      legacyBytes = legacyBytes + (rec.bytes or 0)
+    end
+  end
+
   return {
-    libsAvailable = (LibSerialize and LibDeflate) and true or false,
+    libsAvailable = LibSerialize and true or false,  -- only needed for legacy reads
     archiveCount  = archiveCount,
-    archiveBytes  = archiveBytes,
     totalRows     = totalRows,
     cachedKeys    = self:CachedKeys(),
     cacheCap      = CACHE_CAP,
     schemaVer     = self.SCHEMA_VERSION,
+    slotCount     = Archive.SLOT_COUNT,
+    nextSlot      = L.nextSlot or 0,
+    legacyCount   = legacyCount,
+    legacyRows    = legacyRows,
+    legacyBytes   = legacyBytes,
   }
 end

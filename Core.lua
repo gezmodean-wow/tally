@@ -604,6 +604,14 @@ local function handleSeed(rest)
           local compressed = LibDeflate:CompressDeflate(serialised, { level = 1 })
 
           TallyDB = TallyDB or {}
+          -- Wipe slot-resident archives + archiveSlots + archiveIndex
+          -- so loadFromDisk routes cleanly through the legacy path
+          -- on /reload. Walk the slot table before nuking it so each
+          -- slot global is cleared and its SV file becomes empty.
+          if ns.Archive then
+            for _, k in ipairs(ns.Archive:List()) do ns.Archive:Delete(k) end
+            ns.Archive:UnloadAll()
+          end
           TallyDB.ledger = TallyDB.ledger or {}
           TallyDB.ledger.blob = compressed
           TallyDB.ledger.blobMeta = {
@@ -611,11 +619,14 @@ local function handleSeed(rest)
             savedAt = time(),
             bytes   = #compressed,
           }
-          -- Clear new-shape fields so loadFromDisk routes through the legacy path.
-          TallyDB.ledger.active       = nil
-          TallyDB.ledger.activeMeta   = nil
-          TallyDB.ledger.archives     = nil
-          TallyDB.ledger.archiveIndex = nil
+          -- Clear all new-shape fields so loadFromDisk routes through
+          -- the legacy alpha14/15 single-blob path.
+          TallyDB.ledger.active        = nil
+          TallyDB.ledger.activeMeta    = nil
+          TallyDB.ledger.archives      = nil
+          TallyDB.ledger.archiveIndex  = nil
+          TallyDB.ledger.archiveSlots  = nil
+          TallyDB.ledger.nextSlot      = nil
 
           print(string.format("|cff80ff80Tally:|r wrote %d entries to legacy blob (%d bytes compressed, %d serialised).",
             n, #compressed, #serialised))
@@ -1034,12 +1045,28 @@ local function diagPrintChat()
         st.serialiseMs or 0, st.compressMs or 0, st.serialisedBytes or 0))
     end
     if (st.archiveCount or 0) > 0 then
-      print(string.format("  Archives: %d archives, %d rows, %d bytes",
-        st.archiveCount, st.archiveRows or 0, st.archiveBytes or 0))
+      if (st.archiveBytes or 0) > 0 then
+        print(string.format("  Archives: %d archives, %d rows, %d bytes",
+          st.archiveCount, st.archiveRows or 0, st.archiveBytes))
+      else
+        print(string.format("  Archives: %d archives, %d rows (slot-resident, raw)",
+          st.archiveCount, st.archiveRows or 0))
+      end
       local cached = st.cachedArchives or {}
       if #cached > 0 then
         print(string.format("    Cache: %d/%d loaded — %s",
           #cached, st.cacheCap or 3, table.concat(cached, ", ")))
+      end
+      -- Surface slot-allocator state for diag purposes.
+      if ns.Archive and ns.Archive.DiagInfo then
+        local info = ns.Archive:DiagInfo()
+        if info then
+          print(string.format("    Slots: %d / %d allocated", info.nextSlot or 0, info.slotCount or 0))
+          if (info.legacyCount or 0) > 0 then
+            print(string.format("    |cffffa050%d unmigrated legacy archive(s)|r — will migrate on next access",
+              info.legacyCount))
+          end
+        end
       end
     end
     print(string.format("  Total rows: %d (active + archives)", st.totalRows or st.activeRows or 0))

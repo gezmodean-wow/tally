@@ -1084,6 +1084,18 @@ local function loadFromDisk()
         }
         _loaded = true
         _dirty = false
+        -- One-shot migration of any legacy single-blob archives sitting
+        -- in TallyDB.ledger.archives (from prior alpha16-candidate
+        -- builds before the multi-SV switch). Each archive's blob gets
+        -- decompressed + deserialised + assigned to a slot global.
+        -- Idempotent — already-migrated archives are no-ops.
+        if ns.Archive and ns.Archive.MigrateAllLegacy then
+          local migrated = ns.Archive:MigrateAllLegacy()
+          if migrated and migrated > 0 then
+            print(string.format("|cff80a0ffTally:|r migrated %d archive blob(s) to slot storage.", migrated))
+            _dirty = true  -- TallyDB.ledger.archives was mutated; persist on logout
+          end
+        end
         return
       end
     end
@@ -1215,11 +1227,18 @@ function Ledger:StorageInfo()
   local meta = L.activeMeta or L.blobMeta or nil
   local activeRows = (_workingMem and _workingMem.active and #_workingMem.active.entries) or 0
 
+  -- Archive metrics now come from the multi-SV slot allocator. Slot-
+  -- based archives don't carry a per-archive byte count (they're raw
+  -- tables, not a serialised blob); legacy single-blob archives still
+  -- on disk pre-migration carry rec.bytes via Archive:GetMeta.
   local archiveCount, archiveBytes, archiveRows = 0, 0, 0
-  for _, rec in pairs(L.archives or {}) do
-    archiveCount = archiveCount + 1
-    archiveBytes = archiveBytes + (rec.bytes or 0)
-    archiveRows  = archiveRows + (rec.count or 0)
+  if ns.Archive and ns.Archive.List then
+    for _, key in ipairs(ns.Archive:List()) do
+      local m = ns.Archive:GetIndex(key) or ns.Archive:GetMeta(key) or {}
+      archiveCount = archiveCount + 1
+      archiveBytes = archiveBytes + (m.bytes or 0)
+      archiveRows  = archiveRows + (m.count or 0)
+    end
   end
 
   local cachedKeys, cacheCap = {}, 0
@@ -1711,10 +1730,7 @@ local function gatherRows(filter)
   local d = db()
   local window = filter.window or "active"
   if window == "active" then return d.entries end
-
-  TallyDB = TallyDB or {}
-  TallyDB.ledger = TallyDB.ledger or {}
-  local archives = TallyDB.ledger.archives or {}
+  if not ns.Archive then return d.entries end
 
   -- "<n>m" hints the lookback window for archive selection. Doesn't
   -- override an explicit filter.atTimeFrom — that always wins.
@@ -1724,19 +1740,20 @@ local function gatherRows(filter)
     if n then archiveFrom = time() - tonumber(n) * 30 * 86400 end
   end
 
-  -- Sort keys ascending so the concatenated list stays in roughly
-  -- chronological order (active is always newest at end).
-  local archiveKeys = {}
-  for k in pairs(archives) do archiveKeys[#archiveKeys + 1] = k end
-  table.sort(archiveKeys)
+  -- Archive:List returns keys sorted ascending — chronological for
+  -- typical YYYY-MM[-pN] keys. archiveIndex carries fromTs/toTs without
+  -- requiring the slot global to load, so we can range-prune cheaply.
+  local archiveKeys = ns.Archive:List()
 
   local rows = {}
   for _, key in ipairs(archiveKeys) do
-    local meta = archives[key]
+    local meta = ns.Archive:GetIndex(key) or ns.Archive:GetMeta(key)
     local skip = false
-    if archiveFrom and meta.toTs and meta.toTs < archiveFrom then skip = true end
-    if filter.atTimeTo and meta.fromTs and meta.fromTs > filter.atTimeTo then skip = true end
-    if not skip and ns.Archive then
+    if meta then
+      if archiveFrom and meta.toTs and meta.toTs < archiveFrom then skip = true end
+      if filter.atTimeTo and meta.fromTs and meta.fromTs > filter.atTimeTo then skip = true end
+    end
+    if not skip then
       local archive = ns.Archive:Load(key)
       if archive and archive.entries then
         for i = 1, #archive.entries do rows[#rows + 1] = archive.entries[i] end
@@ -2617,12 +2634,19 @@ end
 -- Sources can be re-imported afterward via /tally setup.
 function Ledger:Clear()
   TallyDB = TallyDB or {}
-  TallyDB.ledger = {}  -- drop active blob + activeMeta + archives + archiveIndex
+  -- Clear archive slot globals first so their SV files become empty
+  -- on next logout. Walk the slot table before nuking it.
+  if ns.Archive then
+    for _, key in ipairs(ns.Archive:List()) do
+      ns.Archive:Delete(key)
+    end
+    ns.Archive:UnloadAll()
+  end
+  TallyDB.ledger = {}  -- drop active blob + activeMeta + archives + archiveSlots + archiveIndex + nextSlot
   _workingMem = defaultMem()
   _loaded = true
   _dirty = true
   _staging = {}
-  if ns.Archive then ns.Archive:UnloadAll() end
   invalidateReconcileCache()
 end
 
@@ -2791,9 +2815,12 @@ end
 -- it just hasn't been routed into the new shape yet.
 function Ledger:Count()
   local total = #db().entries
-  TallyDB = TallyDB or {}
-  local archives = TallyDB.ledger and TallyDB.ledger.archives or {}
-  for _, rec in pairs(archives) do total = total + (rec.count or 0) end
+  if ns.Archive and ns.Archive.List then
+    for _, key in ipairs(ns.Archive:List()) do
+      local meta = ns.Archive:GetIndex(key) or ns.Archive:GetMeta(key)
+      if meta then total = total + (meta.count or 0) end
+    end
+  end
   if _workingMem and _workingMem.pendingMigration then
     total = total + #_workingMem.pendingMigration.entries
   end
