@@ -441,6 +441,34 @@ local SEED_CHARS = {
   "Stress4-StressTest", "Stress5-StressTest",
 }
 
+local function buildSeedEntry(i, now, rangeSec)
+  local atTime = now - math.random(1, rangeSec)
+  local kind = SEED_KINDS[((i - 1) % #SEED_KINDS) + 1]
+  local copper
+  if kind == "ah-cancel" or kind == "ah-expire" then
+    copper = 0
+  elseif kind == "ah-fee" then
+    copper = math.random(100, 500000)
+  else
+    copper = math.random(1000, 100000000)
+  end
+  return {
+    id       = SEED_SOURCE .. ":" .. tostring(i),
+    atTime   = atTime,
+    kind     = kind,
+    itemID   = 100000 + ((i * 17) % 5000),
+    itemKey  = tostring(100000 + ((i * 17) % 5000)),
+    charKey  = SEED_CHARS[((i - 1) % #SEED_CHARS) + 1],
+    copper   = copper,
+    count    = math.random(1, 5),
+    source   = SEED_SOURCE,
+    sourceId = tostring(i),
+    meta     = { name = "Stress test item " .. tostring((i % 200) + 1) },
+  }
+end
+
+-- Synchronous generator — fine for small N. Used by tests + as a
+-- fallback when C_Timer is unavailable.
 local function generateSeedEntries(count, monthsBack)
   count = count or 100000
   monthsBack = monthsBack or 12
@@ -448,31 +476,46 @@ local function generateSeedEntries(count, monthsBack)
   local rangeSec = monthsBack * 30 * 86400
   local entries = {}
   for i = 1, count do
-    local atTime = now - math.random(1, rangeSec)
-    local kind = SEED_KINDS[((i - 1) % #SEED_KINDS) + 1]
-    local copper
-    if kind == "ah-cancel" or kind == "ah-expire" then
-      copper = 0
-    elseif kind == "ah-fee" then
-      copper = math.random(100, 500000)
-    else
-      copper = math.random(1000, 100000000)
-    end
-    entries[i] = {
-      id       = SEED_SOURCE .. ":" .. tostring(i),
-      atTime   = atTime,
-      kind     = kind,
-      itemID   = 100000 + ((i * 17) % 5000),
-      itemKey  = tostring(100000 + ((i * 17) % 5000)),
-      charKey  = SEED_CHARS[((i - 1) % #SEED_CHARS) + 1],
-      copper   = copper,
-      count    = math.random(1, 5),
-      source   = SEED_SOURCE,
-      sourceId = tostring(i),
-      meta     = { name = "Stress test item " .. tostring((i % 200) + 1) },
-    }
+    entries[i] = buildSeedEntry(i, now, rangeSec)
   end
   return entries
+end
+
+-- Chunked generator. Builds the entry list across C_Timer ticks so a
+-- 200k-row seed doesn't freeze the input thread before routing even
+-- begins. Calls onComplete(entries) when done.
+local function generateSeedEntriesChunked(count, monthsBack, opts)
+  count = count or 100000
+  monthsBack = monthsBack or 12
+  opts = opts or {}
+  local chunkSize = opts.chunkSize or 5000
+  local delaySec  = opts.delaySec or 0.05
+  local now = time()
+  local rangeSec = monthsBack * 30 * 86400
+
+  if not (C_Timer and C_Timer.After) then
+    if opts.onComplete then pcall(opts.onComplete, generateSeedEntries(count, monthsBack)) end
+    return
+  end
+
+  local entries = {}
+  local idx = 0
+
+  local function step()
+    local stop = math.min(idx + chunkSize, count)
+    while idx < stop do
+      idx = idx + 1
+      entries[idx] = buildSeedEntry(idx, now, rangeSec)
+    end
+    if opts.onProgress then pcall(opts.onProgress, idx, count) end
+    if idx < count then
+      C_Timer.After(delaySec, step)
+    else
+      if opts.onComplete then pcall(opts.onComplete, entries) end
+    end
+  end
+
+  step()
 end
 
 local function handleSeed(rest)
@@ -509,55 +552,63 @@ local function handleSeed(rest)
       return
     end
 
-    print(string.format("|cff7fbfffTally:|r generating %d synthetic entries…", n))
-    local entries = generateSeedEntries(n)
-    local byId = {}
-    for _, e in ipairs(entries) do byId[e.id] = true end
-
-    -- Serialise async — for large N a synchronous serialise busts WoW's
-    -- ~10s script execution timer (LibSerialize is pure-Lua and walks
-    -- every entry in one pass). The async handler yields every 4096
-    -- items so the work spreads across ticks. After completion, run
-    -- the (smaller, faster) compress synchronously.
-    print("|cff7fbfffTally:|r serialising async (yields every 4096 items)…")
-    local handler = LibSerialize:SerializeAsync({ entries = entries, byId = byId })
-    local function step()
-      local ok, completed, serialised = pcall(handler)
-      if not ok then
-        print("|cffff4040Tally:|r serialise failed: " .. tostring(completed))
-        return
-      end
-      if not completed then
-        if C_Timer and C_Timer.After then
-          C_Timer.After(0.05, step)
-        else
-          step()
+    print(string.format("|cff7fbfffTally:|r generating %d synthetic entries (chunked)…", n))
+    generateSeedEntriesChunked(n, 12, {
+      onProgress = function(idx, total)
+        if idx % 25000 == 0 then
+          print(string.format("  generated %d / %d", idx, total))
         end
-        return
-      end
+      end,
+      onComplete = function(entries)
+        local byId = {}
+        for _, e in ipairs(entries) do byId[e.id] = true end
 
-      print(string.format("|cff7fbfffTally:|r serialise complete (%d bytes); compressing…", #serialised))
-      local compressed = LibDeflate:CompressDeflate(serialised, { level = 1 })
+        -- Serialise async — synchronous serialise of 100k+ rows busts WoW's
+        -- ~10s script execution timer (LibSerialize is pure-Lua and walks
+        -- every entry in one pass). The async handler yields every 4096
+        -- items so the work spreads across ticks. After completion, run
+        -- the (smaller, faster) compress synchronously.
+        print("|cff7fbfffTally:|r serialising async (yields every 4096 items)…")
+        local handler = LibSerialize:SerializeAsync({ entries = entries, byId = byId })
+        local function step()
+          local ok, completed, serialised = pcall(handler)
+          if not ok then
+            print("|cffff4040Tally:|r serialise failed: " .. tostring(completed))
+            return
+          end
+          if not completed then
+            if C_Timer and C_Timer.After then
+              C_Timer.After(0.05, step)
+            else
+              step()
+            end
+            return
+          end
 
-      TallyDB = TallyDB or {}
-      TallyDB.ledger = TallyDB.ledger or {}
-      TallyDB.ledger.blob = compressed
-      TallyDB.ledger.blobMeta = {
-        count   = n,
-        savedAt = time(),
-        bytes   = #compressed,
-      }
-      -- Clear new-shape fields so loadFromDisk routes through the legacy path.
-      TallyDB.ledger.active       = nil
-      TallyDB.ledger.activeMeta   = nil
-      TallyDB.ledger.archives     = nil
-      TallyDB.ledger.archiveIndex = nil
+          print(string.format("|cff7fbfffTally:|r serialise complete (%d bytes); compressing…", #serialised))
+          local compressed = LibDeflate:CompressDeflate(serialised, { level = 1 })
 
-      print(string.format("|cff80ff80Tally:|r wrote %d entries to legacy blob (%d bytes compressed, %d serialised).",
-        n, #compressed, #serialised))
-      print("|cff80ff80Tally:|r run |cff80c0ff/reload|r — loadFromDisk will detect the legacy blob and start the migration pass.")
-    end
-    step()
+          TallyDB = TallyDB or {}
+          TallyDB.ledger = TallyDB.ledger or {}
+          TallyDB.ledger.blob = compressed
+          TallyDB.ledger.blobMeta = {
+            count   = n,
+            savedAt = time(),
+            bytes   = #compressed,
+          }
+          -- Clear new-shape fields so loadFromDisk routes through the legacy path.
+          TallyDB.ledger.active       = nil
+          TallyDB.ledger.activeMeta   = nil
+          TallyDB.ledger.archives     = nil
+          TallyDB.ledger.archiveIndex = nil
+
+          print(string.format("|cff80ff80Tally:|r wrote %d entries to legacy blob (%d bytes compressed, %d serialised).",
+            n, #compressed, #serialised))
+          print("|cff80ff80Tally:|r run |cff80c0ff/reload|r — loadFromDisk will detect the legacy blob and start the migration pass.")
+        end
+        step()
+      end,
+    })
     return
   end
 
@@ -570,41 +621,48 @@ local function handleSeed(rest)
     return
   end
 
-  print(string.format("|cff7fbfffTally:|r generating %d synthetic entries spread over the last 12 months…", n))
-  local entries = generateSeedEntries(n)
-
-  print(string.format("|cff7fbfffTally:|r routing into active + staging…"))
-  ns.Ledger:InsertManyChunkedRouted(entries, {
-    chunkSize = 500,
-    delaySec  = 0.05,
-    onProgress = function(inserted, total)
-      if inserted % 25000 == 0 then
-        print(string.format("  %d / %d (%d%%)", inserted, total, math.floor(100 * inserted / total)))
+  print(string.format("|cff7fbfffTally:|r generating %d synthetic entries (chunked)…", n))
+  generateSeedEntriesChunked(n, 12, {
+    onProgress = function(idx, total)
+      if idx % 25000 == 0 then
+        print(string.format("  generated %d / %d", idx, total))
       end
     end,
-    onDone = function(inserted, skipped, insertedActive, insertedStaging)
-      print(string.format("|cff80ff80Tally:|r seeded %d entries — %d to active, %d to staging buckets (%d skipped).",
-        inserted, insertedActive or 0, insertedStaging or 0, skipped or 0))
-      if ns.Ledger.GetStagingRowCount and ns.Ledger:GetStagingRowCount() > 0 then
-        print("|cff7fbfffTally:|r flushing staging buckets to archives…")
-        ns.Ledger:FlushStaging({
-          delaySec = 0.05,
-          onProgress = function(idx, total, key)
-            print(string.format("  flushing %s (%d / %d)", key or "?", idx, total))
-          end,
-          onComplete = function(archivesWritten, rowsArchived)
-            print(string.format("|cff80ff80Tally:|r flush complete — %d archives, %d archived rows.",
-              archivesWritten, rowsArchived))
+    onComplete = function(entries)
+      print("|cff7fbfffTally:|r routing into active + staging…")
+      ns.Ledger:InsertManyChunkedRouted(entries, {
+        chunkSize = 500,
+        delaySec  = 0.05,
+        onProgress = function(inserted, total)
+          if inserted % 25000 == 0 then
+            print(string.format("  routed %d / %d (%d%%)", inserted, total, math.floor(100 * inserted / total)))
+          end
+        end,
+        onDone = function(inserted, skipped, insertedActive, insertedStaging)
+          print(string.format("|cff80ff80Tally:|r seeded %d entries — %d to active, %d to staging buckets (%d skipped).",
+            inserted, insertedActive or 0, insertedStaging or 0, skipped or 0))
+          if ns.Ledger.GetStagingRowCount and ns.Ledger:GetStagingRowCount() > 0 then
+            print("|cff7fbfffTally:|r flushing staging buckets to archives…")
+            ns.Ledger:FlushStaging({
+              delaySec = 0.05,
+              onProgress = function(idx, total, key)
+                print(string.format("  flushing %s (%d / %d)", key or "?", idx, total))
+              end,
+              onComplete = function(archivesWritten, rowsArchived)
+                print(string.format("|cff80ff80Tally:|r flush complete — %d archives, %d archived rows.",
+                  archivesWritten, rowsArchived))
+                if ns.UI and ns.UI.MainFrame and ns.UI.MainFrame.UpdateHeaderNudge then
+                  pcall(ns.UI.MainFrame.UpdateHeaderNudge, ns.UI.MainFrame)
+                end
+              end,
+            })
+          else
             if ns.UI and ns.UI.MainFrame and ns.UI.MainFrame.UpdateHeaderNudge then
               pcall(ns.UI.MainFrame.UpdateHeaderNudge, ns.UI.MainFrame)
             end
-          end,
-        })
-      else
-        if ns.UI and ns.UI.MainFrame and ns.UI.MainFrame.UpdateHeaderNudge then
-          pcall(ns.UI.MainFrame.UpdateHeaderNudge, ns.UI.MainFrame)
-        end
-      end
+          end
+        end,
+      })
     end,
   })
 end

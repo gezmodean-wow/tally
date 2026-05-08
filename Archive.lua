@@ -296,9 +296,25 @@ function Archive:SaveAsync(key, entries, opts)
     end
   end
 
+  -- Custom yieldCheck — yield every YIELD_EVERY items rather than the
+  -- lib default 4096. The default is fine on fast hardware but gives
+  -- visible per-tick bumps (~100-150ms CPU per yield) on the slower
+  -- machines testers report from. 1024 items per yield brings each
+  -- tick under ~30ms (roughly one frame at 60fps). Trade-off: more
+  -- ticks total wall-clock, smoother per-tick experience.
+  local YIELD_EVERY = 1024
   local handler
   local ok, err = pcall(function()
-    handler = LibSerialize:SerializeAsync({ entries = entries, byId = byId })
+    handler = LibSerialize:SerializeAsyncEx({
+      yieldCheck = function(scratch)
+        scratch.count = (scratch.count or 0) + 1
+        if scratch.count >= YIELD_EVERY then
+          scratch.count = 0
+          return true
+        end
+        return false
+      end,
+    }, { entries = entries, byId = byId })
   end)
   if not ok or not handler then
     if opts.onComplete then pcall(opts.onComplete, false, 0, "SerializeAsync failed: " .. tostring(err)) end
