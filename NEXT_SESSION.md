@@ -2,6 +2,25 @@
 
 Picks up after the multi-session work that delivered alpha16 — the TLY-51 tiered-storage refactor with multi-SV slot architecture and async-chunked legacy-blob loading.
 
+## ⚠ Critical: alpha16 has a known regression
+
+Toeknee hit the **alpha13-style SV constant-pool overflow + setup-wizard popup recurrence** on his first alpha16 login. The user's diagnosis was that we created parallel paths in the multi-SV refactor — investigated and concur.
+
+**Working hypothesis:** `TallyDB.ledger.archiveIndex` stayed in the main TallyDB chunk even though slot blobs moved into TallyA<NNN> globals. archiveIndex holds per-archive itemID sets, charKey sets, kindCounts, sourceCounts. Across 47 archives × 10k+ unique itemIDs in a real tester's data, the aggregate constant count in TallyDB.lua exceeds the 2^18 chunk cap that originally motivated alpha14's compression.
+
+**Fix direction:** move per-archive index INTO the slot global (`TallyA<NNN>.index = { itemIDs, charKeys, kindCounts, sourceCounts, monthlyAggregates }`). Each slot is its own Lua chunk with its own constant pool, so itemID/charKey/source constants distribute across slots instead of concentrating in TallyDB. archiveSlots stays in TallyDB (small key→slot map; one entry per archive, no high-cardinality fields).
+
+**Files to touch:**
+- `Archive.lua` — `computeIndex` writes `slot.index` instead of `indexTable()[key]`. `GetIndex(key)` reads `slot.index`. `MigrateAllLegacy` and `migrateLegacyArchive` write the index into the slot.
+- `Ledger.lua` — `gatherRows`, `Count`, `StorageInfo`, `ClearSourceAsync`'s sourceCounts fast-path all switch to `Archive:GetIndex(key)`.
+- `Core.lua` — `/tally diag` storage section reads via `Archive:GetIndex` if it does any direct read (it currently goes through `StorageInfo`).
+
+**Validation:** synthetic stress tests with the seed harness (~5000 distinct itemIDs) won't reproduce the overflow because cardinality is too low. Toeknee + zpectre's real data is the only ground truth. Plan: ship alpha17 with the fix, ask Toeknee to retest, watch his diag's `Memory.kb` and the archiveIndex shape.
+
+**Tester impact RIGHT NOW:** Toeknee can't use alpha16 — every login pops the setup wizard because TallyDB.lua fails to load (overflow → empty table → Count = 0 → grandfather check fails). Same for any other big-tester account. Recovery for them is to either revert to alpha15 or wait for alpha17. **Worth filing as a TLY issue and posting a Player update on the active issues so Toeknee/zpectre know.**
+
+Memory captures: `project_alpha16_archiveIndex_regression.md`, `feedback_constant_pool_audit.md`.
+
 ## State
 
 - **Branch:** `main`, working tree clean, in sync with `origin/main` at the alpha16 merge commit.
