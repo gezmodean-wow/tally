@@ -850,6 +850,74 @@ function Journalator:Register()
   })
 end
 
+-- ============================================================================
+-- ProbeMetadata (alpha18 sibling probe / simulated import)
+-- ============================================================================
+--
+-- Walks live + archived months and only reads each row's `.time`, skipping
+-- the per-bucket mapping. Each archive open is the same cost as a real
+-- import (Journalator's archive opens are gated on demand) but the inner
+-- loop is one field read per row, so the probe is the cheapest fidelity-
+-- preserving accounting we can produce.
+
+function Journalator:ProbeMetadata()
+  if not isAvailable() then
+    return { available = false }
+  end
+
+  local count, fromTs, toTs = 0, nil, nil
+  local byMonth = {}
+  local archiveCount = 0
+
+  local function tally(rows)
+    if type(rows) ~= "table" then return end
+    for _, row in ipairs(rows) do
+      local t = type(row) == "table" and tonumber(row.time)
+      if t and t > 0 then
+        count = count + 1
+        if not fromTs or t < fromTs then fromTs = t end
+        if not toTs   or t > toTs   then toTs   = t end
+        local mk = date("%Y-%m", t)
+        byMonth[mk] = (byMonth[mk] or 0) + 1
+      end
+    end
+  end
+
+  -- Live current-month buckets.
+  local liveLogs = _G.Journalator and _G.Journalator.State and _G.Journalator.State.Logs or nil
+  if type(liveLogs) == "table" then
+    for bucket in pairs(BUCKETS) do
+      tally(liveLogs[bucket])
+    end
+  end
+
+  -- Archived months.
+  local archive = _G.Journalator and _G.Journalator.State and _G.Journalator.State.Archive or nil
+  local times = _G.JOURNALATOR_ARCHIVE_TIMES
+  local STORE_PREFIX = (_G.Journalator and _G.Journalator.Constants and _G.Journalator.Constants.STORE_PREFIX) or "Logs-"
+  if archive and archive.Open and type(times) == "table" then
+    for _, ts in ipairs(times) do
+      local ok, store = pcall(archive.Open, archive, "SometimesLocked", STORE_PREFIX .. ts, true)
+      if ok and type(store) == "table" then
+        archiveCount = archiveCount + 1
+        for bucket in pairs(BUCKETS) do
+          tally(store[bucket])
+        end
+      end
+    end
+  end
+
+  return {
+    available = true,
+    count     = count,
+    fromTs    = fromTs,
+    toTs      = toTs,
+    byMonth   = byMonth,
+    notes     = string.format("rows across live + %d archive%s; map produces 1+ ledger entries per row depending on bucket",
+                              archiveCount, archiveCount == 1 and "" or "s"),
+  }
+end
+
 -- Exposed for testing.
 Journalator.IsAvailable = isAvailable
 Journalator.ImportAll = importAll

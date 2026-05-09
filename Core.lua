@@ -1547,6 +1547,150 @@ end
 ns.GoldReportText = formatGoldReport
 ns.GoldCopyDialog = goldCopyDialog
 
+-- ============================================================================
+-- Sibling-source metadata probe (alpha18 simulated-import readout)
+-- ============================================================================
+--
+-- Calls :ProbeMetadata() on each registered sibling adapter (FlipQueue,
+-- TSM, Journalator) and rolls the per-source readouts into a single
+-- copy-dialog table. The probe is read-only and reuses each adapter's
+-- own walking code — the cheapest fidelity-preserving accounting we
+-- can produce of "what would alpha19's import controller have to chew."
+--
+-- TSM and Journalator probes are O(rows) with one field read per row;
+-- on big-tester accounts (90k+ TSM rows) that's a multi-second blocking
+-- pass. The user-visible help text flags this as one-time diagnostic
+-- work, not a recurring command.
+
+local function probeSibling(name, label, source)
+  if not source then
+    return { name = name, label = label, available = false }
+  end
+  if type(source.ProbeMetadata) ~= "function" then
+    return { name = name, label = label, available = false,
+             error = "adapter has no ProbeMetadata method" }
+  end
+  local ok, result = pcall(source.ProbeMetadata, source)
+  if not ok then
+    return { name = name, label = label, available = false,
+             error = "ProbeMetadata threw: " .. tostring(result) }
+  end
+  result.name  = name
+  result.label = label
+  return result
+end
+
+local function inspectSourcesProbe()
+  return {
+    flipqueue   = probeSibling("flipqueue",   "FlipQueue",      ns.Sources and ns.Sources.FlipQueue),
+    tsm         = probeSibling("tsm",         "TSM Accounting", ns.Sources and ns.Sources.TSM),
+    journalator = probeSibling("journalator", "Journalator",    ns.Sources and ns.Sources.Journalator),
+  }
+end
+
+-- Approximates the worst-case 60-day import window by summing each pair
+-- of consecutive months in the byMonth distribution and returning the
+-- max. Resolution is per-month (~30-62 days per pair) — close enough to
+-- size the alpha19 per-cycle row budget for the manual import controller.
+local function compute60dPeak(byMonth)
+  if type(byMonth) ~= "table" then return 0 end
+  local months = {}
+  for mk, n in pairs(byMonth) do months[#months + 1] = { mk = mk, n = n } end
+  table.sort(months, function(a, b) return a.mk < b.mk end)
+  local peak = 0
+  for i = 1, #months do
+    local sum = months[i].n + (months[i + 1] and months[i + 1].n or 0)
+    if sum > peak then peak = sum end
+  end
+  return peak
+end
+
+local function formatSourcesProbeReport()
+  local probes = inspectSourcesProbe()
+  local order = { "flipqueue", "tsm", "journalator" }
+
+  local lines = {}
+  local push = function(s) lines[#lines + 1] = s end
+  local fmtNum = function(n)
+    return BreakUpLargeNumbers and BreakUpLargeNumbers(n or 0) or tostring(n or 0)
+  end
+
+  push("=== Tally — sibling-source metadata probe ===")
+  push("Generated: " .. date("%Y-%m-%d %H:%M:%S"))
+  push("")
+  push("Per-source totals + 60-day import window peak:")
+  push(string.format("  %-12s  %-9s  %-12s  %-25s  %-12s",
+                     "source", "available", "rows", "span", "60d peak"))
+
+  -- Collect month-keys present in any source so the per-month table
+  -- below has a consistent column space across sources.
+  local monthSet = {}
+  for _, key in ipairs(order) do
+    local p = probes[key]
+    if p.byMonth then for mk in pairs(p.byMonth) do monthSet[mk] = true end end
+  end
+  local months = {}
+  for mk in pairs(monthSet) do months[#months + 1] = mk end
+  table.sort(months, function(a, b) return a > b end)  -- newest first
+
+  for _, key in ipairs(order) do
+    local p = probes[key]
+    if not p.available then
+      local why = p.error or "not detected"
+      push(string.format("  %-12s  %-9s  %s", p.name, "no", why))
+    else
+      local span = "(no timestamped rows)"
+      if p.fromTs and p.toTs then
+        span = date("%Y-%m-%d", p.fromTs) .. " .. " .. date("%Y-%m-%d", p.toTs)
+      end
+      push(string.format("  %-12s  %-9s  %-12s  %-25s  %-12s",
+                         p.name, "yes", fmtNum(p.count), span, fmtNum(compute60dPeak(p.byMonth))))
+    end
+  end
+
+  if #months > 0 then
+    push("")
+    push("Per-month distribution (newest first):")
+    push(string.format("  %-9s  %-12s  %-12s  %-12s",
+                       "month", "flipqueue", "tsm", "journalator"))
+    for _, mk in ipairs(months) do
+      push(string.format("  %-9s  %-12s  %-12s  %-12s", mk,
+        fmtNum((probes.flipqueue.byMonth   or {})[mk] or 0),
+        fmtNum((probes.tsm.byMonth         or {})[mk] or 0),
+        fmtNum((probes.journalator.byMonth or {})[mk] or 0)))
+    end
+  end
+
+  push("")
+  push("Notes:")
+  for _, key in ipairs(order) do
+    local p = probes[key]
+    if p.available and p.notes then
+      push(string.format("  %s: %s", p.name, p.notes))
+    end
+  end
+  push("")
+  push("This probe is the alpha18 simulated-import readout for sizing")
+  push("alpha19's per-cycle row budget. The 60d peak is the headline number")
+  push("— the worst-case window a single import push would have to chew.")
+
+  return table.concat(lines, "\n")
+end
+
+local function sourcesCopyDialog()
+  local text = formatSourcesProbeReport()
+  if Cogworks and Cogworks.CreateCopyDialog then
+    Cogworks:CreateCopyDialog(text,
+      "Tally sibling-source probe — paste into a GitHub issue.")
+  else
+    print("|cffff4040Tally:|r CreateCopyDialog unavailable; printing to chat.")
+    for line in text:gmatch("[^\n]+") do print(line) end
+  end
+end
+
+ns.SourcesProbeReportText = formatSourcesProbeReport
+ns.SourcesCopyDialog = sourcesCopyDialog
+
 -- Live debug console — opens Cogworks's CreateDebugConsole({ cog = "Tally" }).
 -- Singleton: one console instance reused across slash invocations. Position,
 -- size, and pinned state persist into TallyDB.ui.debugConsole.
@@ -1957,11 +2101,12 @@ if Cogworks and Cogworks.RegisterSlashCommands then
         -- chat` for users who specifically want inline output. `copy`
         -- stays as a no-op alias for the default to avoid breaking
         -- muscle memory from earlier alphas.
-        help = "Open diagnostic dump as a copy dialog. `divergence` for source-coverage report; `gold` for per-character gold accounting; `chat` to print inline.",
+        help = "Open diagnostic dump as a copy dialog. `divergence` for source-coverage report; `gold` for per-character gold accounting; `sources` for sibling-source row counts + monthly distribution (alpha18 simulated-import readout — runs a multi-second blocking pass on big TSM CSVs); `chat` to print inline.",
         run = function(rest)
           local sub = rest and rest:lower() or ""
           if sub == "divergence" then divergenceCopyDialog()
           elseif sub == "gold" then goldCopyDialog()
+          elseif sub == "sources" then sourcesCopyDialog()
           elseif sub == "chat" then diagPrintChat()
           else diagOpenCopyDialog() end
         end,

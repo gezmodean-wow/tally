@@ -287,6 +287,63 @@ function TSMSrc:Register()
   })
 end
 
+-- ============================================================================
+-- ProbeMetadata (alpha18 sibling probe / simulated import)
+-- ============================================================================
+--
+-- Walks each realm's CSV stores once and only reads the `time` column —
+-- skips item-string parsing, source disambiguation, etc. Cost is the same
+-- order as the import parse (still O(rows)) but per-row work is just one
+-- field extraction so this is the cheapest fidelity-preserving probe we
+-- can offer. For testers with 90k+ row TSM CSVs this is a multi-second
+-- blocking pass; the diag command flags that before running.
+
+function TSMSrc:ProbeMetadata()
+  if not isAvailable() then
+    return { available = false }
+  end
+  local count, fromTs, toTs = 0, nil, nil
+  local byMonth = {}
+  local realmCount = 0
+  local seenRealms = {}
+
+  for _, csvName in ipairs(CSV_NAMES) do
+    local pattern = "^r@(.-)@internalData@" .. csvName .. "$"
+    for key, value in pairs(_G.TradeSkillMasterDB) do
+      if type(value) == "string" and value ~= "" then
+        local realm = key:match(pattern)
+        if realm then
+          if not seenRealms[realm] then
+            seenRealms[realm] = true
+            realmCount = realmCount + 1
+          end
+          eachRow(value, function(cols, fields)
+            local timeIdx = cols.time
+            if not timeIdx then return end
+            local t = tonumber(fields[timeIdx])
+            if not t or t <= 0 then return end
+            count = count + 1
+            if not fromTs or t < fromTs then fromTs = t end
+            if not toTs   or t > toTs   then toTs   = t end
+            local mk = date("%Y-%m", t)
+            byMonth[mk] = (byMonth[mk] or 0) + 1
+          end)
+        end
+      end
+    end
+  end
+
+  return {
+    available = true,
+    count     = count,
+    fromTs    = fromTs,
+    toTs      = toTs,
+    byMonth   = byMonth,
+    notes     = string.format("CSV rows across %d realm%s; map produces 1 ledger entry per row",
+                              realmCount, realmCount == 1 and "" or "s"),
+  }
+end
+
 -- Exposed for testing.
 TSMSrc.IsAvailable = isAvailable
 TSMSrc.ImportAll = importAll

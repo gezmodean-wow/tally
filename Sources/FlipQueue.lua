@@ -256,6 +256,40 @@ function FQ:Register()
   })
 end
 
+-- ============================================================================
+-- ProbeMetadata (TLY-68 sibling probe / alpha18 simulated import)
+-- ============================================================================
+--
+-- Returns a non-mapping read-only summary of FlipQueue's log so the diag
+-- command can show what an alpha19 import would chew without paying the
+-- mapEntry cost. O(N) over the log array.
+
+function FQ:ProbeMetadata()
+  if not isAvailable() then
+    return { available = false }
+  end
+  local count, fromTs, toTs = 0, nil, nil
+  local byMonth = {}
+  for _, e in ipairs(_G.FlipQueueDB.log) do
+    local t = tonumber(e.postedAt) or 0
+    count = count + 1
+    if t > 0 then
+      if not fromTs or t < fromTs then fromTs = t end
+      if not toTs   or t > toTs   then toTs   = t end
+      local key = date("%Y-%m", t)
+      byMonth[key] = (byMonth[key] or 0) + 1
+    end
+  end
+  return {
+    available = true,
+    count     = count,
+    fromTs    = fromTs,
+    toTs      = toTs,
+    byMonth   = byMonth,
+    notes     = "log rows; map produces 1-2 ledger entries per row (sale + optional buy)",
+  }
+end
+
 -- Exposed for testing / direct invocation.
 FQ.MapEntry = mapEntry
 FQ.IsAvailable = isAvailable
