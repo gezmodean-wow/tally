@@ -1,117 +1,129 @@
 # Tally — next session handoff
 
-Picks up after the multi-session work that delivered alpha16 — the TLY-51 tiered-storage refactor with multi-SV slot architecture and async-chunked legacy-blob loading.
-
-## ⚠ Critical: alpha16 has a known regression
-
-Toeknee hit the **alpha13-style SV constant-pool overflow + setup-wizard popup recurrence** on his first alpha16 login. The user's diagnosis was that we created parallel paths in the multi-SV refactor — investigated and concur.
-
-**Working hypothesis:** `TallyDB.ledger.archiveIndex` stayed in the main TallyDB chunk even though slot blobs moved into TallyA<NNN> globals. archiveIndex holds per-archive itemID sets, charKey sets, kindCounts, sourceCounts. Across 47 archives × 10k+ unique itemIDs in a real tester's data, the aggregate constant count in TallyDB.lua exceeds the 2^18 chunk cap that originally motivated alpha14's compression.
-
-**Fix direction:** move per-archive index INTO the slot global (`TallyA<NNN>.index = { itemIDs, charKeys, kindCounts, sourceCounts, monthlyAggregates }`). Each slot is its own Lua chunk with its own constant pool, so itemID/charKey/source constants distribute across slots instead of concentrating in TallyDB. archiveSlots stays in TallyDB (small key→slot map; one entry per archive, no high-cardinality fields).
-
-**Files to touch:**
-- `Archive.lua` — `computeIndex` writes `slot.index` instead of `indexTable()[key]`. `GetIndex(key)` reads `slot.index`. `MigrateAllLegacy` and `migrateLegacyArchive` write the index into the slot.
-- `Ledger.lua` — `gatherRows`, `Count`, `StorageInfo`, `ClearSourceAsync`'s sourceCounts fast-path all switch to `Archive:GetIndex(key)`.
-- `Core.lua` — `/tally diag` storage section reads via `Archive:GetIndex` if it does any direct read (it currently goes through `StorageInfo`).
-
-**Validation:** synthetic stress tests with the seed harness (~5000 distinct itemIDs) won't reproduce the overflow because cardinality is too low. Toeknee + zpectre's real data is the only ground truth. Plan: ship alpha17 with the fix, ask Toeknee to retest, watch his diag's `Memory.kb` and the archiveIndex shape.
-
-**Tester impact RIGHT NOW:** Toeknee can't use alpha16 — every login pops the setup wizard because TallyDB.lua fails to load (overflow → empty table → Count = 0 → grandfather check fails). Same for any other big-tester account. Recovery for them is to either revert to alpha15 or wait for alpha17. **Worth filing as a TLY issue and posting a Player update on the active issues so Toeknee/zpectre know.**
-
-Memory captures: `project_alpha16_archiveIndex_regression.md`, `feedback_constant_pool_audit.md`.
+Picks up after the alpha17 ship: a focused diagnostic alpha for the gold-accounting investigation, and an agreed architecture rewrite scoped for the next several alphas.
 
 ## State
 
-- **Branch:** `main`, working tree clean, in sync with `origin/main` at the alpha16 merge commit.
-- **Tag:** `v0.1.0-alpha16` pushed; CI built and shipped to CurseForge / Wago.
+- **Branch:** `main`, working tree clean, in sync with `origin/main`.
+- **Latest commit:** `647858c` — `docs(TLY-68): promote Unreleased to v0.1.0-alpha17`.
+- **Tag:** `v0.1.0-alpha17` pushed; CI built and shipped to CurseForge / Wago.
 - **Cogworks pinned at `v0.13.2`** in `.pkgmeta`.
-- **Standards acknowledgments** (per `CLAUDE.md`): runbooks at `2026-05-05a`, scribe player-facing at `2026-04-30f`. Re-checked early in the alpha16 session — all current.
-- Memory at `C:\Users\gezmo\.claude\projects\C--src-tally\memory\` is current.
-- Vendored libs unchanged: `Libs/LibSerialize/LibSerialize.lua` (MIT v5) + `Libs/LibDeflate/LibDeflate.lua` (zlib v3, level 1). LibDeflate is now only used for active-blob compression and legacy alpha14/15 read paths; archive slots are uncompressed raw tables.
+- **Standards acknowledgments** (per `CLAUDE.md`): runbooks at `2026-05-05a`, scribe player-facing at `2026-04-30f`. Re-checked early in the alpha17 session — all current.
 
-## What shipped in alpha16
+## What shipped in alpha17
 
-The full breakdown lives in `CHANGELOG.md`'s `## [v0.1.0-alpha16]` section and `RELEASES.md`'s player-facing version. Headlines:
+A diagnostic-only alpha responding to Toeknee's alpha16 gold-mismatch report (29M actual warbank vs 37M shown; 179M actual character gold vs 108M shown). Engineering breakdown in `CHANGELOG.md`'s `## [v0.1.0-alpha17]` section; player-facing copy in `RELEASES.md`'s matching version.
 
-- **Multi-SV slot storage.** Each archive in its own SavedVariables slot (`TallyA001` … `TallyA060`). Each slot is its own Lua chunk → own constant pool → no overflow risk regardless of total ledger size. Per-archive write is a table assignment (instant); per-archive read is a global lookup (instant).
-- **Async-chunked legacy-blob load at PLAYER_LOGIN.** The 30-50s synchronous deserialise that alpha14/15 → alpha16 upgraders would have hit is now chunked via `LibSerialize:DeserializeAsync` with a 1024-item yieldCheck. Game stays responsive throughout the load (~30 fps on slower hardware, no input-thread block).
-- **Routed-by-date backfill** for the wizard's sibling-source import. Current-month rows go to active; prior-month rows accumulate in staging buckets and flush to slots after all sources complete. A 438k-row TSM CSV import never inflates the active set.
-- **Reconcile result cache** keyed on filter contents; eliminates the per-tab-open clustered re-scan that was the dominant freeze cause.
-- **`/tally seal`** + Settings → Maintenance button + main-frame "Sealing recommended" header banner. User-driven shrink of the active set when it exceeds the soft cap.
-- **Compare opt-in for full-history scope** via "Include archives" checkbox; default active-only keeps Compare snappy on big ledgers.
-- **`/tally seed`** synthetic stress harness — `seed N`, `seed legacy N`, `seed clear`. Lets us reproduce zpectre/Toeknee-scale loads on a local install.
+- **`Gold` inspector + `/tally diag gold` subcommand** in `Core.lua`. Walks `Syndicator.API.GetAllCharacters() ∪ rollup.characters`, surfaces four flags (`money-nil`, `money-zero`, `missing-from-rollup`, `stale-rollup`), probes `GetWarband(1..4)` for multi-account Bnet setups, opens a columnar paste-friendly copy dialog. Inspector also registered with the standard `DIAG_INSPECTORS` so the data appears in `/tally diag`'s regular dump.
+- **TLY-68 filed** — engineering note + diagnostic plan + architectural follow-up. Comment posted on TLY-24 asking Toeknee for `/tally networth` chat output as the immediate-data ask while alpha17 propagates.
 
-## Live testers + feedback channels
+## Waiting on Toeknee
 
-alpha16 went out as the testing release. Tester names + channels per the existing flow:
+The whole point of alpha17 is to collect data. Two asks outstanding:
 
-- Toeknee_atx — primary big-ledger tester. Pre-fix had ~98k rows, expected to be the first to validate the legacy-blob async load + migration end-to-end.
-- _zpectre_ — 438k rows and counting. The freeze cause we've been designing around. Critical alpha16 validator.
-- Zong — logout perf reporter on TLY-55. Logouts should now be bounded by active-set size; archives are write-once after migration.
-- Idiot, others — opportunistic.
+1. **`/tally networth` chat output** (existing command, no need to wait for alpha17). Per-character gold + items split. Shows whether warbank-gold itself is correct (+8M Tally vs reality is likely the panel UI conflating `warband.total = gold + items`) and which characters contribute zero gold.
+2. **`/tally diag gold` copy-dialog output** (alpha17). Deeper per-character probe with the four-flag breakdown.
 
-Issues to watch for in tester reports on alpha16:
-- **Memory footprint.** alpha16 archives are raw Lua tables, fully resident. A 200k-row tester reported ~100 MB Tally memory (vs ~5 MB on alpha15). Acceptable for shipping; queued as TLY-66 for the next-pass optimisation (lazy-parsed string slots).
-- **First logout after migration cost.** The initial logout writes 30-60 fresh slot SV files — WoW's serialiser handles this, not Tally's, so it's outside our optimisation surface but visible to the user as "Logging out…" hanging for a few seconds.
-- **Frame rate during legacy load on slower hardware.** Designed for ~30 fps; if a tester reports lower, the next lever is dropping yieldCheck from 1024 to 512 items per yield.
+Once we have either, we can cut the diagnosis short. Working hypothesis: warbank delta is UI conflation (not a data bug); toon delta is one or two characters silently dropped via `data.money == nil` or `projectCharacter` returning nil.
 
-## Tester-mirrored / waiting on data
+## Architecture rewrite — the agreed direction
 
-- **[TLY-24](https://github.com/gezmodean-wow/tally/issues/24)** — Toeknee's TSM vs Tally undercount + Compare freeze. alpha16's filter.window default eliminates the Compare freeze; the Compare run we asked for can finally happen. Awaiting his post-alpha16 retest.
-- **[TLY-28](https://github.com/gezmodean-wow/tally/issues/28)** — zpectre's Inventory empty / freeze on window open. Same root cause as TLY-55 (UI hang on Reconcile over 438k rows). alpha16 closes this via the Reconcile cache + active-only default.
-- **[TLY-55](https://github.com/gezmodean-wow/tally/issues/55)** — Zong's logout slowdown + Toeknee's alpha15-still-hangs report. alpha16 bounds logout cost to the active-set serialise; closes once testers confirm.
-- **[TLY-49](https://github.com/gezmodean-wow/tally/issues/49)** — alpha14 compressed-blob recovery cycle. Largely superseded by TLY-51; closes once Toeknee or zpectre confirms the alpha16 load path works on real legacy data.
-- **[TLY-50](https://github.com/gezmodean-wow/tally/issues/50)** — alpha15 compression-level perf fix. Made less load-bearing by alpha16's tiered storage; close after alpha16 ships.
-- **[TLY-47](https://github.com/gezmodean-wow/tally/issues/47)** — flipqueue#147 duplicate (bag UI taint). Separate agent; closes when FQ ships.
-- **[TLY-20](https://github.com/gezmodean-wow/tally/issues/20)** — Curseforge install issue from alpha1. Awaiting tester response.
-- **[TLY-17](https://github.com/gezmodean-wow/tally/issues/17)** — surface "currently posted on AH" sub-line in net worth view. Backlog.
-- **[TLY-18](https://github.com/gezmodean-wow/tally/issues/18)** — multi-archive ledger storage + offline export/restore tooling. Most of this landed in alpha16; remaining bits (offline export, archive comparison view) are post-alpha16.
+Locked in over the alpha17 session. Multi-alpha scope; no code yet. Driving objectives, in priority order:
 
-## Filed during the alpha16 work
+1. **Flipper loop must stay fast.** 20-60 character logout/login cycles, ~4-5 min per char. Per-login work that scales with total ledger size = the 60× tax that alpha16 still pays.
+2. Research is allowed to be slower.
+3. Universal data store for transactions + history + market info.
+4. Import from other systems + record realtime superset.
+5. Catch-up when other tools were running but Tally wasn't.
 
-- **[TLY-66](https://github.com/gezmodean-wow/tally/issues/66)** — Lazy-parsed string slots to drop archive memory footprint ~20×. Phase 2 follow-up; alpha16 raw-table slots solve the freeze structurally but at high in-memory cost. The TSM-style CSV-format slot proposal documented in detail in the issue body.
-- **[cogworks#34](https://github.com/gezmodean-wow/cogworks/issues/34)** — `sync-standards.sh check` parsing bug. Surfaced from PR #58.
-- **[cogworks#35](https://github.com/gezmodean-wow/cogworks/issues/35)** — suite-standards bootstrap missing `.gitattributes`. Surfaced from PR #58.
+The framing that drops out: **sibling sources are not Tally's data.** TSM, FlipQueue, Journalator already keep their own permanent stores. Tally is the *cross-source aggregation layer*, not the universal repository. Archives become *caches of sibling-source synthesis*, evictable.
 
-## Player-facing follow-ups beyond TLY-66
+### The rewrite shape
 
-- **Lifecycle / Research panels gain "Include archives" option.** Currently default to active-only; deep-history queries miss data for old items. Phase 2 work to lazy-load relevant archives per item-history query (matches the spec's Phase 2 plan in TLY-51).
-- **NetWorth chart pre-computed monthly aggregates from `archiveIndex.monthlyAggregates`.** Already populated at archive-write time; rendering is the missing piece. Phase 3.
-- **Per-archive Compare scope (the "swap active out, compare an archive" UX Gez floated).** Multi-SV makes this clean: load one slot, query just that slot. Spec it as Phase 2 follow-up if testers want it.
-- **`/tally archive list / load / unload`** slash family. Diagnostic surface for power users to inspect / flush / preload archives. Spec'd in TLY-51 issue body but deferred from alpha16.
-- **Optional auto-seal triggers.** Settings checkboxes for "seal on idle / `/logout` / before `/reload`". Off by default.
-- **Footer indicator during migration / backfill.** Currently chat-only; a UI surface would help less-technical users.
+1. **PLAYER_LOGIN registers Native, period.** No automatic `ImportFromAllSources`, no session-row insert that dirties the active blob, no automatic anything from sibling sources. Setup wizard pops if `TallyDB.setup.completed` is false.
+2. **Setup wizard becomes the import controller.** Player-initiated, pausable, resumable import from siblings. Per-cycle row budget so logout during an import isn't catastrophic.
+3. **Period synthesis on-demand.** Research / Lifecycle / Compare query a period; if no Tally archive yet, synthesise from siblings, persist into a slot, return. Subsequent queries hit the cache. Visible "synthesising April..." progress for periods that don't exist yet.
+4. **PLAYER_LOGOUT serialises `TallyActive` only if dirty.** Active set bounded; logout cost = what changed this session.
 
-## Waiting on Cogworks
+### One-shot wipe at alpha18 first-load
+
+Tester data is **expendable**. No grandfathering, no migration. Clean break gated by `TallyCharDB.tally_schema_version`:
+
+- Wipe `TallyDB.ledger.{active,archives,archiveSlots,archiveIndex,nextSlot,blob,blobMeta,entries,byId}`.
+- Nil every `_G[TallyA001..TallyA060]`.
+- Reset `TallyDB.setup` so the wizard pops and the user opts into import explicitly.
+- Preserve settings, minimap, theme, NetWorth strategy, history snapshots.
+
+### New on-disk shape
+
+```
+TallyDB              — settings, history, slot allocation map, import watermarks
+TallyCharDB          — per-character markers (welcome popup gate, schema flag)
+TallyActive          — own SV file. Compressed active blob. Single string constant.
+TallyA001..TallyA060 — period synthesis caches. Each slot self-contained:
+                       { key, entries, byId, count, fromTs, toTs, index, savedAt }
+                       index lives IN the slot — no aggregation in TallyDB.
+```
+
+The `TallyActive` split is what plugs the alpha16 constant-pool regression structurally: TallyDB's chunk no longer holds anything that grows with row count.
+
+### Phasing
+
+- **alpha18:** the one-shot wipe + structural splits + no-auto-import. Setup wizard's import button gets pause/resume/budget treatment. Period synthesis stays on the manual-import path; on-demand-from-view defers.
+- **alpha19:** on-demand period synthesis. LRU eviction policy when slot pool fills.
+- **alpha20+:** TLY-66 CSV-shaped slots — both a memory drop *and* an export-ready format for the future offline pro service.
+
+### Open questions worth deciding before alpha18 work begins
+
+1. **Per-cycle row budget for the manual import.** Pick a starting default (probably ~10k rows per logout-safe chunk). Easy to tune, but UI needs a number to display.
+2. **Pure-Native users (no sibling addons) — archives are their only copy of pre-active data.** Future-correctness, not alpha18 blocker. Once eviction lands (alpha19+) we should gate on "are siblings still authoritative for this period?" or warn explicitly.
+3. **TLY-68 architectural follow-up.** Stop being 100% dependent on Syndicator for gold. Capture `GetMoney()` at PLAYER_LOGIN into `TallyCharDB.money + moneyAt`; capture warband money at warbank-frame events. NetWorth prefers Tally-own value when fresher than Syndicator's snapshot. Lines up with TLY-31 (Tally as source of truth) — gold is the next domain after ledger. Plan to fold into the alpha18 work since we're touching capture surfaces anyway.
+4. **TLY-65 (zpectre divergence freeze + empty popup).** Separate UI bug, not blocking alpha18. Worth picking up alongside if cheap.
+
+## Live testers + tracked issues
+
+alpha17 is the testing release for diagnosis. Tester names + channels:
+
+- **Toeknee_atx** — primary big-ledger tester (~98k+ rows). Two open data asks: `/tally networth` chat output and (post-alpha17) `/tally diag gold` copy-dialog output. Both pin down the gold-accounting bug.
+- **_zpectre_** — 438k rows. Hasn't posted alpha16 retest yet; alpha16 may also still be triggering the archiveIndex constant-pool overflow on his account, so he may not be on alpha16+ at all right now. Worth a check-in.
+- **Zong** — logout perf reporter (TLY-55). alpha16 should have closed this; alpha17 changes nothing for him.
+
+Open issues most relevant to the rewrite:
+
+- **[TLY-24](https://github.com/gezmodean-wow/tally/issues/24)** — TSM-vs-Tally ledger comparison. Toeknee posted alpha16 Compare results; gold conversation forked to TLY-68.
+- **[TLY-28](https://github.com/gezmodean-wow/tally/issues/28)** — zpectre Inventory empty / freeze. alpha16 closes this once zpectre confirms; rewrite preserves the fix.
+- **[TLY-32](https://github.com/gezmodean-wow/tally/issues/32)** — alpha13/16 setup-wizard recurrence on big-tester accounts. The rewrite's clean wipe + structural split kills the underlying constant-pool overflow that was driving this.
+- **[TLY-49](https://github.com/gezmodean-wow/tally/issues/49)** — superseded by TLY-51; rewrite makes it close-able.
+- **[TLY-51](https://github.com/gezmodean-wow/tally/issues/51)** — alpha16 multi-SV refactor. Foundation that the rewrite builds on; index-into-slot fix lands as part of alpha18.
+- **[TLY-65](https://github.com/gezmodean-wow/tally/issues/65)** — zpectre `/tally diag divergence` freeze + empty popup. Independent of the rewrite.
+- **[TLY-66](https://github.com/gezmodean-wow/tally/issues/66)** — lazy-parsed CSV-format string slots. Now reframed as alpha20+ work that doubles as the export format for the future offline pro service.
+- **[TLY-68](https://github.com/gezmodean-wow/tally/issues/68)** — gold accounting investigation (filed this session).
+
+## alpha16 archiveIndex regression — superseded
+
+The NEXT_SESSION plan from the alpha16 wrap-up was a surgical fix: relocate `archiveIndex` from TallyDB into per-slot. That fix is **not** being shipped as written. Instead, the alpha18 rewrite achieves the same structural goal (no high-cardinality data in TallyDB's chunk) via the cleaner shape — `archiveIndex` lives in slot.index and `active` lives in its own SV (`TallyActive`). Testers stay on alpha17 (or revert to alpha15) until alpha18 ships.
+
+## Backlog (post-alpha18)
+
+- **Character-key realm-normalisation** — adopt Cogworks `Realms.lua`. Lead from TLY-32 dig.
+- **LedgerPage bundle (TLY-52 + TLY-53 + TLY-56)** — item icon + quality-color name, right-click context menu, filter chip overlap fix.
+- **TLY-54 item-finder sidebar** — bigger refactor. Independent of LedgerPage; needs design pass on the All-WoW scope.
+- **TLY-61 Native AHCancel coverage hole** — fold into a future alpha if cheap.
+- **Authority priority audit from real data** — divergence reports accumulating now should give us tunable signal.
+- **Refactor `/tally diag` onto `cw:CreateDebug`** when Cogworks v0.13's debug primitive matures.
+
+## Cross-cog (waiting on Cogworks)
 
 - **[cogworks#23](https://github.com/gezmodean-wow/cogworks/issues/23)** — `CreateProgressBar` primitive. Lift `UI/ProgressBar.lua` + `UI/MultiProgressBar.lua` when it lands.
 - **[cogworks#27](https://github.com/gezmodean-wow/cogworks/issues/27)** — verify-package reusable workflow. Wired into Tally; close on Cogworks side once Gezmo confirms.
-- **[cogworks#29](https://github.com/gezmodean-wow/cogworks/issues/29)** — verify-package backslash → forward-slash TOC normalisation. Worked around in Tally.
-- **[cogworks#34](https://github.com/gezmodean-wow/cogworks/issues/34)** — `sync-standards.sh check` parsing bug (filed this session).
-- **[cogworks#35](https://github.com/gezmodean-wow/cogworks/issues/35)** — `.gitattributes` for `*.sh eol=lf` (filed this session).
-- **flipqueue#147** — pet-battle / combat lockdown gates. Separate agent; TLY-47 closes after.
-
-## Lead unresolved — character key normalisation (TLY-32 dig)
-
-Still applies. Tally's `inspectCurrentChar` (`Core.lua:460`) builds the current character key via `UnitName .. "-" .. GetRealmName()` — Blizzard returns the display realm name with the space (`Ðaytrader-Area 52`), while Syndicator strips whitespace before storing (`Ðaytrader-Area52`). Result: `inRollup = false, seenBySyndicator = false` for any character on a multi-word realm even though the rollup actually contains them under the normalised key. Cogworks `Realms.lua` likely has a normaliser; should adopt it suite-wide.
-
-## Backlog (post-alpha16)
-
-- **TLY-66** — lazy-parsed string slots (the next big alpha16 follow-up).
-- **Character-key realm-normalisation** — adopt Cogworks `Realms.lua`. Lead from TLY-32 dig.
-- **LedgerPage bundle (TLY-52 + TLY-53 + TLY-56)** — item icon + quality-color name, right-click context menu, filter chip overlap fix. ~1.5-2 days.
-- **TLY-54 item-finder sidebar** — bigger refactor (~1-2 days). Independent of LedgerPage; needs design pass on the All-WoW scope.
-- **TLY-61 Native AHCancel coverage hole** — fold into a future alpha if cheap.
-- **Real-gap investigation (TLY-24)** — depends on Toeknee's pending Compare export now that the freeze is fixed.
-- **Authority priority audit from real data** — divergence reports accumulating now should give us tunable signal.
-- **Refactor `/tally diag` onto `cw:CreateDebug`** when Cogworks v0.13's debug primitive matures (per `reference_cogworks_v013_debug.md`).
+- **[cogworks#29](https://github.com/gezmodean-wow/cogworks/issues/29)** — verify-package backslash → forward-slash TOC normalisation.
+- **[cogworks#34](https://github.com/gezmodean-wow/cogworks/issues/34)** — `sync-standards.sh check` parsing bug.
+- **[cogworks#35](https://github.com/gezmodean-wow/cogworks/issues/35)** — `.gitattributes` for `*.sh eol=lf`.
 
 ## Handy facts
 
 - Last acknowledged scribe player-facing conventions: `2026-04-30f`.
 - All cogworks runbooks acknowledged at `2026-05-05a`.
 - Cogworks pinned at `v0.13.2` in `.pkgmeta`.
-- alpha16 introduced multi-SV slots (`TallyA001`..`TallyA060`) declared in `tally.toc`. Bump `Archive.SLOT_COUNT` + the TOC declarations together if 60 isn't enough.
-- `Archive:Save / SaveAsync / Load / LoadAsync` are all synchronous-but-fast for slot-resident archives. The async variants exist for API compatibility with the chunked flush path.
-- Memory entries to read when starting: `feedback_alpha_cadence`, `feedback_no_push_without_approval`, `feedback_ui_before_ship`, `project_scope`, `feedback_player_summary`, `feedback_debug_copy_dialog`.
+- alpha16 multi-SV slots (`TallyA001`..`TallyA060`) declared in `tally.toc`. The alpha18 rewrite keeps this layout but adds `TallyActive` as a sibling SV.
+- Memory entries to read when starting: `project_architecture_rewrite_plan`, `project_pro_service_direction`, `feedback_alpha_cadence`, `feedback_no_push_without_approval`, `feedback_ui_before_ship`, `feedback_player_summary`, `feedback_debug_copy_dialog`.
