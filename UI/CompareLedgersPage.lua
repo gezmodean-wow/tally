@@ -170,6 +170,25 @@ function ns.UI.CreateCompareLedgersPage(parent)
     state.hideExpireCancel = self:GetChecked() and true or false
   end)
 
+  -- "Include archives" toggle — when off, Compare runs against the
+  -- active ledger window only (≤60 days, ≤25k rows). When on, every
+  -- monthly archive is lazy-loaded and walked too — the slow path,
+  -- but the only way to compare full-history sources for users with
+  -- deep ledger backlog. Default off so a tab open doesn't surprise
+  -- with a multi-second freeze on big accounts.
+  state.includeArchives = state.includeArchives or false
+  local archivesCheck = CreateFrame("CheckButton", nil, row, "UICheckButtonTemplate")
+  archivesCheck:SetSize(22, 22)
+  archivesCheck:SetPoint("LEFT", hideZeroCheck.text, "RIGHT", 16, 0)
+  archivesCheck:SetChecked(state.includeArchives)
+  archivesCheck.text = archivesCheck:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+  archivesCheck.text:SetPoint("LEFT", archivesCheck, "RIGHT", 0, 1)
+  archivesCheck.text:SetText("Include archives (slow)")
+  archivesCheck:SetScript("OnClick", function(self)
+    state.includeArchives = self:GetChecked() and true or false
+    if page.Refresh then page:Refresh() end
+  end)
+
   -- ============================================================================
   -- Summary card
   -- ============================================================================
@@ -234,14 +253,16 @@ function ns.UI.CreateCompareLedgersPage(parent)
     if not (ns.Ledger and ns.Ledger.Compare) then return end
     if not state.sourceA or not state.sourceB then return end
 
-    local pairs_, stats = ns.Ledger:Compare(state.sourceA, state.sourceB)
+    local filter = { window = state.includeArchives and "all" or "active" }
+    local pairs_, stats = ns.Ledger:Compare(state.sourceA, state.sourceB, filter)
     lastPairs, lastStats = pairs_, stats
 
+    local windowLabel = state.includeArchives and "full history" or "60d active"
     local sumLine = string.format(
-      "|cff7fbfff%s|r: %d entries (%s)  •  |cff7fbfff%s|r: %d entries (%s)  •  Δ %s",
+      "|cff7fbfff%s|r: %d entries (%s)  •  |cff7fbfff%s|r: %d entries (%s)  •  Δ %s  •  |cff999999scope: %s|r",
       state.sourceA, stats.aCount or 0, formatGoldShort(stats.aCopper),
       state.sourceB, stats.bCount or 0, formatGoldShort(stats.bCopper),
-      formatGoldShort(stats.deltaCopper))
+      formatGoldShort(stats.deltaCopper), windowLabel)
     local matchLine = string.format(
       "Matches: %s%d strict|r  •  %s%d loose|r  •  %s%d name|r  •  %s%d fuzzy|r  •  %s%d in A only|r  •  %s%d in B only|r",
       TIER_COLOR.strict, stats.strict,
@@ -364,6 +385,8 @@ function ns.UI.CreateCompareLedgersPage(parent)
   page:HookScript("OnShow", function()
     state.sourceA = nil
     state.sourceB = nil
+    state.includeArchives = false
+    archivesCheck:SetChecked(false)
     UIDropDownMenu_SetSelectedValue(ddA, nil)
     UIDropDownMenu_SetText(ddA, "(pick a source)")
     UIDropDownMenu_SetSelectedValue(ddB, nil)

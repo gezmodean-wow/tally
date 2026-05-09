@@ -65,10 +65,10 @@ frame:SetScript("OnEvent", function(_, event, ...)
   if handler then handler(ns, ...) end
 end)
 
--- TLY-49: PLAYER_LOGOUT is the canonical "save the working memory back
--- to disk" point. WoW writes SavedVariables after every addon's
--- PLAYER_LOGOUT handler returns, so this is our chance to compress the
--- in-memory ledger into TallyDB.ledger.blob before WoW persists it.
+-- PLAYER_LOGOUT is the canonical "save the working memory back to disk"
+-- point. WoW writes SavedVariables after every addon's PLAYER_LOGOUT
+-- handler returns, so this is our chance to serialise the active set
+-- before WoW persists the SV chunk.
 function ns:PLAYER_LOGOUT()
   if ns.Ledger and ns.Ledger.SaveToDisk then
     pcall(ns.Ledger.SaveToDisk, ns.Ledger)
@@ -118,17 +118,74 @@ function ns:PLAYER_LOGIN()
   -- just-reset user on their next login as a returning upgrader and
   -- silently re-opened the gate. Ledger rows survive nothing except a
   -- legitimate prior Tally session.
-  -- TLY-49: ledger storage moved from a raw entries[] array to a
-  -- compressed blob, so probe via Ledger:Count() instead of
-  -- TallyDB.ledger.entries directly. Count triggers the lazy load,
-  -- which also performs the legacy-entries → blob migration if
-  -- this is the first session on the new code.
+  -- Probe via Ledger:Count() so the lazy-load path (and any pending
+  -- storage-shape migration) runs as a side effect — the count is the
+  -- same value either way.
   if ns.Ledger and ns.Ledger.Count and ns.Ledger:Count() > 0
      and not (TallyDB.setup and TallyDB.setup.completed) then
     TallyDB.setup = TallyDB.setup or {}
     TallyDB.setup.completed = true
     TallyDB.setup.grandfathered = true
     TallyDB.setup.completedAt = TallyDB.setup.completedAt or time()
+  end
+
+  -- Auto-start the legacy-blob → tiered-storage migration if
+  -- loadFromDisk detected one. Two-phase pipeline:
+  --   1. KickLegacyLoad — async-chunked LibSerialize:DeserializeAsync
+  --      of the compressed legacy blob. Decompress is synchronous (~1s
+  --      even on big payloads); deserialise yields every 1024 items so
+  --      the input thread stays responsive across the multi-second
+  --      walk. On completion, _workingMem.pendingMigration is populated
+  --      and IsMigrationPending becomes true.
+  --   2. StartMigration — chunked routing (current month → active,
+  --      older months → staging buckets), then near-instant per-slot
+  --      flush via the multi-SV path.
+  --
+  -- SaveToDisk skips writes during BOTH phases so a logout in either
+  -- restarts cleanly from the on-disk legacy blob next session.
+  local function startMigrationFlow()
+    if not (ns.Ledger and ns.Ledger.IsMigrationPending) then return end
+    if not ns.Ledger:IsMigrationPending() then return end
+    print("|cffffe080Tally:|r Routing legacy ledger into tiered storage. Your client stays responsive throughout.")
+    ns.Ledger:StartMigration({
+      onProgress = function(phase, idx, total, key)
+        if phase == "route" and total > 0 and idx % 10000 == 0 then
+          print(string.format("|cff80a0ffTally:|r migration routing %d / %d (%d%%)",
+            idx, total, math.floor(100 * idx / total)))
+        elseif phase == "flush" then
+          print(string.format("|cff80a0ffTally:|r migration flushing archive %s (%d / %d)",
+            key or "?", idx, total))
+        end
+      end,
+      onComplete = function(activeRows, archiveCount, archiveRows)
+        print(string.format("|cff80ff80Tally:|r migration complete — %d active rows, %d archives, %d archived rows. The new shape saves on logout.",
+          activeRows, archiveCount, archiveRows))
+      end,
+    })
+  end
+
+  if ns.Ledger and ns.Ledger.IsLegacyLoadPending and ns.Ledger:IsLegacyLoadPending() then
+    print("|cffffe080Tally:|r Loading legacy ledger blob (chunked async deserialise).")
+    -- Defer slightly so PLAYER_LOGIN's other handlers run unblocked
+    -- before we start the deserialise tick chain.
+    if C_Timer and C_Timer.After then
+      C_Timer.After(0.5, function()
+        ns.Ledger:KickLegacyLoad({
+          onComplete = function(ok, err)
+            if ok then
+              print("|cff80a0ffTally:|r legacy load complete — beginning migration.")
+              startMigrationFlow()
+            else
+              print("|cffff4040Tally:|r legacy load failed: " .. tostring(err))
+            end
+          end,
+        })
+      end)
+    end
+  elseif ns.Ledger and ns.Ledger.IsMigrationPending and ns.Ledger:IsMigrationPending() then
+    -- Legacy blob already deserialised (e.g., test path that populates
+    -- pendingMigration directly) — start migration immediately.
+    startMigrationFlow()
   end
 
   -- TLY-21: defer the initial sibling-source backfill 5s after login so
@@ -139,9 +196,24 @@ function ns:PLAYER_LOGIN()
   -- TLY-25: gated on the setup-complete flag. Fresh installs and
   -- post-reset users see the wizard first; nothing flows into the
   -- ledger until they finish it.
+  --
+  -- Skipped while a migration is running so backfill doesn't race the
+  -- chunked legacy-blob walk. The migration's onComplete is the natural
+  -- moment to retry, but in practice native events keep flowing during
+  -- migration and the next login fires the deferred backfill cleanly.
   if ns.Ledger and ns.Ledger.ImportFromAllSources and C_Timer and C_Timer.After then
     C_Timer.After(5, function()
-      if ns.Ledger:IsSetupComplete() then
+      -- Hold off backfill while any phase of the legacy → tiered
+      -- pipeline is still running. Native events keep flowing during
+      -- those phases (live captures into active are safe); the
+      -- deferred sibling-source backfill restarts cleanly on next
+      -- login after the pipeline completes.
+      local busy =
+        (ns.Ledger.IsMigrationRunning   and ns.Ledger:IsMigrationRunning())
+        or (ns.Ledger.IsMigrationPending and ns.Ledger:IsMigrationPending())
+        or (ns.Ledger.IsLegacyLoadRunning and ns.Ledger:IsLegacyLoadRunning())
+        or (ns.Ledger.IsLegacyLoadPending and ns.Ledger:IsLegacyLoadPending())
+      if ns.Ledger:IsSetupComplete() and not busy then
         ns.Ledger:ImportFromAllSources()
       end
     end)
@@ -371,6 +443,317 @@ end
 ns.Reset = resetData
 
 -- ============================================================================
+-- /tally seed — synthetic ledger generator for TLY-51 stress testing
+-- ============================================================================
+--
+-- Two modes, both used to exercise the alpha16 storage paths without
+-- needing a real tester's 438k-row account:
+--
+--   /tally seed N
+--     Generates N synthetic entries spread across the last 12 months
+--     and chunked-inserts them via the live route — current-month
+--     rows go to active, prior-month rows go to staging buckets, then
+--     FlushStaging writes archives. Exercises the routed-import +
+--     archive-creation paths.
+--
+--   /tally seed legacy N
+--     Generates N entries, packs them as an alpha14/15 single-blob
+--     directly into TallyDB.ledger.blob, and clears the new-shape
+--     fields. Run /reload after — Tally's loadFromDisk treats it like
+--     a real legacy upgrader and kicks off the migration pass.
+--     Exercises the migration path.
+--
+--   /tally seed clear
+--     Removes every entry whose source == "__seed" from active and
+--     archives. Use to clean up after stress testing.
+--
+-- Distribution is intentionally uniform over time + crude on item /
+-- char / kind variety — enough to make Reconcile's clustering
+-- realistic but not trying to model real trader behaviour. The
+-- pseudo-source name "__seed" keeps these rows quarantined from real
+-- ledger views (filter by source = "__seed" to inspect them; ClearSource
+-- "__seed" wipes them).
+
+local SEED_SOURCE = "__seed"
+
+local SEED_KINDS = {
+  "sale", "purchase", "ah-cancel", "ah-expire",
+  "vendor-sell", "vendor-buy", "ah-fee",
+}
+
+local SEED_CHARS = {
+  "Stress1-StressTest", "Stress2-StressTest", "Stress3-StressTest",
+  "Stress4-StressTest", "Stress5-StressTest",
+}
+
+local function buildSeedEntry(i, now, rangeSec)
+  local atTime = now - math.random(1, rangeSec)
+  local kind = SEED_KINDS[((i - 1) % #SEED_KINDS) + 1]
+  local copper
+  if kind == "ah-cancel" or kind == "ah-expire" then
+    copper = 0
+  elseif kind == "ah-fee" then
+    copper = math.random(100, 500000)
+  else
+    copper = math.random(1000, 100000000)
+  end
+  return {
+    id       = SEED_SOURCE .. ":" .. tostring(i),
+    atTime   = atTime,
+    kind     = kind,
+    itemID   = 100000 + ((i * 17) % 5000),
+    itemKey  = tostring(100000 + ((i * 17) % 5000)),
+    charKey  = SEED_CHARS[((i - 1) % #SEED_CHARS) + 1],
+    copper   = copper,
+    count    = math.random(1, 5),
+    source   = SEED_SOURCE,
+    sourceId = tostring(i),
+    meta     = { name = "Stress test item " .. tostring((i % 200) + 1) },
+  }
+end
+
+-- Synchronous generator — fine for small N. Used by tests + as a
+-- fallback when C_Timer is unavailable.
+local function generateSeedEntries(count, monthsBack)
+  count = count or 100000
+  monthsBack = monthsBack or 12
+  local now = time()
+  local rangeSec = monthsBack * 30 * 86400
+  local entries = {}
+  for i = 1, count do
+    entries[i] = buildSeedEntry(i, now, rangeSec)
+  end
+  return entries
+end
+
+-- Chunked generator. Builds the entry list across C_Timer ticks so a
+-- 200k-row seed doesn't freeze the input thread before routing even
+-- begins. Calls onComplete(entries) when done.
+--
+-- Default chunkSize 1500 keeps each tick under ~15ms on slower CPUs
+-- (each entry build is ~9μs — 1500 entries ≈ 13ms = under one frame
+-- at 60fps; 5000 entries was hitting ~45ms = ~23fps in tester reports).
+local function generateSeedEntriesChunked(count, monthsBack, opts)
+  count = count or 100000
+  monthsBack = monthsBack or 12
+  opts = opts or {}
+  local chunkSize = opts.chunkSize or 1500
+  local delaySec  = opts.delaySec or 0.005
+  local now = time()
+  local rangeSec = monthsBack * 30 * 86400
+
+  if not (C_Timer and C_Timer.After) then
+    if opts.onComplete then pcall(opts.onComplete, generateSeedEntries(count, monthsBack)) end
+    return
+  end
+
+  local entries = {}
+  local idx = 0
+
+  local function step()
+    local stop = math.min(idx + chunkSize, count)
+    while idx < stop do
+      idx = idx + 1
+      entries[idx] = buildSeedEntry(idx, now, rangeSec)
+    end
+    if opts.onProgress then pcall(opts.onProgress, idx, count) end
+    if idx < count then
+      C_Timer.After(delaySec, step)
+    else
+      if opts.onComplete then pcall(opts.onComplete, entries) end
+    end
+  end
+
+  step()
+end
+
+local function handleSeed(rest)
+  rest = rest or ""
+  local sub, arg = rest:match("^(%S*)%s*(.-)$")
+  sub = sub or ""
+
+  -- /tally seed clear
+  if sub == "clear" then
+    if not (ns.Ledger and ns.Ledger.ClearSourceAsync) then
+      print("|cffff4040Tally:|r ledger unavailable.")
+      return
+    end
+    print("|cff7fbfffTally:|r clearing seeded entries (chunked across archives)…")
+    ns.Ledger:ClearSourceAsync(SEED_SOURCE, {
+      onProgress = function(idx, total, key, removedSoFar)
+        if idx % 5 == 0 or idx == total then
+          print(string.format("  scanned %s (%d / %d), %d removed so far",
+            key or "?", idx, total, removedSoFar or 0))
+        end
+      end,
+      onComplete = function(totalRemoved)
+        print(string.format("|cff80ff80Tally:|r cleared %d seeded entries from active + archives.",
+          totalRemoved or 0))
+        if ns.UI and ns.UI.MainFrame then
+          if ns.UI.MainFrame.UpdateHeaderNudge then
+            pcall(ns.UI.MainFrame.UpdateHeaderNudge, ns.UI.MainFrame)
+          end
+          if ns.UI.MainFrame.RefreshActivePage then
+            pcall(ns.UI.MainFrame.RefreshActivePage, ns.UI.MainFrame)
+          end
+        end
+      end,
+    })
+    return
+  end
+
+  -- /tally seed legacy N
+  if sub == "legacy" then
+    local n = tonumber(arg) or 100000
+    local LibSerialize = LibStub and LibStub("LibSerialize", true)
+    local LibDeflate   = LibStub and LibStub("LibDeflate", true)
+    if not (LibSerialize and LibDeflate) then
+      print("|cffff4040Tally:|r LibSerialize / LibDeflate unavailable.")
+      return
+    end
+
+    print(string.format("|cff7fbfffTally:|r generating %d synthetic entries (chunked)…", n))
+    generateSeedEntriesChunked(n, 12, {
+      onProgress = function(idx, total)
+        if idx % 25000 == 0 then
+          print(string.format("  generated %d / %d", idx, total))
+        end
+      end,
+      onComplete = function(entries)
+        local byId = {}
+        for _, e in ipairs(entries) do byId[e.id] = true end
+
+        -- Serialise async — synchronous serialise of 100k+ rows busts WoW's
+        -- ~10s script execution timer (LibSerialize is pure-Lua and walks
+        -- every entry in one pass). The async handler yields every 4096
+        -- items so the work spreads across ticks. After completion, run
+        -- the (smaller, faster) compress synchronously.
+        print("|cff7fbfffTally:|r serialising async (yields every 4096 items)…")
+        local handler = LibSerialize:SerializeAsync({ entries = entries, byId = byId })
+        local function step()
+          local ok, completed, serialised = pcall(handler)
+          if not ok then
+            print("|cffff4040Tally:|r serialise failed: " .. tostring(completed))
+            return
+          end
+          if not completed then
+            if C_Timer and C_Timer.After then
+              C_Timer.After(0.005, step)
+            else
+              step()
+            end
+            return
+          end
+
+          print(string.format("|cff7fbfffTally:|r serialise complete (%d bytes); compressing…", #serialised))
+          local compressed = LibDeflate:CompressDeflate(serialised, { level = 1 })
+
+          TallyDB = TallyDB or {}
+          -- Wipe slot-resident archives + archiveSlots + archiveIndex
+          -- so loadFromDisk routes cleanly through the legacy path
+          -- on /reload. Walk the slot table before nuking it so each
+          -- slot global is cleared and its SV file becomes empty.
+          if ns.Archive then
+            for _, k in ipairs(ns.Archive:List()) do ns.Archive:Delete(k) end
+            ns.Archive:UnloadAll()
+          end
+          TallyDB.ledger = TallyDB.ledger or {}
+          TallyDB.ledger.blob = compressed
+          TallyDB.ledger.blobMeta = {
+            count   = n,
+            savedAt = time(),
+            bytes   = #compressed,
+          }
+          -- Clear all new-shape fields so loadFromDisk routes through
+          -- the legacy alpha14/15 single-blob path.
+          TallyDB.ledger.active        = nil
+          TallyDB.ledger.activeMeta    = nil
+          TallyDB.ledger.archives      = nil
+          TallyDB.ledger.archiveIndex  = nil
+          TallyDB.ledger.archiveSlots  = nil
+          TallyDB.ledger.nextSlot      = nil
+
+          -- IMPORTANT: also wipe in-memory ledger state. Without this,
+          -- the in-memory active set persists; PLAYER_LOGOUT's
+          -- SaveToDisk would re-serialise it back to
+          -- TallyDB.ledger.active AND clear the legacy blob we just
+          -- wrote (the migration-completion clear in SaveToDisk).
+          -- Result on next /reload: legacy blob gone, no migration
+          -- exercised.
+          --
+          -- This is destructive — the caller's real ledger goes away.
+          -- Acceptable for stress-testing; document in the slash help.
+          if ns.Ledger and ns.Ledger.WipeForLegacySeed then
+            ns.Ledger:WipeForLegacySeed()
+          end
+
+          print(string.format("|cff80ff80Tally:|r wrote %d entries to legacy blob (%d bytes compressed, %d serialised).",
+            n, #compressed, #serialised))
+          print("|cffffe080Tally:|r in-memory active wiped — legacy blob is the only ledger now.")
+          print("|cff80ff80Tally:|r run |cff80c0ff/reload|r — loadFromDisk will detect the legacy blob and start the migration pass.")
+        end
+        step()
+      end,
+    })
+    return
+  end
+
+  -- /tally seed N (default)
+  local n = tonumber(sub) or tonumber(rest) or 100000
+  if n < 1 then n = 100000 end
+
+  if not (ns.Ledger and ns.Ledger.InsertManyChunkedRouted) then
+    print("|cffff4040Tally:|r tiered storage unavailable — InsertManyChunkedRouted missing.")
+    return
+  end
+
+  print(string.format("|cff7fbfffTally:|r generating %d synthetic entries (chunked)…", n))
+  generateSeedEntriesChunked(n, 12, {
+    onProgress = function(idx, total)
+      if idx % 25000 == 0 then
+        print(string.format("  generated %d / %d", idx, total))
+      end
+    end,
+    onComplete = function(entries)
+      print("|cff7fbfffTally:|r routing into active + staging…")
+      ns.Ledger:InsertManyChunkedRouted(entries, {
+        chunkSize = 500,
+        delaySec  = 0.005,
+        onProgress = function(inserted, total)
+          if inserted % 25000 == 0 then
+            print(string.format("  routed %d / %d (%d%%)", inserted, total, math.floor(100 * inserted / total)))
+          end
+        end,
+        onDone = function(inserted, skipped, insertedActive, insertedStaging)
+          print(string.format("|cff80ff80Tally:|r seeded %d entries — %d to active, %d to staging buckets (%d skipped).",
+            inserted, insertedActive or 0, insertedStaging or 0, skipped or 0))
+          if ns.Ledger.GetStagingRowCount and ns.Ledger:GetStagingRowCount() > 0 then
+            print("|cff7fbfffTally:|r flushing staging buckets to archives…")
+            ns.Ledger:FlushStaging({
+              delaySec = 0.005,
+              onProgress = function(idx, total, key)
+                print(string.format("  flushing %s (%d / %d)", key or "?", idx, total))
+              end,
+              onComplete = function(archivesWritten, rowsArchived)
+                print(string.format("|cff80ff80Tally:|r flush complete — %d archives, %d archived rows.",
+                  archivesWritten, rowsArchived))
+                if ns.UI and ns.UI.MainFrame and ns.UI.MainFrame.UpdateHeaderNudge then
+                  pcall(ns.UI.MainFrame.UpdateHeaderNudge, ns.UI.MainFrame)
+                end
+              end,
+            })
+          else
+            if ns.UI and ns.UI.MainFrame and ns.UI.MainFrame.UpdateHeaderNudge then
+              pcall(ns.UI.MainFrame.UpdateHeaderNudge, ns.UI.MainFrame)
+            end
+          end
+        end,
+      })
+    end,
+  })
+end
+
+-- ============================================================================
 -- /tally diag — one-shot diagnostic dump
 -- ============================================================================
 --
@@ -519,10 +902,10 @@ local function inspectLedger()
   return { rowCount = stats.count, bySource = stats.bySource }
 end
 
--- TLY-49: blob storage inspector. Confirms LibSerialize + LibDeflate
--- loaded, lazy-load completed, dirty state, and (after first save) the
--- on-disk compressed blob's size — testers comparing pre/post should
--- see blobBytes shrink dramatically vs the legacy raw-table footprint.
+-- Storage inspector. Surfaces the tiered active set + archive cohort:
+-- LibSerialize + LibDeflate availability, lazy-load + dirty state,
+-- active row count + on-disk active blob size, archive count + total
+-- archive bytes, and the LRU cache state.
 local function inspectStorage()
   if not (ns.Ledger and ns.Ledger.StorageInfo) then return nil end
   return ns.Ledger:StorageInfo()
@@ -702,19 +1085,55 @@ local function diagPrintChat()
   local st = inspectStorage()
   if st then
     print(string.format(
-      "Storage: libs=%s loaded=%s dirty=%s mem=%d entries  blob=%d bytes (%d entries)%s",
+      "Storage: libs=%s loaded=%s dirty=%s schema=v%d%s",
       st.libsAvailable and "yes" or "|cffff8080NO|r",
       st.loaded and "yes" or "no",
       st.dirty and "yes" or "no",
-      st.inMemoryCount,
-      st.blobBytes,
-      st.blobCount,
-      st.legacyPresent and " |cffffa050[legacy entries still on disk]|r" or ""))
-    if st.blobSavedAt and st.blobSavedAt > 0 then
-      print(string.format("  blob last saved: %s  (serialise %dms + compress %dms; serialised %d bytes)",
-        date("%Y-%m-%d %H:%M:%S", st.blobSavedAt),
+      st.schemaVer or 0,
+      st.legacyPresent and " |cffffa050[legacy blob still on disk]|r" or ""))
+    if st.pendingLegacyLoad then
+      print(string.format("  |cffffe080Legacy load pending:|r %d rows in legacy blob (%d bytes compressed) — async deserialise in flight",
+        st.pendingLegacyRows or 0, st.pendingLegacyBytes or 0))
+    end
+    if st.pendingMigration then
+      print(string.format("  |cffffe080Migration pending:|r %d rows in pendingMigration buffer", st.pendingRows or 0))
+    end
+    if st.stagingRows and st.stagingRows > 0 then
+      print(string.format("  |cffffe080Staging:|r %d rows across %d buckets — flush on import completion",
+        st.stagingRows, st.stagingKeys and #st.stagingKeys or 0))
+    end
+    print(string.format("  Active: %d rows, %d bytes", st.activeRows or 0, st.activeBytes or 0))
+    if st.activeSavedAt and st.activeSavedAt > 0 then
+      print(string.format("    saved %s  (serialise %dms + compress %dms; serialised %d bytes)",
+        date("%Y-%m-%d %H:%M:%S", st.activeSavedAt),
         st.serialiseMs or 0, st.compressMs or 0, st.serialisedBytes or 0))
     end
+    if (st.archiveCount or 0) > 0 then
+      if (st.archiveBytes or 0) > 0 then
+        print(string.format("  Archives: %d archives, %d rows, %d bytes",
+          st.archiveCount, st.archiveRows or 0, st.archiveBytes))
+      else
+        print(string.format("  Archives: %d archives, %d rows (slot-resident, raw)",
+          st.archiveCount, st.archiveRows or 0))
+      end
+      local cached = st.cachedArchives or {}
+      if #cached > 0 then
+        print(string.format("    Cache: %d/%d loaded — %s",
+          #cached, st.cacheCap or 3, table.concat(cached, ", ")))
+      end
+      -- Surface slot-allocator state for diag purposes.
+      if ns.Archive and ns.Archive.DiagInfo then
+        local info = ns.Archive:DiagInfo()
+        if info then
+          print(string.format("    Slots: %d / %d allocated", info.nextSlot or 0, info.slotCount or 0))
+          if (info.legacyCount or 0) > 0 then
+            print(string.format("    |cffffa050%d unmigrated legacy archive(s)|r — will migrate on next access",
+              info.legacyCount))
+          end
+        end
+      end
+    end
+    print(string.format("  Total rows: %d (active + archives)", st.totalRows or st.activeRows or 0))
   end
 
   local sk = inspectSkipCounters()
@@ -1274,6 +1693,76 @@ if Cogworks and Cogworks.RegisterSlashCommands then
           else
             print("|cffff4040Tally:|r compare view unavailable.")
           end
+        end,
+      },
+      {
+        name = "seed",
+        args = "[N | legacy N | clear]",
+        help = "Generate synthetic ledger entries for stress-testing (debug only)",
+        run = function(rest) handleSeed(rest) end,
+      },
+      {
+        name = "seal",
+        args = "[preview|confirm]",
+        help = "Move ledger rows older than 60 days into monthly archives",
+        run = function(rest)
+          if not (ns.Ledger and ns.Ledger.Seal) then
+            print("|cffff4040Tally:|r seal unavailable.")
+            return
+          end
+          if ns.Ledger:IsMigrationRunning() then
+            print("|cffffe080Tally:|r migration in progress — wait for it to finish before sealing.")
+            return
+          end
+          if ns.Ledger:IsSealRunning() then
+            print("|cffffe080Tally:|r seal already running.")
+            return
+          end
+
+          local sub = rest and rest:lower() or ""
+          local preview = ns.Ledger:SealPreview()
+
+          if sub == "preview" or (sub ~= "confirm" and preview.sealCount > 5000) then
+            print(string.format(
+              "|cff7fbfffTally seal preview:|r %d active rows  →  keep %d, archive %d",
+              preview.activeCount, preview.keepCount, preview.sealCount))
+            if preview.cutTime then
+              print(string.format("  Cut: rows older than %s; max active rows %d.",
+                date("%Y-%m-%d", preview.cutTime), preview.maxRows))
+            end
+            if sub ~= "preview" then
+              print("|cffffe080Tally:|r large cut — run |cff7fbfff/tally seal confirm|r to proceed.")
+            end
+            return
+          end
+
+          if preview.sealCount == 0 then
+            print("|cff7fbfffTally:|r nothing to seal — active set is within the soft cap.")
+            return
+          end
+
+          print(string.format("|cff7fbfffTally:|r sealing %d rows into archives…", preview.sealCount))
+          ns.Ledger:Seal({
+            onProgress = function(phase, idx, total, key)
+              if phase == "bucket" and total > 0 and idx % 5000 == 0 then
+                print(string.format("  bucketing %d / %d", idx, total))
+              elseif phase == "flush" then
+                print(string.format("  flushing archive %s (%d / %d)", key or "?", idx, total))
+              end
+            end,
+            onComplete = function(sealed, archivesWritten)
+              print(string.format("|cff80ff80Tally:|r sealed %d rows into %d archives. Logout will save the slimmed active set.",
+                sealed, archivesWritten))
+              if ns.UI and ns.UI.MainFrame then
+                if ns.UI.MainFrame.UpdateHeaderNudge then
+                  pcall(ns.UI.MainFrame.UpdateHeaderNudge, ns.UI.MainFrame)
+                end
+                if ns.UI.MainFrame.RefreshActivePage then
+                  pcall(ns.UI.MainFrame.RefreshActivePage, ns.UI.MainFrame)
+                end
+              end
+            end,
+          })
         end,
       },
       {

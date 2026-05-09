@@ -553,10 +553,92 @@ function ns.UI.CreateSettingsPage(parent)
   end)
 
   -- ============================================================================
-  -- SECTION 6: Danger zone — full data reset (testing aid + recovery path)
+  -- SECTION 6: Maintenance — seal old ledger rows into archives
   -- ============================================================================
 
-  local dangerHdr = makeSectionHeader(page, compareRow, "BOTTOMLEFT", 18, "DANGER ZONE")
+  local maintHdr = makeSectionHeader(page, compareRow, "BOTTOMLEFT", 18, "MAINTENANCE")
+
+  local sealRow = CreateFrame("Frame", nil, page)
+  sealRow:SetPoint("TOPLEFT", maintHdr, "BOTTOMLEFT", 0, -10)
+  sealRow:SetPoint("RIGHT", page, "RIGHT", 0, 0)
+  sealRow:SetHeight(24)
+
+  local sealStatus = sealRow:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+
+  local sealBtn = makeButton(sealRow, "Seal old data into archives", 220, function()
+    if not (ns.Ledger and ns.Ledger.Seal) then
+      print("|cffff4040Tally:|r seal unavailable.")
+      return
+    end
+    if ns.Ledger:IsMigrationRunning() then
+      print("|cffffe080Tally:|r migration in progress — wait for it to finish before sealing.")
+      return
+    end
+    if ns.Ledger:IsSealRunning() then
+      print("|cffffe080Tally:|r seal already running.")
+      return
+    end
+
+    local preview = ns.Ledger:SealPreview()
+    if preview.sealCount == 0 then
+      print("|cff7fbfffTally:|r nothing to seal — active set is within the soft cap.")
+      return
+    end
+
+    StaticPopupDialogs["TALLY_SEAL_CONFIRM"] = StaticPopupDialogs["TALLY_SEAL_CONFIRM"] or {
+      text = "Seal %d ledger rows older than %s into monthly archives?\n\nKeeps the %d newest rows in the active set. Archives are read-only and lazy-loaded by Compare and Lifecycle when you ask for full-history scope. Logout-time saves stay fast after.",
+      button1 = ACCEPT or "Accept",
+      button2 = CANCEL or "Cancel",
+      timeout = 0,
+      whileDead = true,
+      hideOnEscape = true,
+    }
+    StaticPopupDialogs["TALLY_SEAL_CONFIRM"].OnAccept = function()
+      print(string.format("|cff7fbfffTally:|r sealing %d rows into archives…", preview.sealCount))
+      ns.Ledger:Seal({
+        onProgress = function(phase, idx, total, key)
+          if phase == "flush" then
+            print(string.format("  flushing archive %s (%d / %d)", key or "?", idx, total))
+          end
+        end,
+        onComplete = function(sealed, archivesWritten)
+          print(string.format("|cff80ff80Tally:|r sealed %d rows into %d archives. Logout will save the slimmed active set.",
+            sealed, archivesWritten))
+          if outer.Refresh then pcall(outer.Refresh, outer) end
+          if ns.UI and ns.UI.MainFrame and ns.UI.MainFrame.UpdateHeaderNudge then
+            pcall(ns.UI.MainFrame.UpdateHeaderNudge, ns.UI.MainFrame)
+          end
+        end,
+      })
+    end
+    StaticPopup_Show("TALLY_SEAL_CONFIRM",
+      preview.sealCount,
+      date("%Y-%m-%d", preview.cutTime or time()),
+      preview.keepCount)
+  end)
+  sealBtn:SetPoint("LEFT", sealRow, "LEFT", 0, 0)
+
+  sealStatus:SetPoint("LEFT", sealBtn, "RIGHT", 12, 0)
+  sealStatus:SetPoint("RIGHT", sealRow, "RIGHT", 0, 0)
+  sealStatus:SetJustifyH("LEFT")
+  sealStatus:SetText("")
+
+  refreshFns[#refreshFns + 1] = function()
+    if not (ns.Ledger and ns.Ledger.SealPreview) then return end
+    local p = ns.Ledger:SealPreview()
+    if p.sealCount > 0 then
+      sealStatus:SetText(string.format("Active: %d rows — sealing would archive %d (older than %s).",
+        p.activeCount, p.sealCount, date("%Y-%m-%d", p.cutTime or time())))
+    else
+      sealStatus:SetText(string.format("Active: %d rows — within soft cap, no seal needed.", p.activeCount))
+    end
+  end
+
+  -- ============================================================================
+  -- SECTION 7: Danger zone — full data reset (testing aid + recovery path)
+  -- ============================================================================
+
+  local dangerHdr = makeSectionHeader(page, sealRow, "BOTTOMLEFT", 18, "DANGER ZONE")
 
   local resetRow = CreateFrame("Frame", nil, page)
   resetRow:SetPoint("TOPLEFT", dangerHdr, "BOTTOMLEFT", 0, -10)

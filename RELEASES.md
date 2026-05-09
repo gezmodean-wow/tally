@@ -8,6 +8,70 @@ The engineering-detail companion lives in `CHANGELOG.md` (commit-readerese — f
 
 ## Unreleased
 
+## v0.1.0-alpha16
+
+The big structural overhaul to how Tally stores its ledger. Players with very large transaction histories — hundreds of thousands of rows accumulated across years of trading — were hitting freezes every time they switched tabs in Tally's main window, and the multi-second logout delays kept getting worse as histories grew. This release fixes both for good. Day-to-day Tally feels snappy regardless of how much history you've accumulated, and the deep-dive views still get the full picture when you ask for them.
+
+### Tally is fast on huge histories now
+
+Before this release, every time you opened the Ledger tab, Settings, or switched the Compare source dropdown, Tally re-walked your entire history from scratch — a few hundred thousand rows of clustered comparison happening in pure Lua, every click. On big accounts that ran multiple seconds of UI freeze; on the largest tester accounts the client locked up entirely.
+
+The storage model is now split. Only the recent active window stays loaded at all times — at most around 25,000 rows or 60 days, whichever is smaller. Older months sit on disk in their own per-month archive files that nothing touches unless you specifically ask for full-history scope. The per-tab clustered scan that was the freeze cause now runs against a small, predictable working set. Tab switches feel instant. Logout-time saves only re-write the active blob, so they stay fast as your archives accumulate.
+
+### How the migration works
+
+If you've been running alpha14 or alpha15, your first login on this build kicks off a one-time migration in the background. You'll see a chat line:
+
+```
+Tally: Loading legacy ledger blob (chunked async deserialise).
+```
+
+The legacy data takes a couple of minutes to load on the biggest tester accounts (hundreds of thousands of rows from years of TSM/Journalator/FlipQueue history). **Critically, this happens without freezing the game.** Tally chunks the work across timer ticks so the input thread stays responsive — you can move your character, click around, and chat throughout. Frame rate dips to roughly 30 fps during the load on slower hardware, but nothing locks up.
+
+Once the load finishes, Tally routes your data into the new tiered shape (current month rows go to active, older months go to archives). On a 200,000-row legacy ledger this typically takes ~5 seconds for routing and another ~1 second to write all the archives — substantially faster than alpha14/15 logouts on the same data. You'll see:
+
+```
+Tally: migration complete — 4,334 active rows, 47 archives, 195,666 archived rows. The new shape saves on logout.
+```
+
+If you log out before the migration completes, no problem — the original data stays on disk untouched, and the migration restarts cleanly on next login.
+
+### Sealing keeps the active window manageable
+
+If your active set ever exceeds the soft cap (25,000 rows or 60 days old), Tally surfaces a banner at the top of the main window: **"Sealing recommended: N rows older than ... waiting to archive."** Click it to seal — Tally moves the older rows into a monthly archive on disk and shrinks the active set back down. There's also a manual command (`/tally seal`) and a **Seal old data into archives** button under Settings → Maintenance for power users who want to control the timing.
+
+The seal operation is chunked the same way the migration is, so it never freezes the client. A confirmation dialog appears before any cut larger than 5,000 rows so you don't accidentally archive your recent activity.
+
+### Compare gains an "Include archives" opt-in
+
+The Compare tab (Source A vs Source B side-by-side diff) now defaults to comparing only the active 60-day window. That keeps the tab snappy on big accounts even when picking sources that previously caused freezes. A new **Include archives** checkbox flips Compare into full-history mode — every monthly archive loads and the whole ledger gets compared. The summary line shows the current scope so you always know what window you're looking at.
+
+The default-active behaviour also flows into the rest of the UI — Ledger, Settings, Inventory, Net Worth, and the Lifecycle drill-down all read from the active set unless you specifically ask for wider scope. (Lifecycle and the Research panel will gain their own opt-in archive loads in a follow-up release.)
+
+### Logouts stay fast as archives accumulate
+
+After the initial migration, archives are write-once. Subsequent logouts only re-write the small active blob — the dozens of monthly archive files Tally created during migration stay clean on disk and aren't touched at logout time. The first logout after migration does cost a few extra seconds because the operating system writes those new archive files for the first time, but every logout after that returns to the fast path.
+
+### How to verify it's working
+
+Run `/tally diag` and look for the **Storage** section. The new layout reports:
+
+```
+Storage: libs=yes loaded=yes dirty=no schema=v1
+  Active: 4,334 rows, 142,243 bytes
+    saved 2026-05-08 18:01:50  (serialise 138ms + compress 238ms; serialised 598018 bytes)
+  Archives: 47 archives, 195,666 rows (slot-resident, raw)
+    Slots: 47 / 60 allocated
+  Total rows: 200,000 (active + archives)
+```
+
+The headline numbers to watch:
+- **Active rows** should be in the low thousands once migration completes — current month plus a bit of carry-over.
+- **serialise / compress times** on the active save should be tens to a few hundred milliseconds, not multiple seconds. That's the per-logout cost, now bounded by the active set's size cap.
+- **Archive count** scales with how many months of history you have. Each archive is its own file on disk — small relative to the total.
+
+A future release will reduce the in-memory footprint of archives (currently they stay fully resident as raw tables; a TSM-style lazy-parsed string format is queued for that work). For now, big accounts will see Tally's memory footprint roughly proportional to their ledger size.
+
 ## v0.1.0-alpha15
 
 Quick perf fix on top of alpha14.

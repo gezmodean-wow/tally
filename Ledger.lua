@@ -653,9 +653,56 @@ end
 -- Filtering by source via filter.source short-circuits reconciliation
 -- (single-source filter → single-row clusters; useful for the LedgerPage
 -- Raw-mode filter chips that select a specific adapter).
+--
+-- Result caching: the Reconcile output for a given filter is cached
+-- in-memory and invalidated by any mutation to the active set or
+-- archives (Insert / InsertMany / InsertManyChunked / Clear /
+-- ClearSource / seal paths). Without this, every UI tab open re-ran
+-- the full clustered scan over hundreds of thousands of rows; the
+-- cache is the structural fix for the per-tab-open freeze on big
+-- ledgers (zpectre 438k, Toeknee Compare hang).
+local _reconcileCache = {}
+
+local function reconcileFilterKey(filter)
+  if not filter then return "" end
+  local keys = {}
+  for k in pairs(filter) do keys[#keys + 1] = k end
+  table.sort(keys)
+  local parts = {}
+  for _, k in ipairs(keys) do
+    local v = filter[k]
+    if type(v) == "table" then
+      local copy = {}
+      for i, item in ipairs(v) do copy[i] = tostring(item) end
+      table.sort(copy)
+      parts[#parts + 1] = k .. "=[" .. table.concat(copy, ",") .. "]"
+    else
+      parts[#parts + 1] = k .. "=" .. tostring(v)
+    end
+  end
+  return table.concat(parts, ";")
+end
+
+local function invalidateReconcileCache()
+  _reconcileCache = {}
+end
+
+-- Public hook for callers that mutate active set or archives outside
+-- the normal Insert / Clear paths (seal, schema-version rebuild, etc.).
+function Ledger:InvalidateReconcileCache()
+  invalidateReconcileCache()
+end
+
 function Ledger:Reconcile(filter)
+  local cacheKey = reconcileFilterKey(filter)
+  local cached = _reconcileCache[cacheKey]
+  if cached then return cached end
+
   local rows = self:Query(filter)
-  if #rows == 0 then return {} end
+  if #rows == 0 then
+    _reconcileCache[cacheKey] = {}
+    return _reconcileCache[cacheKey]
+  end
 
   -- Group by (kind, charKey, itemID). Rows with nil itemID share the
   -- "0" bucket — fine for kinds that don't carry an item (ah-fee, repair,
@@ -686,6 +733,7 @@ function Ledger:Reconcile(filter)
     end
   end
 
+  _reconcileCache[cacheKey] = records
   return records
 end
 
@@ -952,81 +1000,141 @@ function Ledger:DivergenceReport(filter)
 end
 
 -- ============================================================================
--- Storage (TLY-49: compressed blob)
+-- Storage (TLY-49 compressed blob, TLY-51 tiered active + archives)
 -- ============================================================================
 --
--- On disk: TallyDB.ledger.blob is a deflated LibSerialize blob containing
--- the entries array and byId set. One Lua constant in the SV chunk no
--- matter how many ledger entries it represents — so even ledgers with
--- hundreds of thousands of rows don't push the SV's constant pool past
--- Lua's per-chunk 2^18 limit (which was wholesale-failing TallyDB load on
--- big-tester accounts pre-fix; see TLY-32).
+-- On disk (TallyDB.ledger):
+--   active       = <serialised+deflated blob>          -- mutable hot path
+--   activeMeta   = { count, savedAt, bytes, serialiseMs, compressMs, ... }
+--   archives     = { ["YYYY-MM"|"YYYY-MM-wN"] = { blob, count, fromTs, toTs, bytes, schemaVer, savedAt } }
+--   archiveIndex = { ["YYYY-MM"|"YYYY-MM-wN"] = { itemIDs, charKeys, kindCounts, monthlyAggregates, ... } }
 --
--- In memory: _workingMem holds the deserialised { entries, byId }. Lazy
--- loaded on first db() call; reserialised on PLAYER_LOGOUT (or any
--- explicit Ledger:SaveToDisk()). All ledger reads/writes share one
--- _workingMem so callers continue to operate on the same table refs that
--- the pre-blob db() returned.
+-- The active set is the only mutable structure. Archives are write-once
+-- at seal time (Archive.lua) and lazy-loaded into Archive's LRU(3) cache
+-- when a query expands beyond the default `filter.window = "active"`.
+-- archiveIndex stays resident permanently — it's tiny relative to the
+-- archive blobs and lets the query layer skip whole archives without
+-- touching the compressed payload.
 --
--- Dirty tracking: Insert / InsertMany / Clear / ClearSource flip _dirty.
--- SaveToDisk early-exits if not dirty so logout doesn't pay the serialise
--- cost on read-only sessions.
+-- In memory: _workingMem holds the deserialised active { entries, byId }.
+-- Lazy loaded on first db() call; reserialised on PLAYER_LOGOUT (or any
+-- explicit Ledger:SaveToDisk()).
 --
--- Migration: pre-blob users land here with TallyDB.ledger.entries still
--- populated as a raw table. loadFromDisk detects that, treats it as the
--- working memory, and marks dirty so the next save promotes it to blob
--- form (and clears the legacy field to stop WoW from persisting it
--- through the SV chunk's overflowing constant pool). Legacy fields stay
--- on disk until the first successful save so a crash mid-migration
--- doesn't lose data.
+-- Dirty tracking: Insert / InsertMany / Clear / ClearSource / seal flip
+-- _dirty. SaveToDisk early-exits if not dirty so logout doesn't pay the
+-- serialise cost on read-only sessions. Archives are never dirty after
+-- their initial seal write — re-saving an archive happens explicitly via
+-- Archive:Save() during seal or ClearSource cleanup.
+--
+-- Migration paths handled in loadFromDisk:
+--   1. Modern shape (TallyDB.ledger.active blob present): deserialise into
+--      _workingMem.active. _dirty = false.
+--   2. alpha14/15 single-blob (TallyDB.ledger.blob): deserialise the
+--      legacy blob, promote into _workingMem.active, mark dirty so the
+--      next save lands the new shape. Legacy blob retained on disk until
+--      the first successful new-shape save (belt-and-suspenders, same
+--      pattern TLY-49 used).
+--   3. Pre-alpha14 raw entries (TallyDB.ledger.entries): same handling as
+--      legacy blob — promote into active and mark dirty.
+--
+-- Phase 1 (alpha16) loads everything into the active set even if it's
+-- 438k rows. The route-by-date migration that splits a legacy blob into
+-- active + archives is a separate Phase 1 task (TLY-51 #8); this commit
+-- is the storage-shape change only. Until that lands, alpha14/15 users
+-- get the new shape but with a fat active set.
 
 local LibSerialize = LibStub and LibStub("LibSerialize", true)
 local LibDeflate   = LibStub and LibStub("LibDeflate", true)
 
-local _workingMem  -- { entries = { ... }, byId = { ... } } once loaded
+-- Bumped when active+archive entry shape changes incompatibly. Mirrors
+-- Archive.SCHEMA_VERSION; Archive blobs are tagged with the same value.
+Ledger.SCHEMA_VERSION = 1
+
+local _workingMem  -- { active = { entries = {...}, byId = {...} } }
 local _loaded = false
 local _dirty = false
 
 local function defaultMem()
-  return { entries = {}, byId = {} }
+  return { active = { entries = {}, byId = {} } }
 end
 
 local function loadFromDisk()
   TallyDB = TallyDB or {}
   TallyDB.ledger = TallyDB.ledger or {}
+  local L = TallyDB.ledger
 
-  -- Migration: legacy entries present (no blob yet). Promote in place.
-  -- Don't clear the legacy fields here — saveToDisk does that on the
-  -- first successful save so a crash mid-migration leaves the disk copy
-  -- intact for the next session to retry.
-  if TallyDB.ledger.entries and not TallyDB.ledger.blob then
-    _workingMem = {
-      entries = TallyDB.ledger.entries,
-      byId    = TallyDB.ledger.byId or {},
-    }
+  if not (LibSerialize and LibDeflate) then
+    _workingMem = defaultMem()
     _loaded = true
-    _dirty = true
+    _dirty = false
     return
   end
 
-  -- Modern path: deserialise the blob.
-  if TallyDB.ledger.blob and LibSerialize and LibDeflate then
-    local decompressed = LibDeflate:DecompressDeflate(TallyDB.ledger.blob)
+  -- Modern (TLY-51) path: tiered active + archives.
+  if L.active then
+    local decompressed = LibDeflate:DecompressDeflate(L.active)
     if decompressed then
       local ok, payload = LibSerialize:Deserialize(decompressed)
       if ok and type(payload) == "table" then
         _workingMem = {
-          entries = payload.entries or {},
-          byId    = payload.byId or {},
+          active = {
+            entries = payload.entries or {},
+            byId    = payload.byId or {},
+          },
         }
         _loaded = true
         _dirty = false
+        -- Legacy archives (TallyDB.ledger.archives[key].blob from prior
+        -- alpha16-candidate builds before the multi-SV switch) migrate
+        -- lazily to slots on first Archive:Load(key). Most operations
+        -- that touch archives (ClearSourceAsync's Delete fast-path,
+        -- gatherRows' GetIndex skip-test) avoid the load entirely when
+        -- archiveIndex carries sourceCounts. Eager migration would
+        -- freeze login by ~150-300ms per archive on the way in.
         return
       end
     end
-    -- Blob failed to deserialise — corrupt or written by an incompatible
-    -- lib version. Warn and start fresh; user can /tally setup to backfill.
-    print("|cffff8080Tally:|r ledger storage failed to load — starting fresh. Run /tally setup to backfill from sibling sources.")
+    print("|cffff8080Tally:|r ledger active set failed to load — starting fresh. Run /tally setup to backfill from sibling sources.")
+    _workingMem = defaultMem()
+    _loaded = true
+    _dirty = false
+    return
+  end
+
+  -- Migration 1: alpha14/15 single-blob. The full deserialise of a
+  -- 200k+ row legacy blob takes 30-50s synchronously — unacceptable
+  -- as a login freeze. Stash the compressed bytes in pendingLegacy
+  -- and return immediately; PLAYER_LOGIN's deferred handler will call
+  -- Ledger:KickLegacyLoad to async-deserialise across ticks (chunked
+  -- via LibSerialize:DeserializeAsync with a 1024-item yieldCheck).
+  -- Active stays empty during the load window; Count() reads the
+  -- legacy blob's metadata count so the grandfather check still
+  -- recognises the user as already-onboarded.
+  if L.blob then
+    _workingMem = {
+      active = { entries = {}, byId = {} },
+      pendingLegacy = {
+        blob = L.blob,
+        meta = L.blobMeta or {},
+      },
+    }
+    _loaded = true
+    _dirty = false
+    return
+  end
+
+  -- Migration 2: pre-alpha14 raw entries — same pending-migration path.
+  if L.entries then
+    _workingMem = {
+      active = { entries = {}, byId = {} },
+      pendingMigration = {
+        entries = L.entries,
+        byId    = L.byId or {},
+      },
+    }
+    _loaded = true
+    _dirty = false
+    return
   end
 
   _workingMem = defaultMem()
@@ -1036,30 +1144,41 @@ end
 
 local function db()
   if not _loaded then loadFromDisk() end
-  return _workingMem
+  return _workingMem.active
 end
 
--- Public: serialise + compress _workingMem and write to TallyDB.ledger.blob.
--- Called from Core.lua's PLAYER_LOGOUT handler. No-op when nothing dirty
--- so read-only sessions don't pay the cost.
+-- Public: serialise + compress _workingMem.active and write to
+-- TallyDB.ledger.active. Called from Core.lua's PLAYER_LOGOUT handler.
+-- No-op when nothing dirty so read-only sessions don't pay the cost.
 --
--- Compression level (TLY-50): LibDeflate at level 5 was costing testers
--- with big ledgers (~98k entries) multiple seconds of pure-Lua compress
--- on every logout — visible as a "stuck" UI freeze before the 20s
--- logout countdown finished. Dropped to level 1: fastest setting LibDeflate
--- offers without disabling compression entirely, ~5-10x faster than
--- level 5 on the same input. Output is ~20-30% larger but still one Lua
--- constant in the SV chunk so the constant-pool cap (the original
--- TLY-49 motivation) is unchanged. The serialise step is unavoidable
--- and is the irreducible cost; compress was the dominant tunable.
+-- Compression level (TLY-50): LibDeflate at level 1, the fastest setting.
+-- Once tiering ships (TLY-51) the active set is bounded ≤25k rows so
+-- compression cost is well within fast-compress territory at any level;
+-- level 1 gives the most headroom for future scale.
+--
+-- Archives are never re-saved by this function — they're write-once at
+-- seal time via Archive:Save(). The active blob is the only thing that
+-- gets refreshed on every logout cycle.
 function Ledger:SaveToDisk()
   if not _loaded then return end
   if not _dirty then return end
   if not (LibSerialize and LibDeflate) then return end
 
+  -- Mid-migration / mid-load: don't save active and don't clear the
+  -- legacy blob. If we persisted active alongside legacy here, a
+  -- subsequent reload would see both and SaveToDisk's
+  -- migration-completion clear would wipe the legacy blob. Skipping
+  -- the save means a logout during the legacy load or migration
+  -- restarts cleanly from the legacy blob on next session, losing
+  -- only any native events captured in the partial active during
+  -- this session (small window, typically minutes).
+  if _workingMem.pendingLegacy then return end
+  if _workingMem.pendingMigration then return end
+
   local startMs = (debugprofilestop and debugprofilestop()) or 0
 
-  local payload    = { entries = _workingMem.entries, byId = _workingMem.byId }
+  local active = _workingMem.active
+  local payload    = { entries = active.entries, byId = active.byId }
   local serialised = LibSerialize:Serialize(payload)
   local serialisedMs = (debugprofilestop and debugprofilestop()) or 0
   local compressed = LibDeflate:CompressDeflate(serialised, { level = 1 })
@@ -1067,42 +1186,579 @@ function Ledger:SaveToDisk()
 
   TallyDB = TallyDB or {}
   TallyDB.ledger = TallyDB.ledger or {}
-  TallyDB.ledger.blob = compressed
-  TallyDB.ledger.blobMeta = {
-    count             = #_workingMem.entries,
+  TallyDB.ledger.active = compressed
+  TallyDB.ledger.activeMeta = {
+    count             = #active.entries,
     savedAt           = time(),
     bytes             = #compressed,
     serialisedBytes   = #serialised,
     serialiseMs       = math.floor(serialisedMs - startMs),
     compressMs        = math.floor(compressedMs - serialisedMs),
+    schemaVer         = self.SCHEMA_VERSION,
   }
-  -- Migration completion: clear the legacy fields once the blob is
-  -- safely on disk. From here on WoW only persists blob + blobMeta.
+  -- Migration completion: clear legacy fields once the new-shape save
+  -- lands. From here on WoW persists active + activeMeta + archives only.
+  TallyDB.ledger.blob = nil
+  TallyDB.ledger.blobMeta = nil
   TallyDB.ledger.entries = nil
   TallyDB.ledger.byId    = nil
 
   _dirty = false
 end
 
--- Diagnostic surface: returns the post-load blob meta + working-memory
--- shape so /tally diag can show what storage looks like.
+-- Diagnostic surface: returns the post-load active meta + archive count
+-- + cache state so /tally diag Storage section can show what storage
+-- looks like.
 function Ledger:StorageInfo()
   if not _loaded then loadFromDisk() end
   TallyDB = TallyDB or {}
-  local meta = TallyDB.ledger and TallyDB.ledger.blobMeta or nil
+  local L = TallyDB.ledger or {}
+  local meta = L.activeMeta or L.blobMeta or nil
+  local activeRows = (_workingMem and _workingMem.active and #_workingMem.active.entries) or 0
+
+  -- Archive metrics now come from the multi-SV slot allocator. Slot-
+  -- based archives don't carry a per-archive byte count (they're raw
+  -- tables, not a serialised blob); legacy single-blob archives still
+  -- on disk pre-migration carry rec.bytes via Archive:GetMeta.
+  local archiveCount, archiveBytes, archiveRows = 0, 0, 0
+  if ns.Archive and ns.Archive.List then
+    for _, key in ipairs(ns.Archive:List()) do
+      local m = ns.Archive:GetIndex(key) or ns.Archive:GetMeta(key) or {}
+      archiveCount = archiveCount + 1
+      archiveBytes = archiveBytes + (m.bytes or 0)
+      archiveRows  = archiveRows + (m.count or 0)
+    end
+  end
+
+  local cachedKeys, cacheCap = {}, 0
+  if ns.Archive then
+    cachedKeys = ns.Archive:CachedKeys()
+    cacheCap   = ns.Archive:CacheCap()
+  end
+
+  local pendingRows = (_workingMem and _workingMem.pendingMigration
+                       and #_workingMem.pendingMigration.entries) or 0
+  local pendingLegacy = _workingMem and _workingMem.pendingLegacy
+  local pendingLegacyRows = (pendingLegacy and pendingLegacy.meta and pendingLegacy.meta.count) or 0
+  local pendingLegacyBytes = (pendingLegacy and pendingLegacy.blob and #pendingLegacy.blob) or 0
+
+  local stagingKeys = self:GetStagingKeys()
+  local stagingRows = self:GetStagingRowCount()
+
   return {
     libsAvailable    = (LibSerialize and LibDeflate) and true or false,
     loaded           = _loaded,
     dirty            = _dirty,
-    inMemoryCount    = _workingMem and #_workingMem.entries or 0,
-    blobBytes        = meta and meta.bytes or 0,
-    blobCount        = meta and meta.count or 0,
-    blobSavedAt      = meta and meta.savedAt or nil,
+    schemaVer        = self.SCHEMA_VERSION,
+    inMemoryCount    = activeRows,
+    activeRows       = activeRows,
+    activeBytes      = meta and meta.bytes or 0,
+    activeSavedAt    = meta and meta.savedAt or nil,
     serialisedBytes  = meta and meta.serialisedBytes or 0,
     serialiseMs      = meta and meta.serialiseMs or 0,
     compressMs       = meta and meta.compressMs or 0,
-    legacyPresent    = (TallyDB.ledger and TallyDB.ledger.entries) and true or false,
+    archiveCount     = archiveCount,
+    archiveBytes     = archiveBytes,
+    archiveRows      = archiveRows,
+    totalRows        = activeRows + archiveRows,
+    cachedArchives   = cachedKeys,
+    cacheCap         = cacheCap,
+    pendingMigration   = pendingRows > 0,
+    pendingRows        = pendingRows,
+    pendingLegacyLoad  = pendingLegacy ~= nil,
+    pendingLegacyRows  = pendingLegacyRows,
+    pendingLegacyBytes = pendingLegacyBytes,
+    stagingKeys        = stagingKeys,
+    stagingRows        = stagingRows,
+    -- Back-compat aliases for callers still using the pre-TLY-51 names:
+    blobBytes        = meta and meta.bytes or 0,
+    blobCount        = meta and meta.count or 0,
+    blobSavedAt      = meta and meta.savedAt or nil,
+    legacyPresent    = (L.entries or L.blob) and true or false,
   }
+end
+
+-- ============================================================================
+-- Migration (TLY-51): legacy single-blob → tiered active + archives
+-- ============================================================================
+--
+-- alpha14/15 single-blob users land in loadFromDisk with their entries
+-- in `_workingMem.pendingMigration` instead of active. The migration
+-- pass walks the buffer in chunks and routes each entry by date —
+-- current month → active, prior months → in-memory staging buckets.
+-- After all rows are routed the staging buckets are flushed one at a
+-- time to Archive:Save. Once everything is on disk in the new shape,
+-- the next SaveToDisk clears the legacy blob.
+--
+-- Crash safety: SaveToDisk skips writing while a pendingMigration
+-- buffer is present, so if the user logs out mid-pass the on-disk
+-- state stays "legacy blob, no new active blob, possibly some
+-- archives". The legacy blob is the ground truth on next login —
+-- the partial archives get overwritten when their months are
+-- re-flushed from the re-deserialised legacy blob.
+--
+-- The chunked walk uses the same C_Timer.After / 50ms slice / 500-row
+-- pattern as InsertManyChunked so the input thread stays responsive
+-- through the multi-second routing pass on large legacy ledgers.
+
+local _migration = nil  -- in-flight migration state, see StartMigration
+local _legacyLoad = nil  -- in-flight legacy-blob async deserialise, see KickLegacyLoad
+
+-- Routed-import staging buckets. Bulk-import paths (the wizard backfill +
+-- any other route-by-date insert flow) drop prior-month rows into here
+-- keyed on YYYY-MM, then flush at end-of-import via Ledger:FlushStaging.
+-- Survives across InsertManyChunkedRouted calls within a single driver
+-- run; left empty after a successful flush. Distinct from _migration's
+-- own staging — the migration owns its buckets internally because its
+-- input is the legacy blob, not a sequence of source-supplied chunks.
+local _staging = {}
+
+local function getCurrentMonthStart()
+  local t = time()
+  local d = date("*t", t)
+  return time({ year = d.year, month = d.month, day = 1, hour = 0, min = 0, sec = 0 })
+end
+
+-- Migration uses the shared getCurrentMonthStart helper (above) — rows
+-- with atTime ≥ that boundary go into active; older rows route to
+-- monthly staging buckets keyed on `date("%Y-%m", e.atTime)`.
+
+local migrationStep
+migrationStep = function()
+  if not _migration then return end
+  local m = _migration
+
+  -- Routing phase: pull a chunk from pendingMigration.entries, decide
+  -- active vs staging[month] for each, append. When routing finishes,
+  -- transfer the migration's internal staging buckets into the module-
+  -- private _staging table and hand off to Ledger:FlushStaging — that
+  -- way the migration writes go through the same async-serialise +
+  -- auto-subdivide flush path the wizard backfill uses.
+  local pending = _workingMem.pendingMigration
+  if not pending then return end  -- defensive; shouldn't happen with the new control flow
+
+  local active = _workingMem.active
+  local stop = math.min(m.idx + m.chunkSize, m.total)
+  while m.idx < stop do
+    m.idx = m.idx + 1
+    local e = pending.entries[m.idx]
+    if e and e.id then
+      if (e.atTime or 0) >= m.currentMonthStart or not e.atTime then
+        if not active.byId[e.id] then
+          active.byId[e.id] = true
+          active.entries[#active.entries + 1] = e
+        end
+      else
+        local mkey = date("%Y-%m", e.atTime)
+        local bucket = m.staging[mkey]
+        if not bucket then
+          bucket = { entries = {}, byId = {} }
+          m.staging[mkey] = bucket
+        end
+        if not bucket.byId[e.id] then
+          bucket.byId[e.id] = true
+          bucket.entries[#bucket.entries + 1] = e
+        end
+      end
+    end
+  end
+
+  -- Per-chunk cache invalidation so any in-session UI refresh sees the
+  -- routed rows.
+  invalidateReconcileCache()
+  if m.opts.onProgress then
+    pcall(m.opts.onProgress, "route", m.idx, m.total)
+  end
+
+  if m.idx >= m.total then
+    -- Routing done. Drop the pending buffer (all rows are placed now)
+    -- and transfer migration's internal staging into module-private
+    -- _staging, then hand off to FlushStaging.
+    _workingMem.pendingMigration = nil
+    for k, bucket in pairs(m.staging) do
+      _staging[k] = bucket
+    end
+    m.staging = {}
+
+    Ledger:FlushStaging({
+      delaySec = m.delaySec,
+      onProgress = function(flushIdx, flushTotal, key, mergedRowCount)
+        if m.opts.onProgress then
+          pcall(m.opts.onProgress, "flush", flushIdx, flushTotal, key)
+        end
+      end,
+      onComplete = function(archivesWritten, rowsArchived)
+        local activeRows = #_workingMem.active.entries
+        local opts = m.opts
+        _migration = nil
+        _dirty = true
+        invalidateReconcileCache()
+        if opts.onComplete then
+          pcall(opts.onComplete, activeRows, archivesWritten, rowsArchived)
+        end
+      end,
+    })
+    return
+  end
+
+  if C_Timer and C_Timer.After then
+    C_Timer.After(m.delaySec, migrationStep)
+  else
+    migrationStep()
+  end
+end
+
+-- True between the loadFromDisk that detected a legacy blob and the
+-- final flush of all staging buckets. UI surfaces use this to show a
+-- "migration in progress" footer; Core's PLAYER_LOGIN handler kicks
+-- StartMigration when this is true.
+function Ledger:IsMigrationPending()
+  if not _loaded then loadFromDisk() end
+  return (_workingMem and _workingMem.pendingMigration and
+          #_workingMem.pendingMigration.entries > 0) and true or false
+end
+
+function Ledger:IsMigrationRunning()
+  return _migration ~= nil
+end
+
+-- True between loadFromDisk detecting a legacy blob and the async
+-- deserialise completing. Core's PLAYER_LOGIN kicks KickLegacyLoad
+-- when this is true; that load promotes pendingLegacy → pendingMigration
+-- and chains into StartMigration.
+function Ledger:IsLegacyLoadPending()
+  if not _loaded then loadFromDisk() end
+  return (_workingMem and _workingMem.pendingLegacy) and true or false
+end
+
+function Ledger:IsLegacyLoadRunning()
+  return _legacyLoad ~= nil
+end
+
+-- Async deserialise of the alpha14/15 legacy blob. Fires opts.onComplete
+-- (ok, errOrNil) when the deserialised payload has been promoted into
+-- _workingMem.pendingMigration (ready for Ledger:StartMigration).
+--
+-- Decompresses synchronously (cheap relative to deserialise; ~1s on a
+-- 7MB compressed blob). Deserialise runs across C_Timer ticks via
+-- LibSerialize:DeserializeAsync with a 1024-item yieldCheck so each
+-- tick stays ~one-frame-worth of CPU.
+--
+-- opts:
+--   onProgress    function(phase, hint)  -- phase = "deserialise"; hint = "tick"
+--   onComplete    function(ok, errOrNil)
+function Ledger:KickLegacyLoad(opts)
+  if not (_workingMem and _workingMem.pendingLegacy) then return false end
+  if _legacyLoad then return true end
+  if not (LibSerialize and LibDeflate) then
+    if opts and opts.onComplete then pcall(opts.onComplete, false, "libs unavailable") end
+    return false
+  end
+  opts = opts or {}
+
+  local pl = _workingMem.pendingLegacy
+  local decompressed = LibDeflate:DecompressDeflate(pl.blob)
+  if not decompressed then
+    _workingMem.pendingLegacy = nil
+    if opts.onComplete then pcall(opts.onComplete, false, "decompress failed") end
+    return false
+  end
+
+  local YIELD_EVERY = 1024
+  local handler
+  local ok, err = pcall(function()
+    handler = LibSerialize:DeserializeAsync(decompressed, {
+      yieldCheck = function(scratch)
+        scratch.count = (scratch.count or 0) + 1
+        if scratch.count >= YIELD_EVERY then
+          scratch.count = 0
+          return true
+        end
+        return false
+      end,
+    })
+  end)
+  if not ok or not handler then
+    _workingMem.pendingLegacy = nil
+    if opts.onComplete then pcall(opts.onComplete, false, "DeserializeAsync init failed: " .. tostring(err)) end
+    return false
+  end
+
+  _legacyLoad = { startedAt = time(), opts = opts }
+  local delaySec = opts.delaySec or 0.005
+
+  local function step()
+    -- Cancellation: if Clear / WipeForLegacySeed nilled _legacyLoad
+    -- mid-flight, short-circuit. The handler coroutine is then
+    -- garbage-collected naturally.
+    if not _legacyLoad then return end
+
+    local resumeOk, completed, success, payload = pcall(handler)
+    if not resumeOk then
+      _legacyLoad = nil
+      if _workingMem then _workingMem.pendingLegacy = nil end
+      if opts.onComplete then pcall(opts.onComplete, false, "resume failed: " .. tostring(completed)) end
+      return
+    end
+    if not completed then
+      if opts.onProgress then pcall(opts.onProgress, "deserialise", "tick") end
+      if C_Timer and C_Timer.After then
+        C_Timer.After(delaySec, step)
+      else
+        step()
+      end
+      return
+    end
+
+    if not success or type(payload) ~= "table" then
+      _legacyLoad = nil
+      _workingMem.pendingLegacy = nil
+      if opts.onComplete then pcall(opts.onComplete, false, "deserialised payload invalid") end
+      return
+    end
+
+    -- Promote pendingLegacy → pendingMigration and clear the legacy
+    -- placeholder. The on-disk legacy blob stays put until SaveToDisk
+    -- after migration completes (existing belt-and-suspenders logic).
+    _workingMem.pendingMigration = {
+      entries = payload.entries or {},
+      byId    = payload.byId or {},
+    }
+    _workingMem.pendingLegacy = nil
+    _legacyLoad = nil
+
+    if opts.onComplete then pcall(opts.onComplete, true, nil) end
+  end
+
+  step()
+  return true
+end
+
+-- Kick off the chunked migration pass. Idempotent — second call while
+-- a migration is already running is a no-op. Returns true if a pass
+-- was started (or one was already running).
+--
+-- opts:
+--   chunkSize    rows per timer tick (default 500)
+--   delaySec     pause between ticks (default 0.05)
+--   onProgress   function(phase, idx, total, key)
+--                  phase = "route" — idx/total over pendingMigration
+--                  phase = "flush" — idx/total over staging buckets, key set
+--   onComplete   function(activeRows, archiveCount, archiveRows)
+function Ledger:StartMigration(opts)
+  if not _loaded then loadFromDisk() end
+  if not (_workingMem and _workingMem.pendingMigration) then return false end
+  if _migration then return true end
+  opts = opts or {}
+  _migration = {
+    idx       = 0,
+    total     = #_workingMem.pendingMigration.entries,
+    chunkSize = opts.chunkSize or 500,
+    delaySec  = opts.delaySec or 0.005,
+    currentMonthStart = getCurrentMonthStart(),
+    staging   = {},
+    opts      = opts,
+  }
+  migrationStep()
+  return true
+end
+
+-- ============================================================================
+-- Seal (TLY-51): cut old rows out of active into archives
+-- ============================================================================
+--
+-- Seal is the user-driven mechanism for shrinking the active set when
+-- it exceeds the soft cap. Walks active.entries, partitions into rows
+-- to keep (current-month + ≤maxRows newest) vs rows to archive (older
+-- than cutTime), then routes the archive-bound rows through _staging
+-- and FlushStaging into monthly archive blobs. The kept rows replace
+-- active.entries.
+--
+-- Defaults match the spec's soft cap: cutTime = now - 60d, maxRows =
+-- 25,000. Both can be overridden via opts (the test harness uses
+-- aggressive cuts).
+--
+-- Seal is chunked because the bucket phase + the per-archive
+-- serialise/compress add up on ledgers of the size testers are
+-- hitting. Phase order:
+--   1. Plan (sync)        — partition active into keep + seal lists.
+--   2. Bucket (chunked)   — route seal list into _staging by month.
+--   3. Apply (sync)       — swap active.entries to keep list, rebuild byId.
+--   4. Flush (chunked)    — FlushStaging writes archives, merging with
+--                            any pre-existing archive at each key.
+-- onComplete(sealedRows, archivesWritten) fires after Flush completes.
+
+local _seal = nil  -- in-flight seal state
+
+local sealStep
+sealStep = function()
+  if not _seal then return end
+  local m = _seal
+  local active = db()
+
+  if m.phase == "bucket" then
+    local stop = math.min(m.bucketIdx + m.chunkSize, m.bucketTotal)
+    while m.bucketIdx < stop do
+      m.bucketIdx = m.bucketIdx + 1
+      local e = m.toSeal[m.bucketIdx]
+      if e and e.id then
+        local mkey = (e.atTime and date("%Y-%m", e.atTime)) or "unknown"
+        local bucket = _staging[mkey]
+        if not bucket then
+          bucket = { entries = {}, byId = {} }
+          _staging[mkey] = bucket
+        end
+        if not bucket.byId[e.id] then
+          bucket.byId[e.id] = true
+          bucket.entries[#bucket.entries + 1] = e
+        end
+      end
+    end
+    if m.opts.onProgress then
+      pcall(m.opts.onProgress, "bucket", m.bucketIdx, m.bucketTotal)
+    end
+
+    if m.bucketIdx < m.bucketTotal then
+      if C_Timer and C_Timer.After then
+        C_Timer.After(m.delaySec, sealStep)
+      else
+        sealStep()
+      end
+      return
+    end
+
+    -- Bucket phase done — apply toKeep to active synchronously, then
+    -- enter flush phase via FlushStaging.
+    local newById = {}
+    for _, e in ipairs(m.toKeep) do
+      if e.id then newById[e.id] = true end
+    end
+    active.entries = m.toKeep
+    active.byId    = newById
+    _dirty = true
+    invalidateReconcileCache()
+
+    m.phase = "flush"
+    Ledger:FlushStaging({
+      delaySec = m.delaySec,
+      onProgress = function(idx, total, key, mergedRowCount)
+        if m.opts.onProgress then
+          pcall(m.opts.onProgress, "flush", idx, total, key)
+        end
+      end,
+      onComplete = function(archivesWritten, rowsArchived)
+        local sealed = m.bucketTotal
+        local opts = m.opts
+        _seal = nil
+        if opts.onComplete then
+          pcall(opts.onComplete, sealed, archivesWritten)
+        end
+      end,
+    })
+  end
+end
+
+-- Predict the cut without actually performing it. UI surfaces use this
+-- to show "Seal will archive 12,440 rows from before 2025-12-15" before
+-- the user clicks confirm.
+function Ledger:SealPreview(opts)
+  if not _loaded then loadFromDisk() end
+  opts = opts or {}
+  local now = time()
+  local cutTime = opts.cutTime or (now - 60 * 86400)
+  local maxRows = opts.maxRows or 25000
+
+  local active = db()
+  local keepCount, sealCount = 0, 0
+  for _, e in ipairs(active.entries) do
+    if (e.atTime or 0) >= cutTime then
+      keepCount = keepCount + 1
+    else
+      sealCount = sealCount + 1
+    end
+  end
+  if keepCount > maxRows then
+    sealCount = sealCount + (keepCount - maxRows)
+    keepCount = maxRows
+  end
+  return {
+    activeCount = #active.entries,
+    keepCount   = keepCount,
+    sealCount   = sealCount,
+    cutTime     = cutTime,
+    maxRows     = maxRows,
+  }
+end
+
+function Ledger:IsSealRunning()
+  return _seal ~= nil
+end
+
+-- Run a seal pass. Returns (true) on start, (false, reason) on error
+-- (already running, migration in progress, library missing, etc.).
+--
+-- opts:
+--   cutTime      epoch — rows older than this go to archives. Default now-60d.
+--   maxRows      cap on active size. Default 25000.
+--   chunkSize    rows per bucket-phase tick (default 500)
+--   delaySec     pause between ticks (default 0.05)
+--   onPlan       function(keepCount, sealCount) — fires once after the plan phase
+--   onProgress   function(phase, idx, total, key)
+--                  phase = "bucket" — idx/total over rows being routed
+--                  phase = "flush"  — idx/total over archives being written
+--   onComplete   function(sealedRows, archivesWritten)
+function Ledger:Seal(opts)
+  if _seal then return false, "seal already in progress" end
+  if self:IsMigrationRunning() then return false, "migration in progress" end
+  if not (LibSerialize and LibDeflate) then return false, "compression libs unavailable" end
+  opts = opts or {}
+
+  local now = time()
+  local cutTime = opts.cutTime or (now - 60 * 86400)
+  local maxRows = opts.maxRows or 25000
+
+  local active = db()
+
+  -- Plan phase: partition active.entries into keep + seal.
+  local toKeep, toSeal = {}, {}
+  for _, e in ipairs(active.entries) do
+    if (e.atTime or 0) >= cutTime then
+      toKeep[#toKeep + 1] = e
+    else
+      toSeal[#toSeal + 1] = e
+    end
+  end
+
+  -- Apply maxRows cap by trimming oldest from toKeep into toSeal.
+  if #toKeep > maxRows then
+    table.sort(toKeep, function(a, b) return (a.atTime or 0) > (b.atTime or 0) end)
+    for i = maxRows + 1, #toKeep do
+      toSeal[#toSeal + 1] = toKeep[i]
+    end
+    for i = #toKeep, maxRows + 1, -1 do
+      toKeep[i] = nil
+    end
+  end
+
+  if opts.onPlan then pcall(opts.onPlan, #toKeep, #toSeal) end
+
+  if #toSeal == 0 then
+    if opts.onComplete then pcall(opts.onComplete, 0, 0) end
+    return true
+  end
+
+  _seal = {
+    phase       = "bucket",
+    toKeep      = toKeep,
+    toSeal      = toSeal,
+    bucketIdx   = 0,
+    bucketTotal = #toSeal,
+    chunkSize   = opts.chunkSize or 500,
+    delaySec    = opts.delaySec or 0.005,
+    opts        = opts,
+  }
+  sealStep()
+  return true
 end
 
 -- ============================================================================
@@ -1135,6 +1791,7 @@ function Ledger:Insert(entry)
   d.byId[entry.id] = true
   d.entries[#d.entries + 1] = entry
   _dirty = true
+  invalidateReconcileCache()
   return true, entry
 end
 
@@ -1152,17 +1809,75 @@ function Ledger:InsertMany(entries)
       skipped = skipped + 1
     end
   end
-  if inserted > 0 then _dirty = true end
+  if inserted > 0 then
+    _dirty = true
+    invalidateReconcileCache()
+  end
   return inserted, skipped
 end
 
 -- ============================================================================
 -- Query
 -- ============================================================================
+--
+-- filter.window controls how much history the query covers:
+--   "active" (default)  — only the in-memory active set (≤25k rows / 60d)
+--   "<n>m"              — active + archives whose range overlaps the last
+--                          N months (Compare opt-in, Lifecycle drill)
+--   "all"               — active + every archive (full-history sweep;
+--                          slow path, deliberately user-triggered)
+--
+-- Pages that don't pass filter.window get the snappy default. The "all"
+-- path costs proportional to total archive row count and lazy-loads
+-- every archive blob into Archive's LRU(3) cache as it walks.
+
+-- Return the row source(s) a query should iterate. Lazy-loads any
+-- archives needed to satisfy filter.window. Active is always included;
+-- archives are appended in chronological order by key (oldest first).
+local function gatherRows(filter)
+  local d = db()
+  local window = filter.window or "active"
+  if window == "active" then return d.entries end
+  if not ns.Archive then return d.entries end
+
+  -- "<n>m" hints the lookback window for archive selection. Doesn't
+  -- override an explicit filter.atTimeFrom — that always wins.
+  local archiveFrom = filter.atTimeFrom
+  if not archiveFrom and type(window) == "string" then
+    local n = window:match("^(%d+)m$")
+    if n then archiveFrom = time() - tonumber(n) * 30 * 86400 end
+  end
+
+  -- Archive:List returns keys sorted ascending — chronological for
+  -- typical YYYY-MM[-pN] keys. archiveIndex carries fromTs/toTs without
+  -- requiring the slot global to load, so we can range-prune cheaply.
+  local archiveKeys = ns.Archive:List()
+
+  local rows = {}
+  for _, key in ipairs(archiveKeys) do
+    local meta = ns.Archive:GetIndex(key) or ns.Archive:GetMeta(key)
+    local skip = false
+    if meta then
+      if archiveFrom and meta.toTs and meta.toTs < archiveFrom then skip = true end
+      if filter.atTimeTo and meta.fromTs and meta.fromTs > filter.atTimeTo then skip = true end
+    end
+    if not skip then
+      local archive = ns.Archive:Load(key)
+      if archive and archive.entries then
+        for i = 1, #archive.entries do rows[#rows + 1] = archive.entries[i] end
+      end
+    end
+  end
+
+  -- Active set is appended last so newest-first sorts at the UI layer
+  -- pull from the most recently accumulated rows first.
+  for i = 1, #d.entries do rows[#rows + 1] = d.entries[i] end
+  return rows
+end
 
 -- filter: optional table with any combination of:
 --   kind, kinds (list), itemID, itemKey, charKey, source,
---   atTimeFrom, atTimeTo
+--   atTimeFrom, atTimeTo, window ("active" | "<n>m" | "all")
 -- Returns a list of matching entries (refs into storage; do not mutate).
 function Ledger:Query(filter)
   filter = filter or {}
@@ -1173,7 +1888,7 @@ function Ledger:Query(filter)
   end
 
   local out = {}
-  for _, e in ipairs(db().entries) do
+  for _, e in ipairs(gatherRows(filter)) do
     local ok = true
     if filter.kind and e.kind ~= filter.kind then ok = false end
     if ok and kindSet and not kindSet[e.kind] then ok = false end
@@ -1361,7 +2076,7 @@ end
 function Ledger:InsertManyChunked(entries, opts)
   opts = opts or {}
   local chunkSize = opts.chunkSize or 500
-  local delaySec = opts.delaySec or 0.05
+  local delaySec = opts.delaySec or 0.005
 
   if type(entries) ~= "table" or #entries == 0 then
     if opts.onDone then pcall(opts.onDone, 0, 0) end
@@ -1376,6 +2091,7 @@ function Ledger:InsertManyChunked(entries, opts)
 
   local function step()
     local stop = math.min(idx + chunkSize, total)
+    local chunkInserted = 0
     while idx < stop do
       idx = idx + 1
       local e = entries[idx]
@@ -1383,9 +2099,14 @@ function Ledger:InsertManyChunked(entries, opts)
         d.byId[e.id] = true
         d.entries[#d.entries + 1] = e
         inserted = inserted + 1
+        chunkInserted = chunkInserted + 1
       else
         skipped = skipped + 1
       end
+    end
+    if chunkInserted > 0 then
+      _dirty = true
+      invalidateReconcileCache()
     end
     if opts.onProgress then pcall(opts.onProgress, inserted, total, skipped) end
     if idx < total and C_Timer and C_Timer.After then
@@ -1398,6 +2119,288 @@ function Ledger:InsertManyChunked(entries, opts)
   step()
 end
 
+-- ============================================================================
+-- Routed chunked import — date-aware variant for backfill paths
+-- ============================================================================
+--
+-- Same chunked-tick pattern as InsertManyChunked, but each row is routed
+-- by atTime: current-month rows append to active (with dedupe) and prior-
+-- month rows accumulate in the module-private _staging buckets keyed on
+-- YYYY-MM. Rows missing atTime (rare; defensive) fall through to active.
+--
+-- This keeps the active set bounded during the wizard's sibling-addon
+-- backfill — historic rows never inflate active, so a 438k-row TSM CSV
+-- doesn't reproduce the pre-TLY-51 freeze.
+--
+-- The driver MUST call Ledger:FlushStaging after the last source completes
+-- so the accumulated staging buckets become archives on disk. Until that
+-- flush runs, prior-month rows live in memory only — a logout before
+-- flush loses them.
+--
+-- opts:
+--   chunkSize, delaySec   same as InsertManyChunked.
+--   onProgress(insertedSoFar, total, skippedSoFar)
+--   onDone(inserted, skipped, insertedActive, insertedStaging)
+function Ledger:InsertManyChunkedRouted(entries, opts)
+  opts = opts or {}
+  local chunkSize = opts.chunkSize or 500
+  local delaySec  = opts.delaySec or 0.005
+
+  if type(entries) ~= "table" or #entries == 0 then
+    if opts.onDone then pcall(opts.onDone, 0, 0, 0, 0) end
+    return
+  end
+
+  local total = #entries
+  local idx = 0
+  local insertedActive, insertedStaging, skipped = 0, 0, 0
+  local currentMonthStart = getCurrentMonthStart()
+
+  local function step()
+    local stop = math.min(idx + chunkSize, total)
+    local chunkActive = 0
+    while idx < stop do
+      idx = idx + 1
+      local e = entries[idx]
+      if not isValidEntry(e) then
+        skipped = skipped + 1
+      else
+        local active = db()
+        local atT = e.atTime or 0
+        if atT >= currentMonthStart or atT == 0 then
+          if active.byId[e.id] then
+            skipped = skipped + 1
+          else
+            active.byId[e.id] = true
+            active.entries[#active.entries + 1] = e
+            insertedActive = insertedActive + 1
+            chunkActive = chunkActive + 1
+          end
+        else
+          local mkey = date("%Y-%m", atT)
+          local bucket = _staging[mkey]
+          if not bucket then
+            bucket = { entries = {}, byId = {} }
+            _staging[mkey] = bucket
+          end
+          if bucket.byId[e.id] then
+            skipped = skipped + 1
+          else
+            bucket.byId[e.id] = true
+            bucket.entries[#bucket.entries + 1] = e
+            insertedStaging = insertedStaging + 1
+          end
+        end
+      end
+    end
+    if chunkActive > 0 then
+      _dirty = true
+      invalidateReconcileCache()
+    end
+    if opts.onProgress then
+      pcall(opts.onProgress, insertedActive + insertedStaging, total, skipped)
+    end
+    if idx < total and C_Timer and C_Timer.After then
+      C_Timer.After(delaySec, step)
+    else
+      if opts.onDone then
+        pcall(opts.onDone, insertedActive + insertedStaging, skipped, insertedActive, insertedStaging)
+      end
+    end
+  end
+
+  step()
+end
+
+-- ============================================================================
+-- FlushStaging — write _staging buckets out as archives
+-- ============================================================================
+--
+-- Walks a flush plan one entry per turn. Each plan entry is a
+-- (key, entries, byId) tuple; large staging buckets are split into
+-- numbered parts (`YYYY-MM-pN`) so no single archive write exceeds the
+-- soft cap. For each entry, merges with any existing archive at the
+-- same key (deduping by entry id) and saves the combined result via
+-- the async serialise path so the per-archive serialise step never
+-- blocks the input thread for more than one yieldCheck slice.
+--
+-- Merging matters when the same backfill run produces rows for a month
+-- that already has an archive on disk (e.g., user adds a new source mid-
+-- life; their existing archives stay, the new source's rows get folded
+-- in). For a fresh-install backfill there's nothing to merge against
+-- and the merge is a no-op.
+--
+-- Subdivision rationale: a 50k-row monthly bucket serialises in one
+-- ~5-second freeze on slower machines even with the async API, because
+-- the resulting Lua string is large and LibDeflate compress is the
+-- final blocking step. Capping each part at PART_CAP rows keeps the
+-- final compress under ~100ms while the async serialise stays bounded
+-- per yield. Spec calls this out as "auto-subdivide weekly if a month
+-- exceeds 50k rows"; Phase 1 uses a smaller threshold + a "-pN" suffix
+-- since archive granularity is opaque to the rest of the system.
+--
+-- opts:
+--   delaySec    pause between bucket flushes (default 0.05)
+--   onProgress  function(idx, total, key, mergedRowCount)
+--   onComplete  function(archivesWritten, rowsArchived)
+
+local PART_CAP = 5000
+
+function Ledger:GetStagingKeys()
+  local out = {}
+  for k in pairs(_staging) do out[#out + 1] = k end
+  table.sort(out)
+  return out
+end
+
+function Ledger:GetStagingRowCount()
+  local total = 0
+  for _, bucket in pairs(_staging) do total = total + #bucket.entries end
+  return total
+end
+
+function Ledger:FlushStaging(opts)
+  opts = opts or {}
+  local delaySec = opts.delaySec or 0.005
+  local keys = self:GetStagingKeys()
+
+  if #keys == 0 then
+    if opts.onComplete then pcall(opts.onComplete, 0, 0) end
+    return
+  end
+
+  -- Build the flush plan: subdivide oversized buckets into parts so no
+  -- single Archive:SaveAsync call processes more than PART_CAP rows.
+  -- Each plan entry will become one async-serialise pass.
+  local plan = {}
+  for _, key in ipairs(keys) do
+    local bucket = _staging[key]
+    if bucket and #bucket.entries > 0 then
+      if #bucket.entries <= PART_CAP then
+        plan[#plan + 1] = { key = key, bucket = bucket }
+      else
+        local parts = math.ceil(#bucket.entries / PART_CAP)
+        for p = 1, parts do
+          local startIdx = (p - 1) * PART_CAP + 1
+          local endIdx   = math.min(p * PART_CAP, #bucket.entries)
+          local partEntries, partById = {}, {}
+          for i = startIdx, endIdx do
+            local e = bucket.entries[i]
+            partEntries[#partEntries + 1] = e
+            if e.id then partById[e.id] = true end
+          end
+          plan[#plan + 1] = {
+            key       = key .. "-p" .. tostring(p),
+            partOfKey = key,
+            entries   = partEntries,
+            byId      = partById,
+            bucket    = nil,
+          }
+        end
+        -- Clear the original bucket — its rows are now distributed across
+        -- parts. Each part holds its own entries/byId.
+        _staging[key] = nil
+      end
+    end
+  end
+
+  -- Drop any keys we already cleared from staging.
+  if #plan == 0 then
+    if opts.onComplete then pcall(opts.onComplete, 0, 0) end
+    return
+  end
+
+  local idx = 0
+  local archivesWritten, rowsArchived = 0, 0
+
+  local function next()
+    if idx >= #plan then
+      invalidateReconcileCache()
+      if opts.onComplete then pcall(opts.onComplete, archivesWritten, rowsArchived) end
+      return
+    end
+    idx = idx + 1
+    local entry = plan[idx]
+
+    -- Resolve the entries/byId for this plan slot. Single-bucket entries
+    -- pull from staging; subdivided parts have inline entries already.
+    local entries, byId
+    if entry.bucket then
+      entries, byId = entry.bucket.entries, entry.bucket.byId
+    else
+      entries, byId = entry.entries, entry.byId
+    end
+
+    if not (ns.Archive and ns.Archive.SaveAsync) then
+      -- Fallback: synchronous Save for the rare no-async case.
+      if ns.Archive and ns.Archive.Save then
+        ns.Archive:Save(entry.key, entries, { byId = byId })
+      end
+      archivesWritten = archivesWritten + 1
+      rowsArchived = rowsArchived + #entries
+      if entry.bucket then _staging[entry.partOfKey or entry.key] = nil end
+      if opts.onProgress then pcall(opts.onProgress, idx, #plan, entry.key, #entries) end
+      if C_Timer and C_Timer.After then C_Timer.After(delaySec, next) else next() end
+      return
+    end
+
+    -- Merge with existing archive at the same key (dedupe by entry id).
+    -- LoadAsync drives the merge-load deserialise across ticks so each
+    -- per-archive cycle stays smooth; the synchronous Load call here
+    -- previously dropped frame rate to ~10 fps on slower CPUs.
+    local rowCount = #entries
+    local function continueAfterLoad(existing)
+      local mergedEntries, mergedById = {}, {}
+      if existing and existing.entries then
+        for _, e in ipairs(existing.entries) do
+          if e.id and not mergedById[e.id] then
+            mergedById[e.id] = true
+            mergedEntries[#mergedEntries + 1] = e
+          end
+        end
+      end
+      for _, e in ipairs(entries) do
+        if e.id and not mergedById[e.id] then
+          mergedById[e.id] = true
+          mergedEntries[#mergedEntries + 1] = e
+        end
+      end
+
+      ns.Archive:SaveAsync(entry.key, mergedEntries, {
+        byId     = mergedById,
+        delaySec = delaySec,
+        onComplete = function(ok, bytes, err)
+          archivesWritten = archivesWritten + 1
+          rowsArchived = rowsArchived + rowCount
+          if entry.bucket then
+            _staging[entry.partOfKey or entry.key] = nil
+          end
+          invalidateReconcileCache()
+          if opts.onProgress then
+            pcall(opts.onProgress, idx, #plan, entry.key, #mergedEntries)
+          end
+          if C_Timer and C_Timer.After then
+            C_Timer.After(delaySec, next)
+          else
+            next()
+          end
+        end,
+      })
+    end
+
+    if ns.Archive.LoadAsync then
+      ns.Archive:LoadAsync(entry.key, {
+        delaySec = delaySec,
+        onComplete = continueAfterLoad,
+      })
+    else
+      continueAfterLoad(ns.Archive:Load(entry.key))
+    end
+  end
+
+  next()
+end
+
 -- Multi-source chunked driver. Walks registered sources in order, awaiting
 -- each source's parse + chunked insert before starting the next. Designed to
 -- be called from the setup wizard's onComplete; surfaces per-source progress
@@ -1407,14 +2410,22 @@ end
 -- only the legacy importFn (Native — event-driven, near-zero rows) run
 -- synchronously between chunked sources.
 --
+-- After every chunked source completes, the driver fires Ledger:FlushStaging
+-- once at the end so prior-month rows that accumulated during the import
+-- land on disk as archives before opts.onComplete is delivered to the
+-- caller. The wizard's progress widget gets a final "flushing archives"
+-- phase via opts.onSourceProgress("__flush", idx, total, key) callbacks.
+--
 -- opts:
---   chunkSize    forwarded to InsertManyChunked
---   delaySec     forwarded to InsertManyChunked
+--   chunkSize    forwarded to InsertManyChunkedRouted
+--   delaySec     forwarded to InsertManyChunkedRouted
 --   sourceDelay  default 0.5 — pause between sources so the input thread
 --                doesn't stay starved across an entire import.
 --   onSourceStart    function(name, label, parsedCount)
 --   onSourceProgress function(name, insertedSoFar, total, skippedSoFar)
 --   onSourceDone     function(name, inserted, skipped)
+--   onFlushStart     function(archiveCount)
+--   onFlushProgress  function(idx, total, key, mergedRowCount)
 --   onComplete       function(results) — results = list of per-source rows
 function Ledger:ImportFromAllSourcesChunked(opts)
   opts = opts or {}
@@ -1423,11 +2434,28 @@ function Ledger:ImportFromAllSourcesChunked(opts)
   local results = {}
   local sourceIdx = 0
 
+  -- Final phase: flush any staging buckets accumulated during routed
+  -- imports, then fire the user's onComplete with the per-source results.
+  local function finishWithFlush()
+    local stagingKeys = self:GetStagingKeys()
+    if opts.onFlushStart then pcall(opts.onFlushStart, #stagingKeys) end
+    self:FlushStaging({
+      delaySec = opts.delaySec,
+      onProgress = function(idx, total, key, mergedRowCount)
+        if opts.onFlushProgress then
+          pcall(opts.onFlushProgress, idx, total, key, mergedRowCount)
+        end
+      end,
+      onComplete = function(archivesWritten, rowsArchived)
+        if opts.onComplete then pcall(opts.onComplete, results, archivesWritten, rowsArchived) end
+      end,
+    })
+  end
+
   local function nextSource()
     sourceIdx = sourceIdx + 1
     if sourceIdx > #sourceOrder then
-      if opts.onComplete then pcall(opts.onComplete, results) end
-      return
+      return finishWithFlush()
     end
 
     local name = sourceOrder[sourceIdx]
@@ -1454,17 +2482,19 @@ function Ledger:ImportFromAllSourcesChunked(opts)
       parseSkipped = parseSkipped or 0
       if opts.onSourceStart then pcall(opts.onSourceStart, name, s.label, #entries) end
 
-      self:InsertManyChunked(entries, {
+      self:InsertManyChunkedRouted(entries, {
         chunkSize = opts.chunkSize,
         delaySec = opts.delaySec,
         onProgress = function(inserted, total, skipped)
           if opts.onSourceProgress then pcall(opts.onSourceProgress, name, inserted, total, skipped) end
         end,
-        onDone = function(inserted, skipped)
+        onDone = function(inserted, skipped, insertedActive, insertedStaging)
           results[#results + 1] = {
             source = name,
             inserted = inserted,
             skipped = skipped + parseSkipped,
+            insertedActive = insertedActive,
+            insertedStaging = insertedStaging,
           }
           if opts.onSourceDone then pcall(opts.onSourceDone, name, inserted, skipped + parseSkipped) end
           if C_Timer and C_Timer.After then
@@ -1476,7 +2506,9 @@ function Ledger:ImportFromAllSourcesChunked(opts)
       })
     else
       -- Legacy path: synchronous. Native lives here (0-N invoice rows from
-      -- the open inbox; cheap regardless).
+      -- the open inbox; cheap regardless). importFn writes to active via
+      -- InsertMany — historic atTimes from a synchronous Native scan are
+      -- rare enough that we don't need to route this path for Phase 1.
       if opts.onSourceStart then pcall(opts.onSourceStart, name, s.label, nil) end
       local ok, inserted, skipped = pcall(s.importFn or function() return 0, 0 end)
       if not ok then
@@ -1706,17 +2738,69 @@ end
 -- Maintenance
 -- ============================================================================
 
--- Wipe all entries. Sources can be re-imported afterward.
+-- Wipe all entries — active set, every archive, and the archive index.
+-- Sources can be re-imported afterward via /tally setup.
 function Ledger:Clear()
   TallyDB = TallyDB or {}
-  TallyDB.ledger = { blob = nil, blobMeta = nil, entries = nil, byId = nil }
+  -- Clear archive slot globals first so their SV files become empty
+  -- on next logout. Walk the slot table before nuking it.
+  if ns.Archive then
+    for _, key in ipairs(ns.Archive:List()) do
+      ns.Archive:Delete(key)
+    end
+    ns.Archive:UnloadAll()
+  end
+  TallyDB.ledger = {}  -- drop active blob + activeMeta + archives + archiveSlots + archiveIndex + nextSlot
   _workingMem = defaultMem()
   _loaded = true
   _dirty = true
+  _staging = {}
+  _legacyLoad = nil  -- cancel any in-flight legacy deserialise
+  invalidateReconcileCache()
 end
 
--- Drop entries from a specific source. Useful when an adapter changes its
--- id scheme and we need to re-import cleanly.
+-- Stress-test escape hatch for /tally seed legacy. Wipes in-memory
+-- active + staging + dirty flag so PLAYER_LOGOUT's SaveToDisk skips
+-- (no _dirty) and doesn't overwrite TallyDB.ledger.blob with a
+-- fresh-empty active blob. Without this, seed legacy + /reload would
+-- never actually exercise the legacy migration path because the
+-- active blob's save would clear the legacy blob mid-flight.
+--
+-- Destructive: the caller's real ledger goes away. Only used by
+-- /tally seed legacy after writing the synthetic legacy blob; not a
+-- public Ledger API.
+function Ledger:WipeForLegacySeed()
+  _workingMem = defaultMem()
+  _loaded = true
+  _dirty = false
+  _staging = {}
+  _legacyLoad = nil  -- cancel any in-flight legacy deserialise
+  if ns.Archive then ns.Archive:UnloadAll() end
+  invalidateReconcileCache()
+end
+
+-- Drop entries from a specific source. Two variants:
+--
+--   ClearSource(sourceName)
+--     Synchronous wipe of active rows only. Returns the number of
+--     active rows removed. Archive rows for the same source are
+--     untouched — call ClearSourceAsync below to reach archives too.
+--     Suitable for small ledgers and call sites that don't tolerate
+--     async (e.g. wizard reset where the caller drives next-step
+--     transitions immediately).
+--
+--   ClearSourceAsync(sourceName, opts)
+--     Walks active synchronously (fast — bounded by active size cap),
+--     then walks each archive across C_Timer ticks: load, filter,
+--     either Delete (if all rows removed) or SaveAsync (if some
+--     remain). The async per-archive Save means each tick stays
+--     within the input-thread budget even when 30+ archives need
+--     rewriting on a big-ledger source clear.
+--
+--     opts:
+--       delaySec    pause between archive ticks (default 0.05)
+--       onProgress  function(idx, total, key, removedSoFar)
+--       onComplete  function(totalRemoved)
 function Ledger:ClearSource(sourceName)
   local d = db()
   local kept = {}
@@ -1730,11 +2814,152 @@ function Ledger:ClearSource(sourceName)
     end
   end
   d.entries = kept
-  if removed > 0 then _dirty = true end
+  if removed > 0 then
+    _dirty = true
+    invalidateReconcileCache()
+  end
+  return removed
 end
 
+function Ledger:ClearSourceAsync(sourceName, opts)
+  opts = opts or {}
+  local delaySec = opts.delaySec or 0.005
+
+  -- Phase 1: active. Synchronous; bounded by the active soft cap.
+  local removed = self:ClearSource(sourceName)
+
+  if not ns.Archive then
+    if opts.onComplete then pcall(opts.onComplete, removed) end
+    return
+  end
+
+  local keys = ns.Archive:List()
+  if #keys == 0 then
+    if opts.onComplete then pcall(opts.onComplete, removed) end
+    return
+  end
+
+  local idx = 0
+  local function nextArchive()
+    if idx >= #keys then
+      if opts.onComplete then pcall(opts.onComplete, removed) end
+      return
+    end
+    idx = idx + 1
+    local key = keys[idx]
+
+    -- Fast paths via archiveIndex. computeIndex tracks sourceCounts
+    -- per archive, so we can answer "do I need to deserialise this
+    -- archive at all?" without touching the blob:
+    --   * sourceCount == 0 → archive has no rows from sourceName;
+    --                         skip the Load entirely.
+    --   * sourceCount == archive.count → archive is exclusively this
+    --                         source; Delete without Load.
+    --   * otherwise → fall through to the Load+filter+SaveAsync path.
+    --
+    -- Big speedup for /tally seed clear (every seeded archive is 100%
+    -- __seed → straight Delete) and for real ClearSource("tsm") on
+    -- a ledger where some archives only have FlipQueue/Native rows.
+    local index = ns.Archive.GetIndex and ns.Archive:GetIndex(key) or nil
+    if index and index.sourceCounts then
+      local srcCount = index.sourceCounts[sourceName] or 0
+      if srcCount == 0 then
+        if opts.onProgress then pcall(opts.onProgress, idx, #keys, key, removed) end
+        if C_Timer and C_Timer.After then C_Timer.After(delaySec, nextArchive) else nextArchive() end
+        return
+      elseif srcCount >= (index.count or 0) then
+        ns.Archive:Delete(key)
+        removed = removed + srcCount
+        invalidateReconcileCache()
+        if opts.onProgress then pcall(opts.onProgress, idx, #keys, key, removed) end
+        if C_Timer and C_Timer.After then C_Timer.After(delaySec, nextArchive) else nextArchive() end
+        return
+      end
+      -- Mixed-source archive — fall through to Load+filter+Save.
+    end
+
+    -- Slow path: archive contains at least one source-X row plus other
+    -- sources, OR archiveIndex doesn't have sourceCounts (legacy
+    -- archive predating this change). Load via DeserializeAsync,
+    -- filter, rewrite via SerializeAsync.
+    local function continueAfterLoad(archive)
+      if not archive or not archive.entries then
+        if opts.onProgress then pcall(opts.onProgress, idx, #keys, key, removed) end
+        if C_Timer and C_Timer.After then C_Timer.After(delaySec, nextArchive) else nextArchive() end
+        return
+      end
+
+      local archiveKept, archiveRemoved = {}, 0
+      for _, e in ipairs(archive.entries) do
+        if e.source == sourceName then
+          archiveRemoved = archiveRemoved + 1
+        else
+          archiveKept[#archiveKept + 1] = e
+        end
+      end
+
+      if archiveRemoved == 0 then
+        if opts.onProgress then pcall(opts.onProgress, idx, #keys, key, removed) end
+        if C_Timer and C_Timer.After then C_Timer.After(delaySec, nextArchive) else nextArchive() end
+        return
+      end
+
+      removed = removed + archiveRemoved
+
+      if #archiveKept == 0 then
+        ns.Archive:Delete(key)
+        invalidateReconcileCache()
+        if opts.onProgress then pcall(opts.onProgress, idx, #keys, key, removed) end
+        if C_Timer and C_Timer.After then C_Timer.After(delaySec, nextArchive) else nextArchive() end
+        return
+      end
+
+      ns.Archive:SaveAsync(key, archiveKept, {
+        delaySec = delaySec,
+        onComplete = function(ok, bytes)
+          invalidateReconcileCache()
+          if opts.onProgress then pcall(opts.onProgress, idx, #keys, key, removed) end
+          if C_Timer and C_Timer.After then C_Timer.After(delaySec, nextArchive) else nextArchive() end
+        end,
+      })
+    end
+
+    if ns.Archive.LoadAsync then
+      ns.Archive:LoadAsync(key, {
+        delaySec = delaySec,
+        onComplete = continueAfterLoad,
+      })
+    else
+      continueAfterLoad(ns.Archive:Load(key))
+    end
+  end
+
+  nextArchive()
+end
+
+-- Total row count across active + archives + any pending-migration
+-- buffer. Archive counts come from the metadata (no blob loads). The
+-- pending-migration term keeps the grandfather check (Core's
+-- PLAYER_LOGIN) accurate for users mid-upgrade — their data is real,
+-- it just hasn't been routed into the new shape yet.
 function Ledger:Count()
-  return #db().entries
+  local total = #db().entries
+  if ns.Archive and ns.Archive.List then
+    for _, key in ipairs(ns.Archive:List()) do
+      local meta = ns.Archive:GetIndex(key) or ns.Archive:GetMeta(key)
+      if meta then total = total + (meta.count or 0) end
+    end
+  end
+  if _workingMem and _workingMem.pendingMigration then
+    total = total + #_workingMem.pendingMigration.entries
+  end
+  -- Legacy blob waiting for async deserialise — count from blobMeta
+  -- so the grandfather check sees the user as already-onboarded
+  -- before the load completes.
+  if _workingMem and _workingMem.pendingLegacy and _workingMem.pendingLegacy.meta then
+    total = total + (_workingMem.pendingLegacy.meta.count or 0)
+  end
+  return total
 end
 
 -- ============================================================================
