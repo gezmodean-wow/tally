@@ -4,6 +4,12 @@ All notable changes to Tally will be documented in this file.
 
 ## [Unreleased]
 
+## [v0.1.0-alpha17]
+
+Tester-feedback diagnostic alpha responding to Toeknee's alpha16 gold-mismatch report on [TLY-24](https://github.com/gezmodean-wow/tally/issues/24) (29M actual warbank vs 37M shown; 179M actual character gold vs 108M shown). Adds a focused per-character gold accounting probe so we can pin down whether the discrepancy is the panel UI conflating gold + items (`UI/NetWorthPage.lua:355` shows `warband.total` not `warband.gold`) or the rollup itself silently dropping characters via the three failure modes in `Inventory/Ownership.lua` (`data.money == nil`, `projectCharacter` returns nil, multi-account Bnet warband out of `GetWarband(1)`'s reach).
+
+- **TLY-68 — `Gold` inspector + `/tally diag gold` subcommand.** New inspector in `Core.lua` walks `Syndicator.API.GetAllCharacters()` ∪ `TallyDB.inventoryRollup.characters`, comparing per-`charKey` Syndicator `.money` to Tally's rollup `.gold`. Surfaces four flags — `money-nil`, `money-zero`, `missing-from-rollup`, `stale-rollup` — plus aggregate totals (Syndicator sum, rollup sum, delta) and a multi-warband probe (`GetWarband(1..4)`) so multi-account Bnet setups are visible. Inspector registered with the standard `DIAG_INSPECTORS` so the data also appears in `/tally diag`'s regular dump; the `/tally diag gold` subcommand opens a focused, columnar copy dialog ("charKey | syndicator | rollup | flag") for paste-into-issue triage.
+
 ## [v0.1.0-alpha16]
 
 The TLY-51 tiered-storage bundle. Closes the structural per-tab-open freeze that was hitting big-ledger accounts (zpectre 438k rows, Toeknee Compare-source-change hang on alpha15). The ledger storage shape goes from one flat compressed blob (alpha14/15) to a small mutable active set + on-demand monthly archive blobs; queries default to the active window and only touch archives when explicitly asked, so day-to-day Tally runs in O(active) regardless of total history size.

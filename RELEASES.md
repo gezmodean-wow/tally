@@ -8,6 +8,16 @@ The engineering-detail companion lives in `CHANGELOG.md` (commit-readerese — f
 
 ## Unreleased
 
+## v0.1.0-alpha17
+
+A focused diagnostic alpha. Toeknee reported on alpha16 that Tally's net-worth view was showing different gold totals than his actual characters and warbank — 29M shown for warbank vs 37M actual, 179M shown for characters vs 108M actual. Two separate things look likely (the Warband panel row combining gold and warband-item value into one figure, plus one or more characters dropping out of the per-character rollup), but we need data from a real big-roster account to tell which is biting and on which characters.
+
+This release ships a new command — **`/tally diag gold`** — that lists every character on your account with its Syndicator-reported gold next to the value Tally is summing, plus four flags pointing at the most likely silent-undercount paths. Run it, click the **Copy** button on the dialog that pops, and paste the result into [TLY-68](https://github.com/gezmodean-wow/tally/issues/68) on GitHub or the Discord thread mirroring it.
+
+The same gold breakdown also shows up under the new **Gold** section of `/tally diag` for anyone running the regular diagnostic dump.
+
+The fix itself follows in the next planned alpha once we have the data to confirm which path is dropping gold.
+
 ## v0.1.0-alpha16
 
 The big structural overhaul to how Tally stores its ledger. Players with very large transaction histories — hundreds of thousands of rows accumulated across years of trading — were hitting freezes every time they switched tabs in Tally's main window, and the multi-second logout delays kept getting worse as histories grew. This release fixes both for good. Day-to-day Tally feels snappy regardless of how much history you've accumulated, and the deep-dive views still get the full picture when you ask for them.
