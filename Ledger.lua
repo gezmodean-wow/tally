@@ -2645,6 +2645,25 @@ function Ledger:Clear()
   invalidateReconcileCache()
 end
 
+-- Stress-test escape hatch for /tally seed legacy. Wipes in-memory
+-- active + staging + dirty flag so PLAYER_LOGOUT's SaveToDisk skips
+-- (no _dirty) and doesn't overwrite TallyDB.ledger.blob with a
+-- fresh-empty active blob. Without this, seed legacy + /reload would
+-- never actually exercise the legacy migration path because the
+-- active blob's save would clear the legacy blob mid-flight.
+--
+-- Destructive: the caller's real ledger goes away. Only used by
+-- /tally seed legacy after writing the synthetic legacy blob; not a
+-- public Ledger API.
+function Ledger:WipeForLegacySeed()
+  _workingMem = defaultMem()
+  _loaded = true
+  _dirty = false
+  _staging = {}
+  if ns.Archive then ns.Archive:UnloadAll() end
+  invalidateReconcileCache()
+end
+
 -- Drop entries from a specific source. Two variants:
 --
 --   ClearSource(sourceName)

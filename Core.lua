@@ -628,8 +628,23 @@ local function handleSeed(rest)
           TallyDB.ledger.archiveSlots  = nil
           TallyDB.ledger.nextSlot      = nil
 
+          -- IMPORTANT: also wipe in-memory ledger state. Without this,
+          -- the in-memory active set persists; PLAYER_LOGOUT's
+          -- SaveToDisk would re-serialise it back to
+          -- TallyDB.ledger.active AND clear the legacy blob we just
+          -- wrote (the migration-completion clear in SaveToDisk).
+          -- Result on next /reload: legacy blob gone, no migration
+          -- exercised.
+          --
+          -- This is destructive — the caller's real ledger goes away.
+          -- Acceptable for stress-testing; document in the slash help.
+          if ns.Ledger and ns.Ledger.WipeForLegacySeed then
+            ns.Ledger:WipeForLegacySeed()
+          end
+
           print(string.format("|cff80ff80Tally:|r wrote %d entries to legacy blob (%d bytes compressed, %d serialised).",
             n, #compressed, #serialised))
+          print("|cffffe080Tally:|r in-memory active wiped — legacy blob is the only ledger now.")
           print("|cff80ff80Tally:|r run |cff80c0ff/reload|r — loadFromDisk will detect the legacy blob and start the migration pass.")
         end
         step()
