@@ -52,6 +52,66 @@ local function syndicator()
   return Syndicator and Syndicator.API or nil
 end
 
+-- ============================================================================
+-- Gold capture (TLY-68)
+-- ============================================================================
+--
+-- Tally captures char + warband gold via real-time WoW events instead of
+-- relying solely on Syndicator's snapshot. Stored account-wide in
+-- TallyDB.charGold[charKey] and TallyDB.warbandGold so projectCharacter /
+-- projectWarbandBank can prefer Tally's value when available — Syndicator
+-- stays as the fallback for characters Tally hasn't seen log in yet
+-- (e.g. an alt the user hasn't touched since installing alpha18).
+--
+-- Driven by PLAYER_LOGIN + PLAYER_MONEY (current char) and
+-- PLAYER_INTERACTION_MANAGER_FRAME_SHOW for the account banker (warband).
+
+local function preferredCharGold(charKey)
+  local own = TallyDB and TallyDB.charGold and TallyDB.charGold[charKey]
+  if own and own.money then return own.money end
+  return nil
+end
+
+local function preferredWarbandGold()
+  if TallyDB and TallyDB.warbandGold and TallyDB.warbandGold.money then
+    return TallyDB.warbandGold.money
+  end
+  return nil
+end
+
+function Ownership:CaptureCurrentCharGold()
+  if not GetMoney then return end
+  local key = ns.Sources and ns.Sources.Native and ns.Sources.Native.CurrentCharKey
+              and ns.Sources.Native.CurrentCharKey()
+  if not key or key == "-" then return end
+  TallyDB.charGold = TallyDB.charGold or {}
+  TallyDB.charGold[key] = { money = GetMoney(), moneyAt = time() }
+end
+
+function Ownership:CaptureWarbandGold()
+  -- Modern retail exposes C_Bank.FetchDepositedMoney(Enum.BankType.Account)
+  -- for the warband bank's gold; fall back to Syndicator's cached warband
+  -- view if that API isn't available on the running client.
+  local money
+  if C_Bank and C_Bank.FetchDepositedMoney and Enum and Enum.BankType
+     and Enum.BankType.Account then
+    local ok, val = pcall(C_Bank.FetchDepositedMoney, Enum.BankType.Account)
+    if ok and type(val) == "number" then money = val end
+  end
+  if not money then
+    local api = syndicator()
+    if api and api.GetWarband then
+      local data = api.GetWarband(1)
+      if type(data) == "table" and type(data.money) == "number" then
+        money = data.money
+      end
+    end
+  end
+  if money then
+    TallyDB.warbandGold = { money = money, moneyAt = time() }
+  end
+end
+
 -- WoW Tokens are technically bind-on-pickup but are convertible to gold or
 -- game time, so we count them as saleable regardless of isBound. Items
 -- currently listed on the AH are saleable by definition — they're literally
@@ -169,7 +229,11 @@ local function projectCharacter(charKey)
     foldSlots(items, spilled, data.auctions, "auctions")
   end
 
-  return { gold = data.money or 0, items = items, spilled = spilled }
+  return {
+    gold    = preferredCharGold(charKey) or data.money or 0,
+    items   = items,
+    spilled = spilled,
+  }
 end
 
 local function projectWarbandBank()
@@ -191,7 +255,10 @@ local function projectWarbandBank()
     end
   end
 
-  return { gold = data.money or 0, bankItems = bankItems }
+  return {
+    gold      = preferredWarbandGold() or data.money or 0,
+    bankItems = bankItems,
+  }
 end
 
 -- Rebuild warband.items as the merge of warband.bankItems plus every

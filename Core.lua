@@ -102,6 +102,9 @@ end
 local frame = CreateFrame("Frame")
 frame:RegisterEvent("PLAYER_LOGIN")
 frame:RegisterEvent("PLAYER_LOGOUT")
+-- TLY-68 gold capture surfaces
+frame:RegisterEvent("PLAYER_MONEY")
+frame:RegisterEvent("PLAYER_INTERACTION_MANAGER_FRAME_SHOW")
 frame:SetScript("OnEvent", function(_, event, ...)
   local handler = ns[event]
   if handler then handler(ns, ...) end
@@ -117,6 +120,29 @@ function ns:PLAYER_LOGOUT()
   end
 end
 
+-- TLY-68: refresh this character's captured gold whenever the running
+-- balance changes. Cheap (single hash write); fires roughly per
+-- transaction.
+function ns:PLAYER_MONEY()
+  if ns.Inventory and ns.Inventory.CaptureCurrentCharGold then
+    pcall(ns.Inventory.CaptureCurrentCharGold, ns.Inventory)
+  end
+end
+
+-- TLY-68: warband-bank money is only knowable when the player has the
+-- account banker open. WoW fires PLAYER_INTERACTION_MANAGER_FRAME_SHOW
+-- with Enum.PlayerInteractionType.AccountBanker (28 in retail) when
+-- the warbank UI opens; capture then.
+function ns:PLAYER_INTERACTION_MANAGER_FRAME_SHOW(interactionType)
+  local ACCOUNT_BANKER = (Enum and Enum.PlayerInteractionType
+                          and Enum.PlayerInteractionType.AccountBanker) or 28
+  if interactionType == ACCOUNT_BANKER then
+    if ns.Inventory and ns.Inventory.CaptureWarbandGold then
+      pcall(ns.Inventory.CaptureWarbandGold, ns.Inventory)
+    end
+  end
+end
+
 function ns:PLAYER_LOGIN()
   -- TLY-21: force a one-shot history prune on login so users coming from the
   -- pre-fix legacy defaults (365d retention) immediately reclaim memory once
@@ -126,6 +152,13 @@ function ns:PLAYER_LOGIN()
   end
   if ns.Inventory and ns.Inventory.RegisterSyndicatorCallbacks then
     ns.Inventory:RegisterSyndicatorCallbacks()
+  end
+  -- TLY-68: capture this character's gold at PLAYER_LOGIN so NetWorth
+  -- has a Tally-own value to prefer over Syndicator's snapshot. The
+  -- subsequent PLAYER_MONEY handler keeps it fresh through the session;
+  -- warband money piggybacks on the account-banker frame event.
+  if ns.Inventory and ns.Inventory.CaptureCurrentCharGold then
+    pcall(ns.Inventory.CaptureCurrentCharGold, ns.Inventory)
   end
   -- TLY-45: open a session-window log entry. Pairs with the periodic
   -- heartbeat ticker further down so DivergenceReport can categorize
