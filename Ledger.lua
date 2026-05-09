@@ -1101,31 +1101,23 @@ local function loadFromDisk()
     return
   end
 
-  -- Migration 1: alpha14/15 single-blob. Deserialise into a pending
-  -- migration buffer rather than active — Ledger:StartMigration walks
-  -- the buffer in chunks and routes each row by date. Active stays empty
-  -- until current-month rows route in; legacy blob retained on disk
-  -- until migration completes (mid-migration crash restarts cleanly
-  -- because the legacy blob is the only ground truth until then).
+  -- Migration 1: alpha14/15 single-blob. The full deserialise of a
+  -- 200k+ row legacy blob takes 30-50s synchronously — unacceptable
+  -- as a login freeze. Stash the compressed bytes in pendingLegacy
+  -- and return immediately; PLAYER_LOGIN's deferred handler will call
+  -- Ledger:KickLegacyLoad to async-deserialise across ticks (chunked
+  -- via LibSerialize:DeserializeAsync with a 1024-item yieldCheck).
+  -- Active stays empty during the load window; Count() reads the
+  -- legacy blob's metadata count so the grandfather check still
+  -- recognises the user as already-onboarded.
   if L.blob then
-    local decompressed = LibDeflate:DecompressDeflate(L.blob)
-    if decompressed then
-      local ok, payload = LibSerialize:Deserialize(decompressed)
-      if ok and type(payload) == "table" then
-        _workingMem = {
-          active = { entries = {}, byId = {} },
-          pendingMigration = {
-            entries = payload.entries or {},
-            byId    = payload.byId or {},
-          },
-        }
-        _loaded = true
-        _dirty = false
-        return
-      end
-    end
-    print("|cffff8080Tally:|r ledger storage failed to load — starting fresh. Run /tally setup to backfill from sibling sources.")
-    _workingMem = defaultMem()
+    _workingMem = {
+      active = { entries = {}, byId = {} },
+      pendingLegacy = {
+        blob = L.blob,
+        meta = L.blobMeta or {},
+      },
+    }
     _loaded = true
     _dirty = false
     return
@@ -1172,13 +1164,15 @@ function Ledger:SaveToDisk()
   if not _dirty then return end
   if not (LibSerialize and LibDeflate) then return end
 
-  -- Mid-migration: don't save active and don't clear the legacy blob.
-  -- The active set during migration is partial; if we persisted it
-  -- alongside legacy, a crash would leave both populated and the next
-  -- login would re-route already-routed rows. Skipping the save means
-  -- mid-migration logout/crash restarts the migration cleanly from the
-  -- legacy blob, losing only any native events captured in the partial
-  -- active during this session (small window, typically minutes).
+  -- Mid-migration / mid-load: don't save active and don't clear the
+  -- legacy blob. If we persisted active alongside legacy here, a
+  -- subsequent reload would see both and SaveToDisk's
+  -- migration-completion clear would wipe the legacy blob. Skipping
+  -- the save means a logout during the legacy load or migration
+  -- restarts cleanly from the legacy blob on next session, losing
+  -- only any native events captured in the partial active during
+  -- this session (small window, typically minutes).
+  if _workingMem.pendingLegacy then return end
   if _workingMem.pendingMigration then return end
 
   local startMs = (debugprofilestop and debugprofilestop()) or 0
@@ -1244,6 +1238,9 @@ function Ledger:StorageInfo()
 
   local pendingRows = (_workingMem and _workingMem.pendingMigration
                        and #_workingMem.pendingMigration.entries) or 0
+  local pendingLegacy = _workingMem and _workingMem.pendingLegacy
+  local pendingLegacyRows = (pendingLegacy and pendingLegacy.meta and pendingLegacy.meta.count) or 0
+  local pendingLegacyBytes = (pendingLegacy and pendingLegacy.blob and #pendingLegacy.blob) or 0
 
   local stagingKeys = self:GetStagingKeys()
   local stagingRows = self:GetStagingRowCount()
@@ -1266,10 +1263,13 @@ function Ledger:StorageInfo()
     totalRows        = activeRows + archiveRows,
     cachedArchives   = cachedKeys,
     cacheCap         = cacheCap,
-    pendingMigration = pendingRows > 0,
-    pendingRows      = pendingRows,
-    stagingKeys      = stagingKeys,
-    stagingRows      = stagingRows,
+    pendingMigration   = pendingRows > 0,
+    pendingRows        = pendingRows,
+    pendingLegacyLoad  = pendingLegacy ~= nil,
+    pendingLegacyRows  = pendingLegacyRows,
+    pendingLegacyBytes = pendingLegacyBytes,
+    stagingKeys        = stagingKeys,
+    stagingRows        = stagingRows,
     -- Back-compat aliases for callers still using the pre-TLY-51 names:
     blobBytes        = meta and meta.bytes or 0,
     blobCount        = meta and meta.count or 0,
@@ -1302,6 +1302,7 @@ end
 -- through the multi-second routing pass on large legacy ledgers.
 
 local _migration = nil  -- in-flight migration state, see StartMigration
+local _legacyLoad = nil  -- in-flight legacy-blob async deserialise, see KickLegacyLoad
 
 -- Routed-import staging buckets. Bulk-import paths (the wizard backfill +
 -- any other route-by-date insert flow) drop prior-month rows into here
@@ -1419,6 +1420,118 @@ end
 
 function Ledger:IsMigrationRunning()
   return _migration ~= nil
+end
+
+-- True between loadFromDisk detecting a legacy blob and the async
+-- deserialise completing. Core's PLAYER_LOGIN kicks KickLegacyLoad
+-- when this is true; that load promotes pendingLegacy → pendingMigration
+-- and chains into StartMigration.
+function Ledger:IsLegacyLoadPending()
+  if not _loaded then loadFromDisk() end
+  return (_workingMem and _workingMem.pendingLegacy) and true or false
+end
+
+function Ledger:IsLegacyLoadRunning()
+  return _legacyLoad ~= nil
+end
+
+-- Async deserialise of the alpha14/15 legacy blob. Fires opts.onComplete
+-- (ok, errOrNil) when the deserialised payload has been promoted into
+-- _workingMem.pendingMigration (ready for Ledger:StartMigration).
+--
+-- Decompresses synchronously (cheap relative to deserialise; ~1s on a
+-- 7MB compressed blob). Deserialise runs across C_Timer ticks via
+-- LibSerialize:DeserializeAsync with a 1024-item yieldCheck so each
+-- tick stays ~one-frame-worth of CPU.
+--
+-- opts:
+--   onProgress    function(phase, hint)  -- phase = "deserialise"; hint = "tick"
+--   onComplete    function(ok, errOrNil)
+function Ledger:KickLegacyLoad(opts)
+  if not (_workingMem and _workingMem.pendingLegacy) then return false end
+  if _legacyLoad then return true end
+  if not (LibSerialize and LibDeflate) then
+    if opts and opts.onComplete then pcall(opts.onComplete, false, "libs unavailable") end
+    return false
+  end
+  opts = opts or {}
+
+  local pl = _workingMem.pendingLegacy
+  local decompressed = LibDeflate:DecompressDeflate(pl.blob)
+  if not decompressed then
+    _workingMem.pendingLegacy = nil
+    if opts.onComplete then pcall(opts.onComplete, false, "decompress failed") end
+    return false
+  end
+
+  local YIELD_EVERY = 1024
+  local handler
+  local ok, err = pcall(function()
+    handler = LibSerialize:DeserializeAsync(decompressed, {
+      yieldCheck = function(scratch)
+        scratch.count = (scratch.count or 0) + 1
+        if scratch.count >= YIELD_EVERY then
+          scratch.count = 0
+          return true
+        end
+        return false
+      end,
+    })
+  end)
+  if not ok or not handler then
+    _workingMem.pendingLegacy = nil
+    if opts.onComplete then pcall(opts.onComplete, false, "DeserializeAsync init failed: " .. tostring(err)) end
+    return false
+  end
+
+  _legacyLoad = { startedAt = time(), opts = opts }
+  local delaySec = opts.delaySec or 0.005
+
+  local function step()
+    -- Cancellation: if Clear / WipeForLegacySeed nilled _legacyLoad
+    -- mid-flight, short-circuit. The handler coroutine is then
+    -- garbage-collected naturally.
+    if not _legacyLoad then return end
+
+    local resumeOk, completed, success, payload = pcall(handler)
+    if not resumeOk then
+      _legacyLoad = nil
+      if _workingMem then _workingMem.pendingLegacy = nil end
+      if opts.onComplete then pcall(opts.onComplete, false, "resume failed: " .. tostring(completed)) end
+      return
+    end
+    if not completed then
+      if opts.onProgress then pcall(opts.onProgress, "deserialise", "tick") end
+      if C_Timer and C_Timer.After then
+        C_Timer.After(delaySec, step)
+      else
+        step()
+      end
+      return
+    end
+
+    if not success or type(payload) ~= "table" then
+      _legacyLoad = nil
+      _workingMem.pendingLegacy = nil
+      if opts.onComplete then pcall(opts.onComplete, false, "deserialised payload invalid") end
+      return
+    end
+
+    -- Promote pendingLegacy → pendingMigration and clear the legacy
+    -- placeholder. The on-disk legacy blob stays put until SaveToDisk
+    -- after migration completes (existing belt-and-suspenders logic).
+    _workingMem.pendingMigration = {
+      entries = payload.entries or {},
+      byId    = payload.byId or {},
+    }
+    _workingMem.pendingLegacy = nil
+    _legacyLoad = nil
+
+    if opts.onComplete then pcall(opts.onComplete, true, nil) end
+  end
+
+  step()
+  return true
 end
 
 -- Kick off the chunked migration pass. Idempotent — second call while
@@ -2642,6 +2755,7 @@ function Ledger:Clear()
   _loaded = true
   _dirty = true
   _staging = {}
+  _legacyLoad = nil  -- cancel any in-flight legacy deserialise
   invalidateReconcileCache()
 end
 
@@ -2660,6 +2774,7 @@ function Ledger:WipeForLegacySeed()
   _loaded = true
   _dirty = false
   _staging = {}
+  _legacyLoad = nil  -- cancel any in-flight legacy deserialise
   if ns.Archive then ns.Archive:UnloadAll() end
   invalidateReconcileCache()
 end
@@ -2837,6 +2952,12 @@ function Ledger:Count()
   end
   if _workingMem and _workingMem.pendingMigration then
     total = total + #_workingMem.pendingMigration.entries
+  end
+  -- Legacy blob waiting for async deserialise — count from blobMeta
+  -- so the grandfather check sees the user as already-onboarded
+  -- before the load completes.
+  if _workingMem and _workingMem.pendingLegacy and _workingMem.pendingLegacy.meta then
+    total = total + (_workingMem.pendingLegacy.meta.count or 0)
   end
   return total
 end

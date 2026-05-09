@@ -129,13 +129,24 @@ function ns:PLAYER_LOGIN()
     TallyDB.setup.completedAt = TallyDB.setup.completedAt or time()
   end
 
-  -- Auto-start the legacy-blob → tiered-storage migration if loadFromDisk
-  -- detected one. Chunked C_Timer pass; chat-line progress until the UI
-  -- toast wires up. SaveToDisk skips writes during the pass so a
-  -- mid-migration logout restarts cleanly from the legacy blob on next
-  -- login.
-  if ns.Ledger and ns.Ledger.IsMigrationPending and ns.Ledger:IsMigrationPending() then
-    print("|cffffe080Tally:|r Migrating ledger to tiered storage. Your client stays responsive — this runs in the background.")
+  -- Auto-start the legacy-blob → tiered-storage migration if
+  -- loadFromDisk detected one. Two-phase pipeline:
+  --   1. KickLegacyLoad — async-chunked LibSerialize:DeserializeAsync
+  --      of the compressed legacy blob. Decompress is synchronous (~1s
+  --      even on big payloads); deserialise yields every 1024 items so
+  --      the input thread stays responsive across the multi-second
+  --      walk. On completion, _workingMem.pendingMigration is populated
+  --      and IsMigrationPending becomes true.
+  --   2. StartMigration — chunked routing (current month → active,
+  --      older months → staging buckets), then near-instant per-slot
+  --      flush via the multi-SV path.
+  --
+  -- SaveToDisk skips writes during BOTH phases so a logout in either
+  -- restarts cleanly from the on-disk legacy blob next session.
+  local function startMigrationFlow()
+    if not (ns.Ledger and ns.Ledger.IsMigrationPending) then return end
+    if not ns.Ledger:IsMigrationPending() then return end
+    print("|cffffe080Tally:|r Routing legacy ledger into tiered storage. Your client stays responsive throughout.")
     ns.Ledger:StartMigration({
       onProgress = function(phase, idx, total, key)
         if phase == "route" and total > 0 and idx % 10000 == 0 then
@@ -153,6 +164,30 @@ function ns:PLAYER_LOGIN()
     })
   end
 
+  if ns.Ledger and ns.Ledger.IsLegacyLoadPending and ns.Ledger:IsLegacyLoadPending() then
+    print("|cffffe080Tally:|r Loading legacy ledger blob (chunked async deserialise).")
+    -- Defer slightly so PLAYER_LOGIN's other handlers run unblocked
+    -- before we start the deserialise tick chain.
+    if C_Timer and C_Timer.After then
+      C_Timer.After(0.5, function()
+        ns.Ledger:KickLegacyLoad({
+          onComplete = function(ok, err)
+            if ok then
+              print("|cff80a0ffTally:|r legacy load complete — beginning migration.")
+              startMigrationFlow()
+            else
+              print("|cffff4040Tally:|r legacy load failed: " .. tostring(err))
+            end
+          end,
+        })
+      end)
+    end
+  elseif ns.Ledger and ns.Ledger.IsMigrationPending and ns.Ledger:IsMigrationPending() then
+    -- Legacy blob already deserialised (e.g., test path that populates
+    -- pendingMigration directly) — start migration immediately.
+    startMigrationFlow()
+  end
+
   -- TLY-21: defer the initial sibling-source backfill 5s after login so
   -- character-select / first-zone-load isn't fighting a multi-MB TSM CSV
   -- parse for the player's input thread. Native source is event-driven
@@ -168,7 +203,17 @@ function ns:PLAYER_LOGIN()
   -- migration and the next login fires the deferred backfill cleanly.
   if ns.Ledger and ns.Ledger.ImportFromAllSources and C_Timer and C_Timer.After then
     C_Timer.After(5, function()
-      if ns.Ledger:IsSetupComplete() and not ns.Ledger:IsMigrationRunning() then
+      -- Hold off backfill while any phase of the legacy → tiered
+      -- pipeline is still running. Native events keep flowing during
+      -- those phases (live captures into active are safe); the
+      -- deferred sibling-source backfill restarts cleanly on next
+      -- login after the pipeline completes.
+      local busy =
+        (ns.Ledger.IsMigrationRunning   and ns.Ledger:IsMigrationRunning())
+        or (ns.Ledger.IsMigrationPending and ns.Ledger:IsMigrationPending())
+        or (ns.Ledger.IsLegacyLoadRunning and ns.Ledger:IsLegacyLoadRunning())
+        or (ns.Ledger.IsLegacyLoadPending and ns.Ledger:IsLegacyLoadPending())
+      if ns.Ledger:IsSetupComplete() and not busy then
         ns.Ledger:ImportFromAllSources()
       end
     end)
@@ -1046,6 +1091,10 @@ local function diagPrintChat()
       st.dirty and "yes" or "no",
       st.schemaVer or 0,
       st.legacyPresent and " |cffffa050[legacy blob still on disk]|r" or ""))
+    if st.pendingLegacyLoad then
+      print(string.format("  |cffffe080Legacy load pending:|r %d rows in legacy blob (%d bytes compressed) — async deserialise in flight",
+        st.pendingLegacyRows or 0, st.pendingLegacyBytes or 0))
+    end
     if st.pendingMigration then
       print(string.format("  |cffffe080Migration pending:|r %d rows in pendingMigration buffer", st.pendingRows or 0))
     end
