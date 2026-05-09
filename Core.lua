@@ -55,6 +55,48 @@ TallyDB.netWorth = TallyDB.netWorth or { strategy = "DBRegionMarketAvg" }
 TallyDB.minimap = TallyDB.minimap or { hide = false }
 
 -- ============================================================================
+-- alpha18 schema gate — one-shot wipe + structural reshape
+-- ============================================================================
+--
+-- alpha18 splits the active blob into its own SV (TallyActive) so
+-- TallyDB no longer holds anything that grows with row count — the
+-- structural fix for the alpha13/alpha16 constant-pool overflow that
+-- broke big-tester accounts.
+--
+-- Two gates, deliberately separate:
+--   1. Account-wide gate (TallyDB.tally_schema_version): fires exactly
+--      once per account. Wipes ledger substrate + per-account setup
+--      flags + slot globals so the first alpha18 login lands in a clean
+--      state. Account-wide so Char2's first alpha18 login doesn't
+--      clobber rows Char1 captured between its wipe and Char2's first
+--      session.
+--   2. Per-character gate (TallyCharDB.tally_schema_version): fires
+--      once per character. Clears TallyCharDB.tallyAcknowledged so
+--      each character sees the alpha18 welcome wizard once if account-
+--      wide setup hasn't been completed yet.
+--
+-- Tester data is expendable in alpha (no migration). Settings, history
+-- snapshots, net-worth strategy, minimap, and theme are preserved.
+local TALLY_SCHEMA_VERSION = 18
+
+if (TallyDB.tally_schema_version or 0) < TALLY_SCHEMA_VERSION then
+  TallyDB.ledger = nil  -- drops active, archives, archiveSlots, archiveIndex,
+                        -- nextSlot, blob, blobMeta, entries, byId in one swing
+  for i = 1, 60 do
+    _G[string.format("TallyA%03d", i)] = nil
+  end
+  _G.TallyActive = nil
+  TallyDB.setup = nil          -- welcome wizard re-fires so user opts in
+  TallyDB.disabledSources = nil -- clean source-enable state
+  TallyDB.tally_schema_version = TALLY_SCHEMA_VERSION
+end
+
+if (TallyCharDB.tally_schema_version or 0) < TALLY_SCHEMA_VERSION then
+  TallyCharDB.tallyAcknowledged = nil
+  TallyCharDB.tally_schema_version = TALLY_SCHEMA_VERSION
+end
+
+-- ============================================================================
 -- Event dispatch
 -- ============================================================================
 local frame = CreateFrame("Frame")
@@ -107,117 +149,16 @@ function ns:PLAYER_LOGIN()
     if ns.Sources.TSM         then ns.Sources.TSM:Register()         end
     if ns.Sources.Journalator then ns.Sources.Journalator:Register() end
   end
-  -- Pre-wizard upgrader grandfather: anyone who already has ledger entries
-  -- (i.e., an existing Tally user installing this build) gets the setup
-  -- flag flipped true so their imports keep flowing. Only fresh installs
-  -- and post-`/tally reset` users go through the wizard gate.
+  -- alpha18 active-only baseline: PLAYER_LOGIN registers Native event
+  -- capture (above) and that's it. No automatic sibling-source
+  -- import, no session-row dirty, no per-login work that scales with
+  -- total ledger size. The flipper loop's 60× login tax was the
+  -- driving objective for the rewrite — anything that grew with row
+  -- count had to leave PLAYER_LOGIN.
   --
-  -- The signal here is deliberately the ledger row count, not the
-  -- inventory rollup. Inventory:Rebuild repopulates rollup the moment
-  -- /tally reset finishes, so keying off that incorrectly identified a
-  -- just-reset user on their next login as a returning upgrader and
-  -- silently re-opened the gate. Ledger rows survive nothing except a
-  -- legitimate prior Tally session.
-  -- Probe via Ledger:Count() so the lazy-load path (and any pending
-  -- storage-shape migration) runs as a side effect — the count is the
-  -- same value either way.
-  if ns.Ledger and ns.Ledger.Count and ns.Ledger:Count() > 0
-     and not (TallyDB.setup and TallyDB.setup.completed) then
-    TallyDB.setup = TallyDB.setup or {}
-    TallyDB.setup.completed = true
-    TallyDB.setup.grandfathered = true
-    TallyDB.setup.completedAt = TallyDB.setup.completedAt or time()
-  end
-
-  -- Auto-start the legacy-blob → tiered-storage migration if
-  -- loadFromDisk detected one. Two-phase pipeline:
-  --   1. KickLegacyLoad — async-chunked LibSerialize:DeserializeAsync
-  --      of the compressed legacy blob. Decompress is synchronous (~1s
-  --      even on big payloads); deserialise yields every 1024 items so
-  --      the input thread stays responsive across the multi-second
-  --      walk. On completion, _workingMem.pendingMigration is populated
-  --      and IsMigrationPending becomes true.
-  --   2. StartMigration — chunked routing (current month → active,
-  --      older months → staging buckets), then near-instant per-slot
-  --      flush via the multi-SV path.
-  --
-  -- SaveToDisk skips writes during BOTH phases so a logout in either
-  -- restarts cleanly from the on-disk legacy blob next session.
-  local function startMigrationFlow()
-    if not (ns.Ledger and ns.Ledger.IsMigrationPending) then return end
-    if not ns.Ledger:IsMigrationPending() then return end
-    print("|cffffe080Tally:|r Routing legacy ledger into tiered storage. Your client stays responsive throughout.")
-    ns.Ledger:StartMigration({
-      onProgress = function(phase, idx, total, key)
-        if phase == "route" and total > 0 and idx % 10000 == 0 then
-          print(string.format("|cff80a0ffTally:|r migration routing %d / %d (%d%%)",
-            idx, total, math.floor(100 * idx / total)))
-        elseif phase == "flush" then
-          print(string.format("|cff80a0ffTally:|r migration flushing archive %s (%d / %d)",
-            key or "?", idx, total))
-        end
-      end,
-      onComplete = function(activeRows, archiveCount, archiveRows)
-        print(string.format("|cff80ff80Tally:|r migration complete — %d active rows, %d archives, %d archived rows. The new shape saves on logout.",
-          activeRows, archiveCount, archiveRows))
-      end,
-    })
-  end
-
-  if ns.Ledger and ns.Ledger.IsLegacyLoadPending and ns.Ledger:IsLegacyLoadPending() then
-    print("|cffffe080Tally:|r Loading legacy ledger blob (chunked async deserialise).")
-    -- Defer slightly so PLAYER_LOGIN's other handlers run unblocked
-    -- before we start the deserialise tick chain.
-    if C_Timer and C_Timer.After then
-      C_Timer.After(0.5, function()
-        ns.Ledger:KickLegacyLoad({
-          onComplete = function(ok, err)
-            if ok then
-              print("|cff80a0ffTally:|r legacy load complete — beginning migration.")
-              startMigrationFlow()
-            else
-              print("|cffff4040Tally:|r legacy load failed: " .. tostring(err))
-            end
-          end,
-        })
-      end)
-    end
-  elseif ns.Ledger and ns.Ledger.IsMigrationPending and ns.Ledger:IsMigrationPending() then
-    -- Legacy blob already deserialised (e.g., test path that populates
-    -- pendingMigration directly) — start migration immediately.
-    startMigrationFlow()
-  end
-
-  -- TLY-21: defer the initial sibling-source backfill 5s after login so
-  -- character-select / first-zone-load isn't fighting a multi-MB TSM CSV
-  -- parse for the player's input thread. Native source is event-driven
-  -- and doesn't need this timer.
-  --
-  -- TLY-25: gated on the setup-complete flag. Fresh installs and
-  -- post-reset users see the wizard first; nothing flows into the
-  -- ledger until they finish it.
-  --
-  -- Skipped while a migration is running so backfill doesn't race the
-  -- chunked legacy-blob walk. The migration's onComplete is the natural
-  -- moment to retry, but in practice native events keep flowing during
-  -- migration and the next login fires the deferred backfill cleanly.
-  if ns.Ledger and ns.Ledger.ImportFromAllSources and C_Timer and C_Timer.After then
-    C_Timer.After(5, function()
-      -- Hold off backfill while any phase of the legacy → tiered
-      -- pipeline is still running. Native events keep flowing during
-      -- those phases (live captures into active are safe); the
-      -- deferred sibling-source backfill restarts cleanly on next
-      -- login after the pipeline completes.
-      local busy =
-        (ns.Ledger.IsMigrationRunning   and ns.Ledger:IsMigrationRunning())
-        or (ns.Ledger.IsMigrationPending and ns.Ledger:IsMigrationPending())
-        or (ns.Ledger.IsLegacyLoadRunning and ns.Ledger:IsLegacyLoadRunning())
-        or (ns.Ledger.IsLegacyLoadPending and ns.Ledger:IsLegacyLoadPending())
-      if ns.Ledger:IsSetupComplete() and not busy then
-        ns.Ledger:ImportFromAllSources()
-      end
-    end)
-  end
+  -- Sibling import returns in alpha19+ as a user-initiated, pausable,
+  -- resumable wizard flow with a per-cycle row budget — never as
+  -- silent login work.
 
   -- TLY-40 migration: pre-fix rollups (warband.items without bankItems /
   -- spillsByChar) may carry inflated counts from the old duplication bug.

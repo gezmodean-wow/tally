@@ -68,27 +68,9 @@ local function makeState()
   }
 end
 
--- Pace presets — chunkSize / delaySec for InsertManyChunked.
-local PACE_PRESETS = {
-  gentle     = { chunkSize = 200,  delaySec = 0.5,  label = "Gentle (play while it runs)" },
-  balanced   = { chunkSize = 500,  delaySec = 0.2,  label = "Balanced" },
-  aggressive = { chunkSize = 2000, delaySec = 0.05, label = "Aggressive (AFK while it runs)" },
-}
-
 -- ============================================================================
 -- Step builders
 -- ============================================================================
-
-local function makeBodyText(parent, text)
-  local fs = parent:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
-  fs:SetPoint("TOPLEFT", parent, "TOPLEFT", 12, -12)
-  fs:SetPoint("RIGHT", parent, "RIGHT", -12, 0)
-  fs:SetJustifyH("LEFT")
-  fs:SetJustifyV("TOP")
-  fs:SetSpacing(4)
-  fs:SetText(text)
-  return fs
-end
 
 local function buildWelcomeStep(parent)
   local f = CreateFrame("Frame", nil, parent)
@@ -109,230 +91,18 @@ local function buildWelcomeStep(parent)
     "Tally is the personal-finance layer of the Cogworks suite — net worth, "
     .. "ledger, and per-item research across every character on every realm "
     .. "you play.\n\n"
-    .. "|cffffd070Augment, not replace.|r Tally pulls from sibling addons "
-    .. "you already use — TSM Accounting, FlipQueue, Journalator — and from "
-    .. "Tally's own native event observers. Each source stays fully functional "
-    .. "without Tally; installing Tally just unlocks cross-account rollups, "
-    .. "pricing-history, and per-item lifecycle analysis.\n\n"
-    .. "This wizard takes about a minute. We'll show you what we'll pull and "
-    .. "what it'll cost — then backfill in the background so you can "
-    .. "play while it runs. After the one-time backfill, Tally captures new "
-    .. "events live as they fire.\n\n"
-    .. "|cffffd070Click Next to start setup, or Cancel to skip.|r You can "
-    .. "re-open this any time from Settings → Re-run setup wizard. Either "
-    .. "way, this popup won't appear again.")
-
-  return f
-end
-
-local function buildSourcesStep(parent, state)
-  local f = CreateFrame("Frame", nil, parent)
-  f:SetAllPoints(parent)
-
-  local title = f:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
-  title:SetPoint("TOPLEFT", f, "TOPLEFT", 12, -12)
-  title:SetText("Where your data comes from")
-  title:SetTextColor(themeColor("brass", { 0.83, 0.63, 0.09, 1 }))
-
-  local intro = f:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
-  intro:SetPoint("TOPLEFT", title, "BOTTOMLEFT", 0, -8)
-  intro:SetPoint("RIGHT", f, "RIGHT", -12, 0)
-  intro:SetJustifyH("LEFT")
-  intro:SetText("These are the data sources Tally detected. Sibling addons "
-    .. "(TSM, FlipQueue, Journalator) are pulled once as a |cffffffffbackfill|r "
-    .. "to recover history Tally couldn't have observed. Tally's own native "
-    .. "source captures new events live as they happen. Uncheck any sibling "
-    .. "you'd rather keep out of Tally's ledger.")
-
-  -- Build a row per registered source.
-  local listHost = CreateFrame("Frame", nil, f)
-  listHost:SetPoint("TOPLEFT", intro, "BOTTOMLEFT", 0, -12)
-  listHost:SetPoint("RIGHT", f, "RIGHT", -12, 0)
-  listHost:SetHeight(1)
-
-  local sources = (ns.Ledger and ns.Ledger:GetSources()) or {}
-  local rowH = 22
-  for i, s in ipairs(sources) do
-    local row = CreateFrame("Frame", nil, listHost)
-    row:SetPoint("TOPLEFT", listHost, "TOPLEFT", 0, -((i - 1) * rowH))
-    row:SetPoint("RIGHT", listHost, "RIGHT", 0, 0)
-    row:SetHeight(rowH)
-
-    local cb = CreateFrame("CheckButton", nil, row, "UICheckButtonTemplate")
-    cb:SetSize(20, 20)
-    cb:SetPoint("LEFT", row, "LEFT", 0, 0)
-    cb:SetChecked(state.sources[s.name] and state.sources[s.name].enabled)
-    cb:SetScript("OnClick", function(self)
-      state.sources[s.name].enabled = self:GetChecked() and true or false
-    end)
-
-    local label = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    label:SetPoint("LEFT", cb, "RIGHT", 4, 0)
-    label:SetWidth(180)
-    label:SetJustifyH("LEFT")
-    label:SetText(s.label)
-
-    local available = ns.Ledger:IsSourceAvailable(s.name)
-    local status = row:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
-    status:SetPoint("LEFT", label, "RIGHT", 8, 0)
-    status:SetWidth(140)
-    status:SetJustifyH("LEFT")
-    if available then
-      status:SetText("|cff7fffaeAvailable|r")
-    else
-      status:SetText("|cff888888Not detected — uninstall or check Settings|r")
-      cb:SetChecked(false)
-      cb:Disable()
-      state.sources[s.name].enabled = false
-    end
-
-    -- Per-source availability hint. We deliberately do NOT call the
-    -- adapter's full getEntriesFn just to display a count — TSM's parse
-    -- on a 90k-row CSV is multi-second and would freeze the wizard. The
-    -- multi-progress widget shows the real count once parse runs at
-    -- import time. Cheap O(1) probes only here.
-    local count = row:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
-    count:SetPoint("LEFT", status, "RIGHT", 8, 0)
-    count:SetPoint("RIGHT", row, "RIGHT", 0, 0)
-    count:SetJustifyH("LEFT")
-    if not available then
-      count:SetText("")
-    elseif s.name == "tally-native" then
-      count:SetText("|cff999999live — captured as events fire|r")
-    elseif s.name == "flipqueue" then
-      -- O(1) — FlipQueueDB.log is a regular Lua array.
-      local n = (_G.FlipQueueDB and _G.FlipQueueDB.log and #_G.FlipQueueDB.log) or 0
-      count:SetText(string.format("|cff999999%d events to scan|r", n))
-    elseif s.name == "journalator" then
-      -- Live-month buckets are O(1) each. Archived-month counts would
-      -- require deserialize-and-decompress per month — skip those for
-      -- the wizard, just report the archive-month count as a hint.
-      local archives = (_G.JOURNALATOR_ARCHIVE_TIMES and #_G.JOURNALATOR_ARCHIVE_TIMES) or 0
-      local liveCount = 0
-      local logs = _G.Journalator and _G.Journalator.State and _G.Journalator.State.Logs
-      if type(logs) == "table" then
-        for _, bucket in pairs(logs) do
-          if type(bucket) == "table" then liveCount = liveCount + #bucket end
-        end
-      end
-      count:SetText(string.format(
-        "|cff999999%d live + %d month%s archived|r",
-        liveCount, archives, archives == 1 and "" or "s"))
-    elseif s.name == "tsm" then
-      -- TSM CSVs are strings; counting by scanning newlines is roughly
-      -- O(N) over the byte stream. For 90k rows that's a brief blocking
-      -- pass — acceptable since the user just clicked "Next" to get
-      -- here, but let's stay friendly and show "data available" without
-      -- the precise number. Real count appears in the per-source bar.
-      count:SetText("|cff999999data available — count at import|r")
-    else
-      count:SetText("")
-    end
-  end
-  listHost:SetHeight(math.max(rowH, #sources * rowH))
-
-  local note = f:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
-  note:SetPoint("TOPLEFT", listHost, "BOTTOMLEFT", 0, -16)
-  note:SetPoint("RIGHT", f, "RIGHT", -12, 0)
-  note:SetJustifyH("LEFT")
-  note:SetSpacing(2)
-  note:SetText("|cff999999Tally never modifies sibling-addon data. Each "
-    .. "source's writes stay where they are; we just read.|r")
-
-  return f
-end
-
-local function buildPrimerStep(parent)
-  local f = CreateFrame("Frame", nil, parent)
-  f:SetAllPoints(parent)
-
-  local title = f:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
-  title:SetPoint("TOPLEFT", f, "TOPLEFT", 12, -12)
-  title:SetText("How Tally segments your wealth")
-  title:SetTextColor(themeColor("brass", { 0.83, 0.63, 0.09, 1 }))
-
-  -- Compute live values now so the primer shows real numbers, not abstract
-  -- definitions. A user with 700M gold sees their actual segmentation.
-  local netSnap = ns.NetWorth:Snapshot()
-  local ownedSnap = ns.NetWorth:Snapshot({ includeBound = true })
-
-  local CARD_W = 180
-  local PAD = 8
-  local LABEL_H, VALUE_H, BODY_GAP = 14, 20, 6
-
-  local function makeCard(anchor, anchorPt, label, value, body)
-    local card = CreateFrame("Frame", nil, f, "BackdropTemplate")
-    card:SetPoint("TOPLEFT", anchor, anchorPt, 0, -10)
-    card:SetWidth(CARD_W)
-    card:SetBackdrop({
-      bgFile = "Interface\\Buttons\\WHITE8x8",
-      edgeFile = "Interface\\Buttons\\WHITE8x8",
-      edgeSize = 1,
-    })
-    card:SetBackdropColor(themeColor("bgDark", { 0.04, 0.04, 0.07, 0.7 }))
-    card:SetBackdropBorderColor(themeColor("border", { 0.30, 0.30, 0.40, 1 }))
-
-    local lbl = card:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
-    lbl:SetPoint("TOPLEFT", card, "TOPLEFT", PAD, -PAD)
-    lbl:SetText(label)
-
-    local val = card:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    val:SetPoint("TOPLEFT", lbl, "BOTTOMLEFT", 0, -4)
-    val:SetText(value)
-    val:SetTextColor(themeColor("brass", { 0.83, 0.63, 0.09, 1 }))
-
-    -- Body: wrap to card width, measure resulting height, size the card
-    -- to fit. WoW renders the FontString into the wrapped layout once
-    -- SetText + SetWidth are set; GetStringHeight returns the post-wrap
-    -- height. We size the card's height from that so longer text never
-    -- clips. All three cards then equalize to the tallest after creation.
-    local b = card:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
-    b:SetPoint("TOPLEFT", val, "BOTTOMLEFT", 0, -BODY_GAP)
-    b:SetWidth(CARD_W - 2 * PAD)
-    b:SetJustifyH("LEFT")
-    b:SetJustifyV("TOP")
-    b:SetWordWrap(true)
-    b:SetSpacing(2)
-    b:SetText(body)
-    card._body = b
-    card._fixedTopH = PAD + LABEL_H + 4 + VALUE_H + BODY_GAP
-
-    -- Initial size; equalizeCards (below) bumps every card to the max.
-    card:SetHeight(card._fixedTopH + b:GetStringHeight() + PAD)
-    return card
-  end
-
-  local card1 = makeCard(f, "TOPLEFT", "NET WORTH (saleable)", formatGoldShort(netSnap.total),
-    "Items you could actually post on the AH today. Excludes soulbound gear, transmog stash, void storage, and quest items. This is the headline number.")
-  card1:SetPoint("TOPLEFT", title, "BOTTOMLEFT", 0, -12)
-
-  local card2 = makeCard(f, "TOPLEFT", "OWNED WORTH", formatGoldShort(ownedSnap.total),
-    "Everything you own, including bound and warbound items. Useful for 'how much wealth do I really have', not for 'how much can I cash out'.")
-  card2:SetPoint("TOPLEFT", card1, "TOPRIGHT", 12, 0)
-
-  local card3 = makeCard(f, "TOPLEFT", "WARBAND",
-    formatGoldShort(netSnap.warband.total),
-    "Gold + items physically in the warbank, plus any warbound items wherever they sit (a Warbound Until Equipped sword in your alt's bags belongs to the warband, not the alt).")
-  card3:SetPoint("TOPLEFT", card2, "TOPRIGHT", 12, 0)
-
-  -- Equalize card heights: the tallest body sets the height for all three
-  -- so they line up bottom-edge. Bound is always dynamic (depends on the
-  -- font + locale + which screen DPI the user has), so we never hard-code.
-  local cards = { card1, card2, card3 }
-  local maxH = 0
-  for _, c in ipairs(cards) do
-    if c:GetHeight() > maxH then maxH = c:GetHeight() end
-  end
-  for _, c in ipairs(cards) do c:SetHeight(maxH) end
-
-  local note = f:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
-  note:SetPoint("TOPLEFT", card1, "BOTTOMLEFT", 0, -16)
-  note:SetPoint("RIGHT", f, "RIGHT", -12, 0)
-  note:SetJustifyH("LEFT")
-  note:SetSpacing(3)
-  note:SetText("These three views are computed on the same raw data. The "
-    .. "Net Worth panel lets you toggle between them. Active AH auctions "
-    .. "always count as saleable — they're literally being sold.")
+    .. "|cffffd070alpha18 reset.|r This release is a structural rewrite "
+    .. "that fixes the constant-pool overflow that haunted big-tester "
+    .. "accounts. Your previous Tally ledger has been cleared as part of "
+    .. "the upgrade. Settings, history snapshots, and net-worth strategy "
+    .. "are preserved — only the transaction ledger was wiped.\n\n"
+    .. "From this login forward, Tally captures auction-house, vendor, "
+    .. "mail, and repair events live as they happen — Research, Lifecycle, "
+    .. "and Compare will be empty until enough data accumulates. Sibling-"
+    .. "source import (TSM, FlipQueue, Journalator) returns in alpha19 as "
+    .. "a user-initiated, pausable flow.\n\n"
+    .. "Click Next to set your pricing strategy and history cadence, or "
+    .. "Cancel to skip — you can re-run this any time from Settings.")
 
   return f
 end
@@ -517,70 +287,6 @@ local function buildHistoryStep(parent, state)
   return f
 end
 
-local function buildBackfillStep(parent, state)
-  local f = CreateFrame("Frame", nil, parent)
-  f:SetAllPoints(parent)
-
-  local title = f:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
-  title:SetPoint("TOPLEFT", f, "TOPLEFT", 12, -12)
-  title:SetText("Initial backfill")
-  title:SetTextColor(themeColor("brass", { 0.83, 0.63, 0.09, 1 }))
-
-  local intro = f:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
-  intro:SetPoint("TOPLEFT", title, "BOTTOMLEFT", 0, -8)
-  intro:SetPoint("RIGHT", f, "RIGHT", -12, 0)
-  intro:SetJustifyH("LEFT")
-  intro:SetSpacing(2)
-  intro:SetText("Click Finish to start the backfill. Tally will pull history "
-    .. "from each sibling source in the background — you'll see a small "
-    .. "progress bar bottom-right. Pick how aggressive that should be:")
-
-  -- Pace radios.
-  local rowHost = CreateFrame("Frame", nil, f)
-  rowHost:SetPoint("TOPLEFT", intro, "BOTTOMLEFT", 0, -12)
-  rowHost:SetPoint("RIGHT", f, "RIGHT", -12, 0)
-  rowHost:SetHeight(80)
-
-  local order = { "gentle", "balanced", "aggressive" }
-  local radios = {}
-  for i, key in ipairs(order) do
-    local preset = PACE_PRESETS[key]
-    local row = CreateFrame("Frame", nil, rowHost)
-    row:SetPoint("TOPLEFT", rowHost, "TOPLEFT", 0, -((i - 1) * 24))
-    row:SetPoint("RIGHT", rowHost, "RIGHT", 0, 0)
-    row:SetHeight(22)
-
-    local rb = CreateFrame("CheckButton", nil, row, "UIRadioButtonTemplate")
-    rb:SetSize(18, 18)
-    rb:SetPoint("LEFT", row, "LEFT", 0, 0)
-    rb:SetChecked(key == state.pace)
-    radios[#radios + 1] = { rb = rb, key = key }
-
-    local lbl = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    lbl:SetPoint("LEFT", rb, "RIGHT", 4, 0)
-    lbl:SetText(string.format("%s — %d rows / tick, %ds gap",
-      preset.label, preset.chunkSize, preset.delaySec))
-
-    rb:SetScript("OnClick", function()
-      state.pace = key
-      for _, r in ipairs(radios) do r.rb:SetChecked(r.key == key) end
-    end)
-  end
-
-  local note = f:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
-  note:SetPoint("TOPLEFT", rowHost, "BOTTOMLEFT", 0, -8)
-  note:SetPoint("RIGHT", f, "RIGHT", -12, 0)
-  note:SetJustifyH("LEFT")
-  note:SetSpacing(3)
-  note:SetText("|cff999999This is a one-time backfill. After it completes, "
-    .. "Tally captures new events live via the native source (mailbox, "
-    .. "vendor, repair, posting). Sibling adapters won't auto-rerun on a "
-    .. "ticker — use Settings → Import now to manually backfill again, "
-    .. "or /tally diag divergence to check whether anything Native missed.|r")
-
-  return f
-end
-
 -- ============================================================================
 -- Apply state on Finish
 -- ============================================================================
@@ -610,98 +316,20 @@ local function applyState(state)
   end
 end
 
-local function startBackfill(state)
-  local preset = PACE_PRESETS[state.pace] or PACE_PRESETS.gentle
-
-  -- Build the per-source widget BEFORE flipping setup.completed. Sources
-  -- the user opted out of are excluded from the panel (clean visual);
-  -- sources detected as unavailable show a "skipped" state so the user
-  -- isn't left wondering why TSM isn't there.
-  local sourceList = {}
-  if ns.Ledger and ns.Ledger.GetSources then
-    for _, s in ipairs(ns.Ledger:GetSources()) do
-      sourceList[#sourceList + 1] = { name = s.name, label = s.label }
-    end
-  end
-
-  local panel = ns.UI.CreateMultiProgress({
-    title = "Backfilling your data",
-    sources = sourceList,
-  })
-  panel:Show()
-  panel:SetFooter("Pace: " .. (PACE_PRESETS[state.pace] and PACE_PRESETS[state.pace].label or state.pace))
-
-  -- Pre-populate state for sources the user opted out of.
-  for _, s in ipairs(sourceList) do
-    local sourceState = state.sources[s.name]
-    if sourceState and not sourceState.enabled then
-      local b = panel:GetBar(s.name)
-      if b then b:SetState("skipped") end
-    end
-  end
-
-  -- Flip the setup gate ON before triggering the chunked import — the
-  -- driver respects the gate (we made everything else respect it too,
-  -- so this single flag is the difference between "import" and "no-op").
-  -- We flip BEFORE the chunked driver fires its first onSourceStart.
+local function finishSetup()
+  -- alpha18 active-only baseline: Finish does NOT trigger any sibling-
+  -- source backfill. Native captures live from PLAYER_LOGIN forward;
+  -- sibling import returns in alpha19 as a user-initiated, pausable flow.
   TallyDB.setup = TallyDB.setup or {}
-  TallyDB.setup.completed = true
+  TallyDB.setup.completed   = true
   TallyDB.setup.completedAt = time()
   TallyDB.setup.grandfathered = nil
-  -- TLY-35: clear the skip-suppression flag once the user actually
-  -- finishes setup. ShouldShowSetupWizard short-circuits on completed
-  -- before it checks skipped, so this is hygiene rather than load-bearing,
-  -- but it keeps the persisted state legible if a future code path ever
-  -- inverts the priority.
-  TallyDB.setup.skipped = nil
-  TallyDB.setup.skippedAt = nil
-  -- TLY-32 / TLY-35 follow-up: per-character acknowledged marker. Survives
-  -- account-wide TallyDB load failure (constant-table overflow on huge SVs).
+  TallyDB.setup.skipped       = nil
+  TallyDB.setup.skippedAt     = nil
   TallyCharDB = TallyCharDB or {}
   TallyCharDB.tallyAcknowledged = true
   if ns.RefreshLDB then pcall(ns.RefreshLDB) end
-
-  ns.Ledger:ImportFromAllSourcesChunked({
-    chunkSize = preset.chunkSize,
-    delaySec = preset.delaySec,
-    sourceDelay = 0.5,
-    onSourceSkipped = function(name)
-      local b = panel:GetBar(name)
-      if b then b:SetState("skipped") end
-    end,
-    onSourceStart = function(name, label, total)
-      local b = panel:GetBar(name)
-      if not b then return end
-      b:SetState("importing")
-      if total and total > 0 then
-        b:SetTotal(total)
-        b:SetValue(0)
-      end
-    end,
-    onSourceProgress = function(name, inserted, total)
-      local b = panel:GetBar(name)
-      if b then b:SetValue(inserted) end
-    end,
-    onSourceDone = function(name, inserted, skipped)
-      local b = panel:GetBar(name)
-      if b then b:Complete(inserted, skipped) end
-      print(string.format("|cff7fbfffTally:|r %s: %d new entries (%d skipped).",
-        name, inserted, skipped))
-    end,
-    onComplete = function(results)
-      local total = 0
-      for _, r in ipairs(results) do total = total + (r.inserted or 0) end
-      panel:Complete(string.format("Backfill complete — %s entries across %d sources.",
-        BreakUpLargeNumbers and BreakUpLargeNumbers(total) or tostring(total),
-        #results))
-
-      -- Refresh the main UI if it's open so the user immediately sees the new data.
-      if ns.UI.MainFrame and ns.UI.MainFrame:IsShown() then
-        ns.UI.MainFrame:RefreshActivePage()
-      end
-      if ns.RefreshLDB then pcall(ns.RefreshLDB) end
-    end,
-  })
+  print("|cff7fbfffTally:|r setup complete. Tally is now capturing auction-house, vendor, mail, and repair events live.")
 end
 
 -- ============================================================================
@@ -750,18 +378,15 @@ local function createWizardFrame()
 
   wizardWidget = cw:CreateWizard(wizardFrame, {
     steps = {
-      { key = "welcome",  title = "Welcome",       build = function(parent) return buildWelcomeStep(parent) end },
-      { key = "sources",  title = "Data Sources",  build = function(parent) return buildSourcesStep(parent, state) end },
-      { key = "primer",   title = "Concept Primer", build = function(parent) return buildPrimerStep(parent) end },
+      { key = "welcome",  title = "Welcome",          build = function(parent) return buildWelcomeStep(parent) end },
       { key = "strategy", title = "Pricing Strategy", build = function(parent) return buildStrategyStep(parent, state) end },
-      { key = "history",  title = "History",       build = function(parent) return buildHistoryStep(parent, state) end },
-      { key = "backfill", title = "Backfill",      build = function(parent) return buildBackfillStep(parent, state) end },
+      { key = "history",  title = "History",          build = function(parent) return buildHistoryStep(parent, state) end },
     },
-    finishLabel = "Finish & Backfill",
+    finishLabel = "Finish",
     onComplete = function()
       applyState(state)
       wizardFrame:Hide()
-      startBackfill(state)
+      finishSetup()
     end,
     onStepChange = function(_, idx)
       -- TLY-35: the moment the player chooses to move forward (clicks Next

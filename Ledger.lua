@@ -1061,7 +1061,6 @@ end
 local function loadFromDisk()
   TallyDB = TallyDB or {}
   TallyDB.ledger = TallyDB.ledger or {}
-  local L = TallyDB.ledger
 
   if not (LibSerialize and LibDeflate) then
     _workingMem = defaultMem()
@@ -1070,9 +1069,12 @@ local function loadFromDisk()
     return
   end
 
-  -- Modern (TLY-51) path: tiered active + archives.
-  if L.active then
-    local decompressed = LibDeflate:DecompressDeflate(L.active)
+  -- alpha18: active blob lives in TallyActive (its own SV) so it
+  -- doesn't contribute to TallyDB's constant-pool budget. Empty on
+  -- fresh install or after the alpha18 wipe gate has fired.
+  local activeBlob = _G.TallyActive
+  if type(activeBlob) == "string" and #activeBlob > 0 then
+    local decompressed = LibDeflate:DecompressDeflate(activeBlob)
     if decompressed then
       local ok, payload = LibSerialize:Deserialize(decompressed)
       if ok and type(payload) == "table" then
@@ -1084,57 +1086,10 @@ local function loadFromDisk()
         }
         _loaded = true
         _dirty = false
-        -- Legacy archives (TallyDB.ledger.archives[key].blob from prior
-        -- alpha16-candidate builds before the multi-SV switch) migrate
-        -- lazily to slots on first Archive:Load(key). Most operations
-        -- that touch archives (ClearSourceAsync's Delete fast-path,
-        -- gatherRows' GetIndex skip-test) avoid the load entirely when
-        -- archiveIndex carries sourceCounts. Eager migration would
-        -- freeze login by ~150-300ms per archive on the way in.
         return
       end
     end
-    print("|cffff8080Tally:|r ledger active set failed to load — starting fresh. Run /tally setup to backfill from sibling sources.")
-    _workingMem = defaultMem()
-    _loaded = true
-    _dirty = false
-    return
-  end
-
-  -- Migration 1: alpha14/15 single-blob. The full deserialise of a
-  -- 200k+ row legacy blob takes 30-50s synchronously — unacceptable
-  -- as a login freeze. Stash the compressed bytes in pendingLegacy
-  -- and return immediately; PLAYER_LOGIN's deferred handler will call
-  -- Ledger:KickLegacyLoad to async-deserialise across ticks (chunked
-  -- via LibSerialize:DeserializeAsync with a 1024-item yieldCheck).
-  -- Active stays empty during the load window; Count() reads the
-  -- legacy blob's metadata count so the grandfather check still
-  -- recognises the user as already-onboarded.
-  if L.blob then
-    _workingMem = {
-      active = { entries = {}, byId = {} },
-      pendingLegacy = {
-        blob = L.blob,
-        meta = L.blobMeta or {},
-      },
-    }
-    _loaded = true
-    _dirty = false
-    return
-  end
-
-  -- Migration 2: pre-alpha14 raw entries — same pending-migration path.
-  if L.entries then
-    _workingMem = {
-      active = { entries = {}, byId = {} },
-      pendingMigration = {
-        entries = L.entries,
-        byId    = L.byId or {},
-      },
-    }
-    _loaded = true
-    _dirty = false
-    return
+    print("|cffff8080Tally:|r ledger active set failed to load — starting fresh.")
   end
 
   _workingMem = defaultMem()
@@ -1164,17 +1119,6 @@ function Ledger:SaveToDisk()
   if not _dirty then return end
   if not (LibSerialize and LibDeflate) then return end
 
-  -- Mid-migration / mid-load: don't save active and don't clear the
-  -- legacy blob. If we persisted active alongside legacy here, a
-  -- subsequent reload would see both and SaveToDisk's
-  -- migration-completion clear would wipe the legacy blob. Skipping
-  -- the save means a logout during the legacy load or migration
-  -- restarts cleanly from the legacy blob on next session, losing
-  -- only any native events captured in the partial active during
-  -- this session (small window, typically minutes).
-  if _workingMem.pendingLegacy then return end
-  if _workingMem.pendingMigration then return end
-
   local startMs = (debugprofilestop and debugprofilestop()) or 0
 
   local active = _workingMem.active
@@ -1184,9 +1128,14 @@ function Ledger:SaveToDisk()
   local compressed = LibDeflate:CompressDeflate(serialised, { level = 1 })
   local compressedMs = (debugprofilestop and debugprofilestop()) or 0
 
+  -- alpha18: active blob lives in TallyActive (own SV), not
+  -- TallyDB.ledger.active. TallyDB stays free of high-cardinality
+  -- data so the constant-pool overflow that haunted alpha13 and
+  -- alpha16 can't recur from a growing active set.
+  _G.TallyActive = compressed
+
   TallyDB = TallyDB or {}
   TallyDB.ledger = TallyDB.ledger or {}
-  TallyDB.ledger.active = compressed
   TallyDB.ledger.activeMeta = {
     count             = #active.entries,
     savedAt           = time(),
@@ -1196,12 +1145,6 @@ function Ledger:SaveToDisk()
     compressMs        = math.floor(compressedMs - serialisedMs),
     schemaVer         = self.SCHEMA_VERSION,
   }
-  -- Migration completion: clear legacy fields once the new-shape save
-  -- lands. From here on WoW persists active + activeMeta + archives only.
-  TallyDB.ledger.blob = nil
-  TallyDB.ledger.blobMeta = nil
-  TallyDB.ledger.entries = nil
-  TallyDB.ledger.byId    = nil
 
   _dirty = false
 end
@@ -2750,7 +2693,8 @@ function Ledger:Clear()
     end
     ns.Archive:UnloadAll()
   end
-  TallyDB.ledger = {}  -- drop active blob + activeMeta + archives + archiveSlots + archiveIndex + nextSlot
+  TallyDB.ledger = {}  -- drop activeMeta + archives + archiveSlots + archiveIndex + nextSlot
+  _G.TallyActive = nil  -- alpha18: active blob lives in its own SV
   _workingMem = defaultMem()
   _loaded = true
   _dirty = true
