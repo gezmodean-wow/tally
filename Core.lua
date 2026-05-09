@@ -896,6 +896,121 @@ local function inspectWarbandProbe()
   return { error = tostring(wb) }
 end
 
+-- Per-character gold accounting probe. Walks every character Syndicator
+-- knows about plus every character in TallyDB.inventoryRollup, comparing
+-- the two sides. Surfaces three failure modes that would silently
+-- under-count a player's total gold:
+--   * Syndicator has the char but `data.money` is nil → `or 0` fallback
+--     in projectCharacter zeroes that char's contribution to net worth.
+--   * Char is in GetAllCharacters() but GetByCharacterFullName returns
+--     nil → projectCharacter returns nil and the rollup never gets an
+--     entry for that char at all.
+--   * Char is in the rollup but Syndicator no longer reports it →
+--     stale rollup entry whose .gold reflects the last seen value.
+-- Probes warband[1..4] separately in case the player has multiple WoW
+-- accounts under one Bnet (each account has its own warband) — a setup
+-- where Tally currently only reads warband[1].
+local function inspectGold()
+  local out = { perChar = {}, summary = {}, warbandProbe = {} }
+
+  local available = type(_G.Syndicator) == "table" and type(_G.Syndicator.API) == "table"
+  if not available then
+    out.error = "Syndicator API unavailable"
+    return out
+  end
+
+  local rollup       = TallyDB and TallyDB.inventoryRollup
+  local rollupChars  = (rollup and rollup.characters) or {}
+
+  local syndicatorChars = {}
+  if _G.Syndicator.API.GetAllCharacters then
+    local ok, chars = pcall(_G.Syndicator.API.GetAllCharacters)
+    if ok and type(chars) == "table" then
+      for _, ck in ipairs(chars) do syndicatorChars[ck] = true end
+    end
+  end
+
+  local seen = {}
+  for ck in pairs(syndicatorChars) do seen[ck] = true end
+  for ck in pairs(rollupChars)      do seen[ck] = true end
+
+  local sortedKeys = {}
+  for ck in pairs(seen) do sortedKeys[#sortedKeys + 1] = ck end
+  table.sort(sortedKeys)
+
+  local synSum, rollupSum = 0, 0
+  local nilMoney, zeroMoney, missingRollup, staleRollup = 0, 0, 0, 0
+
+  for _, ck in ipairs(sortedKeys) do
+    local e = { charKey = ck }
+
+    if syndicatorChars[ck] and _G.Syndicator.API.GetByCharacterFullName then
+      local ok, data = pcall(_G.Syndicator.API.GetByCharacterFullName, ck)
+      if ok and type(data) == "table" then
+        e.syndicatorSeen  = true
+        e.syndicatorMoney = data.money
+        if data.money == nil then
+          e.flag = "money-nil"
+          nilMoney = nilMoney + 1
+        elseif data.money == 0 then
+          e.flag = "money-zero"
+          zeroMoney = zeroMoney + 1
+        end
+        if type(data.money) == "number" then synSum = synSum + data.money end
+      else
+        e.syndicatorSeen = false
+      end
+    else
+      e.syndicatorSeen = false
+    end
+
+    local rEntry = rollupChars[ck]
+    if rEntry then
+      e.inRollup   = true
+      e.rollupGold = rEntry.gold or 0
+      rollupSum    = rollupSum + e.rollupGold
+      if not syndicatorChars[ck] then
+        e.flag = e.flag or "stale-rollup"
+        staleRollup = staleRollup + 1
+      end
+    else
+      e.inRollup = false
+      e.flag     = e.flag or "missing-from-rollup"
+      missingRollup = missingRollup + 1
+    end
+
+    out.perChar[#out.perChar + 1] = e
+  end
+
+  out.summary = {
+    charCount               = #sortedKeys,
+    syndicatorSumCopper     = synSum,
+    rollupSumCopper         = rollupSum,
+    deltaCopper             = synSum - rollupSum,
+    nilMoneyCount           = nilMoney,
+    zeroMoneyCount          = zeroMoney,
+    missingFromRollupCount  = missingRollup,
+    staleRollupCount        = staleRollup,
+  }
+
+  if _G.Syndicator.API.GetWarband then
+    for idx = 1, 4 do
+      local ok, wb = pcall(_G.Syndicator.API.GetWarband, idx)
+      if ok and type(wb) == "table" then
+        out.warbandProbe[idx] = { money = wb.money }
+      end
+    end
+  end
+
+  if rollup and rollup.warband then
+    out.warband = {
+      rollupGold = rollup.warband.gold or 0,
+    }
+  end
+
+  return out
+end
+
 local function inspectLedger()
   if not (ns.Ledger and ns.Ledger.Stats) then return nil end
   local stats = ns.Ledger:Stats({})
@@ -977,6 +1092,7 @@ local DIAG_INSPECTORS = {
   { name = "Inventory",       fn = inspectInventory },
   { name = "CurrentChar",     fn = inspectCurrentChar },
   { name = "WarbandProbe",    fn = inspectWarbandProbe },
+  { name = "Gold",            fn = inspectGold },
   { name = "Ledger",          fn = inspectLedger },
   { name = "Storage",         fn = inspectStorage },
   { name = "SkipCounters",    fn = inspectSkipCounters },
@@ -1362,6 +1478,100 @@ end
 
 ns.DivergenceReportText = formatDivergenceReport
 ns.DivergenceCopyDialog = divergenceCopyDialog
+
+-- Focused gold-accounting report. Columnar per-character listing of
+-- Syndicator-reported money vs Tally rollup gold, with summary totals
+-- and warband[1..4] probes. Companion to inspectGold above; this is the
+-- paste-friendly text formatter for `/tally diag gold`.
+local function formatGoldReport()
+  local g = inspectGold()
+  if g.error then
+    return "=== Tally — gold accounting report ===\n" .. g.error
+  end
+
+  local function gFromCopper(copper)
+    return math.floor((copper or 0) / 10000)
+  end
+
+  local function fmtG(copper)
+    return BreakUpLargeNumbers and BreakUpLargeNumbers(gFromCopper(copper))
+                              or tostring(gFromCopper(copper))
+  end
+
+  local lines = {}
+  local push = function(s) lines[#lines + 1] = s end
+
+  push("=== Tally — gold accounting report ===")
+  push("Generated: " .. date("%Y-%m-%d %H:%M:%S"))
+  push("")
+
+  local s = g.summary
+  push(string.format("Characters seen (Syndicator + rollup): %d", s.charCount or 0))
+  push(string.format("Syndicator total: %s g", fmtG(s.syndicatorSumCopper)))
+  push(string.format("Rollup total:     %s g", fmtG(s.rollupSumCopper)))
+  push(string.format("Delta (syn - rollup): %s g", fmtG(s.deltaCopper)))
+
+  if (s.nilMoneyCount or 0) > 0 then
+    push(string.format(">> %d characters report nil .money in Syndicator data", s.nilMoneyCount))
+  end
+  if (s.zeroMoneyCount or 0) > 0 then
+    push(string.format(">> %d characters report .money = 0", s.zeroMoneyCount))
+  end
+  if (s.missingFromRollupCount or 0) > 0 then
+    push(string.format(">> %d Syndicator characters are missing from Tally rollup", s.missingFromRollupCount))
+  end
+  if (s.staleRollupCount or 0) > 0 then
+    push(string.format(">> %d rollup characters are no longer in Syndicator", s.staleRollupCount))
+  end
+
+  push("")
+  push("Per-character (sorted by Syndicator gold descending):")
+  push(string.format("  %-40s  %-14s  %-14s  %s", "charKey", "syndicator", "rollup", "flag"))
+
+  table.sort(g.perChar, function(a, b)
+    return (a.syndicatorMoney or -1) > (b.syndicatorMoney or -1)
+  end)
+
+  for _, e in ipairs(g.perChar) do
+    local synStr = e.syndicatorMoney
+                   and (fmtG(e.syndicatorMoney) .. " g")
+                   or  "(nil)"
+    local rolStr = e.inRollup
+                   and (fmtG(e.rollupGold) .. " g")
+                   or  "(missing)"
+    local flag   = e.flag or ""
+    push(string.format("  %-40s  %-14s  %-14s  %s", e.charKey, synStr, rolStr, flag))
+  end
+
+  push("")
+  push("Warband:")
+  if g.warband then
+    push(string.format("  Rollup gold: %s g", fmtG(g.warband.rollupGold)))
+  end
+  for idx = 1, 4 do
+    local p = g.warbandProbe[idx]
+    if p then
+      local m = p.money and (fmtG(p.money) .. " g") or "(nil)"
+      push(string.format("  Syndicator warband[%d].money: %s", idx, m))
+    end
+  end
+
+  return table.concat(lines, "\n")
+end
+
+local function goldCopyDialog()
+  local text = formatGoldReport()
+  if Cogworks and Cogworks.CreateCopyDialog then
+    Cogworks:CreateCopyDialog(text,
+      "Tally gold report — paste into a GitHub issue.")
+  else
+    print("|cffff4040Tally:|r CreateCopyDialog unavailable; printing to chat.")
+    for line in text:gmatch("[^\n]+") do print(line) end
+  end
+end
+
+ns.GoldReportText = formatGoldReport
+ns.GoldCopyDialog = goldCopyDialog
 
 -- Live debug console — opens Cogworks's CreateDebugConsole({ cog = "Tally" }).
 -- Singleton: one console instance reused across slash invocations. Position,
@@ -1767,16 +1977,17 @@ if Cogworks and Cogworks.RegisterSlashCommands then
       },
       {
         name = "diag", aliases = { "diagnostic" },
-        args = "[divergence|chat]",
+        args = "[divergence|gold|chat]",
         -- TLY-45 + alpha10 debug-UX: default opens the structured copy
         -- dialog (was: chat dump). Chat is preserved as `/tally diag
         -- chat` for users who specifically want inline output. `copy`
         -- stays as a no-op alias for the default to avoid breaking
         -- muscle memory from earlier alphas.
-        help = "Open diagnostic dump as a copy dialog. `divergence` for source-coverage report; `chat` to print inline.",
+        help = "Open diagnostic dump as a copy dialog. `divergence` for source-coverage report; `gold` for per-character gold accounting; `chat` to print inline.",
         run = function(rest)
           local sub = rest and rest:lower() or ""
           if sub == "divergence" then divergenceCopyDialog()
+          elseif sub == "gold" then goldCopyDialog()
           elseif sub == "chat" then diagPrintChat()
           else diagOpenCopyDialog() end
         end,
