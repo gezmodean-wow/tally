@@ -8,6 +8,32 @@ The engineering-detail companion lives in `CHANGELOG.md` (commit-readerese — f
 
 ## Unreleased
 
+## v0.1.0-alpha18
+
+The architecture rewrite, phase 1. **Your Tally ledger has been wiped as part of this upgrade — that's intentional, not a bug.** Settings, history snapshots, your pricing strategy, and your minimap button position are preserved; only the transaction ledger was reset. Sibling-source import (TSM, FlipQueue, Journalator) returns in the next alpha as a user-initiated, pausable flow.
+
+### Why the wipe
+
+For the last several alphas, very large accounts have been hitting a Lua data-storage limit that breaks Tally's saved-variables file outright. alpha14 worked around it with compression; alpha16 worked around it with per-month archive files. Both pushed the wall further out without removing it. alpha18 removes the wall structurally: the active ledger now lives in its own saved-variables file, and the main file holds nothing that grows with how much you trade. The wipe is the clean break between "old layout" and "new layout" — there's no in-place migration because the new layout is incompatible enough that we'd rather start fresh than risk corrupting anyone's data.
+
+### What happens on first login
+
+When you log into your first character on alpha18, the welcome wizard pops up explaining the reset. It's now a three-step flow — Welcome / Pricing Strategy / History — and **clicking Finish doesn't import anything**. From this login forward, Tally captures auction-house, vendor, mail, and repair events live as they happen. The Research, Lifecycle, and Compare tabs will be empty until enough activity accumulates.
+
+This is a deliberate scope retreat. The old Tally tried to be the universal repository for your transaction history — re-importing every sibling addon's data on every character login. For people running through 20+ characters per session, that re-import work was the single biggest reason logins stayed slow. Going forward, Tally treats sibling addons as the authoritative store for their own data and pulls from them only when you ask for it.
+
+### Help us pick the import speed for next alpha
+
+Once alpha18 is loaded, run **`/tally diag sources`** and paste the result into [TLY-66](https://github.com/gezmodean-wow/tally/issues/66) on GitHub or the Discord thread. The command walks your TSM Accounting / FlipQueue / Journalator data once and reports how many rows each addon has, what time span it covers, and how the rows distribute across months. We'll use the readouts to size alpha19's import controller against real big-account distributions instead of guessing.
+
+A heads-up: on accounts with very large TSM CSVs (tens of thousands of rows or more) the command takes several seconds and the client will appear to freeze briefly while it parses. That's expected — it's a one-time diagnostic, not a recurring background task.
+
+### Net-worth gold accounting is more reliable
+
+Tally now captures your character's gold directly from WoW at login and whenever your wallet changes, and your warband-bank gold whenever you open the account banker. Net Worth prefers these captured values over the Syndicator snapshot it was relying on before, so characters that occasionally dropped out of the per-character rollup should stop disappearing.
+
+If you were affected by the gold-accounting issue tracked in [TLY-68](https://github.com/gezmodean-wow/tally/issues/68), you can check whether Tally's own capture is in play for each character via `/tally diag gold`. The `rollup` column shows the value Net Worth is actually using; characters where Tally's capture is fresher than Syndicator's show up there directly.
+
 ## v0.1.0-alpha17
 
 A focused diagnostic alpha. Toeknee reported on alpha16 that Tally's net-worth view was showing different gold totals than his actual characters and warbank — 29M shown for warbank vs 37M actual, 179M shown for characters vs 108M actual. Two separate things look likely (the Warband panel row combining gold and warband-item value into one figure, plus one or more characters dropping out of the per-character rollup), but we need data from a real big-roster account to tell which is biting and on which characters.
