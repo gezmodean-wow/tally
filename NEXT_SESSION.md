@@ -52,6 +52,7 @@ User-confirmed (2026-05-11). No further Toeknee or zong follow-up ask. alpha18 c
 ### Anchor work
 
 - **[TLY-69](https://github.com/gezmodean-wow/tally/issues/69) — multi-source gold authority + provenance.** Filed 2026-05-11. Each gold-bearing source gets `:ProbeCharGold(charKey)` returning `{ money, moneyAt, source }`. `Inventory.preferredCharGold` walks them, picks the freshest by `moneyAt`. Sources for v1: `tally-native` (alpha18 capture, already wired), `syndicator`, `tsm` (TSM Accounting's per-char goldLog — same CSV-string shape as the existing csvSales/csvBuys Tally already parses). Stretch: `accountant` adapter. `/tally diag gold` gains a per-source column + provenance "source" column. Same authority pattern Ledger:Reconcile uses today, ported to gold.
+- **[TLY-70](https://github.com/gezmodean-wow/tally/issues/70) — output-channel consolidation.** Filed 2026-05-11. Migrate ~165 `print(...)` call sites off chat onto the right channel per the new taxonomy: status → `cw:Toast`, errors → `cw:Toast` with severity, inspectable → `cw:CreateCopyDialog` (already convention), engineering → `ns.dbg:PrintDebug` + `cw:CreateDebugConsole`. Cogworks v0.13.2 ships all primitives. New code paths (TLY-69 et al.) adopt the conventions from the start; existing call sites migrate in cohort batches by file. May split across alpha19/20 if too large for one ship.
 - **Manual import controller in setup wizard.** Was in the original alpha19 plan. Pause/resume/per-cycle row budget. Starting budget 10k rows per cycle; testers refine via the sibling probe data (`/tally diag sources`) on actual rosters.
 - **On-demand period synthesis.** When Research/Lifecycle/Compare query a period without a Tally archive, synthesise from siblings, persist into a slot, return. LRU eviction when slot pool fills.
 
@@ -86,6 +87,7 @@ Open issues most relevant to alpha19:
 - **[TLY-67](https://github.com/gezmodean-wow/tally/issues/67)** — minimap forgets placement. Small bug, alpha19+.
 - **[TLY-68](https://github.com/gezmodean-wow/tally/issues/68)** — gold accounting investigation. Foundation shipped in alpha18; closes once alpha19 lands TLY-69.
 - **[TLY-69](https://github.com/gezmodean-wow/tally/issues/69)** — multi-source gold authority. alpha19 anchor.
+- **[TLY-70](https://github.com/gezmodean-wow/tally/issues/70)** — output-channel consolidation (chat → toasts / debug log / copy dialog). alpha19 scope; may split into multi-alpha cohorts.
 
 ## Backlog (post-alpha19)
 
