@@ -340,22 +340,44 @@ function ns.UI.CreateNetWorthPage(parent)
 
     valSnaps:SetText(tostring(#series))
 
-    -- Per-character table (sorted by total descending). Warband row appears
-    -- as a synthetic entry when its total is non-zero. Sub-line shows
-    -- gold-vs-items split + share of total — answers "why is this char
-    -- dominant" at a glance (a flipper's hoard reads "5% gold + 95% items
-    -- = 32% of total"). For the full per-item view, the Inventory tab.
+    -- Per-character table (sorted by total descending). Warband contributes
+    -- two synthetic rows (gold + items) instead of one combined entry so
+    -- the headline number per row is unambiguously gold OR items — pre-fix
+    -- a single "Warband: 37M" row read as "warband gold = 37M" to testers
+    -- when the actual breakdown was 29M gold + 8M items (TLY-68). Char
+    -- rows stay as one row per character (`total` headline + gold/items
+    -- percentage split in the sub-line) since the per-character mental
+    -- model is "this character's wealth", not "this character's gold".
     local rows = {}
     for charKey, data in pairs(current.byCharacter or {}) do
-      rows[#rows + 1] = { key = charKey, total = data.total, gold = data.gold or 0, items = data.items or 0 }
-    end
-    if current.warband and current.warband.total and current.warband.total > 0 then
       rows[#rows + 1] = {
-        key = "Warband",
-        total = current.warband.total,
-        gold = current.warband.gold or 0,
-        items = current.warband.items or 0,
+        key          = charKey,
+        kind         = "char",
+        total        = data.total,
+        gold         = data.gold or 0,
+        items        = data.items or 0,
+        inventoryKey = charKey,
       }
+    end
+    if current.warband then
+      local wbGold = current.warband.gold or 0
+      local wbItems = current.warband.items or 0
+      if wbGold > 0 then
+        rows[#rows + 1] = {
+          key          = "Warband — gold",
+          kind         = "warband-gold",
+          total        = wbGold,
+          inventoryKey = "Warband",
+        }
+      end
+      if wbItems > 0 then
+        rows[#rows + 1] = {
+          key          = "Warband — items",
+          kind         = "warband-items",
+          total        = wbItems,
+          inventoryKey = "Warband",
+        }
+      end
     end
     table.sort(rows, function(a, b) return a.total > b.total end)
 
@@ -363,13 +385,21 @@ function ns.UI.CreateNetWorthPage(parent)
     for i, r in ipairs(rows) do
       local row = getCharRow(i)
       row:SetPoint("TOP", charContent, "TOP", 0, -(i - 1) * rowHeight)
-      row._charKey = r.key
+      row._charKey = r.inventoryKey or r.key
       row.name:SetText(r.key)
       row.value:SetText(formatGoldShort(r.total))
       local pctOfTotal = current.total > 0 and (r.total / current.total * 100) or 0
-      local goldPct = r.total > 0 and (r.gold / r.total * 100) or 0
-      row.sub:SetText(string.format("|cff999999%.0f%% of net  -  %.0f%% gold / %.0f%% items  -  click for items|r",
-        pctOfTotal, goldPct, 100 - goldPct))
+      if r.kind == "warband-gold" then
+        row.sub:SetText(string.format(
+          "|cff999999%.0f%% of net  -  warband bank gold  -  click for items|r", pctOfTotal))
+      elseif r.kind == "warband-items" then
+        row.sub:SetText(string.format(
+          "|cff999999%.0f%% of net  -  warband bank items  -  click for items|r", pctOfTotal))
+      else
+        local goldPct = r.total > 0 and (r.gold / r.total * 100) or 0
+        row.sub:SetText(string.format("|cff999999%.0f%% of net  -  %.0f%% gold / %.0f%% items  -  click for items|r",
+          pctOfTotal, goldPct, 100 - goldPct))
+      end
       row:Show()
     end
     for i = #rows + 1, #charRows do charRows[i]:Hide() end
