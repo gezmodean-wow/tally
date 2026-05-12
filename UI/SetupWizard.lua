@@ -10,16 +10,19 @@
 -- TallyDB.inventoryRollup is missing AND any sibling source is detected,
 -- OR manually from Settings → "Re-run setup".
 --
--- Steps:
---   1. Welcome — what Tally is
---   2. Source detection — live row counts per registered source
---   3. Concept primer — net vs owned vs warband, live values
---   4. Strategy picker — bag valued under 4 presets
---   5. History config — cadence/retention sliders + estimated SV size
---   6. Backfill kickoff — pace selector (gentle / aggressive) + Start
+-- Steps (alpha19):
+--   1. Welcome           — what Tally is
+--   2. Strategy picker   — bag valued under 4 presets
+--   3. History cadence   — interval + retention inputs
+--   4. Backfill sources  — per-source opt-in + window selector (conditional;
+--                          only registered when sibling sources are detected)
+--   5. Backfill pace     — pace preset + budget/delay inputs + live estimate
+--                          (conditional; companion to step 4)
 --
--- After Finish: closes the wizard, opens the progress widget, runs
--- Ledger:ImportFromAllSourcesChunked.
+-- After Finish: applies strategy + history config, persists per-source
+-- enablement to TallyDB.disabledSources, and (when sibling sources are
+-- detected) queues the chunked backfill via the import controller — runs
+-- in a detached widget, doesn't block the wizard close.
 
 local addonName, ns = ...
 ns.UI = ns.UI or {}
@@ -52,6 +55,22 @@ end
 -- Wizard state (shared across step builders)
 -- ============================================================================
 
+-- Pace presets. Step 5 lets users pick one, then tune budget/delay
+-- independently. The radios stay selected as long as state.budgetRows and
+-- state.delaySec exactly match a preset; manual edits drop the selection
+-- to a "custom" state (no radio checked) so the player knows their numbers
+-- are bespoke.
+local PACE_PRESETS = {
+  { key = "gentle",     label = "Gentle",     budget =  5000, delay = 3.0 },
+  { key = "balanced",   label = "Balanced",   budget = 10000, delay = 2.0 },
+  { key = "aggressive", label = "Aggressive", budget = 25000, delay = 1.0 },
+}
+
+local function presetByKey(key)
+  for _, p in ipairs(PACE_PRESETS) do if p.key == key then return p end end
+  return PACE_PRESETS[1]
+end
+
 local function makeState()
   local sources = {}
   if ns.Ledger and ns.Ledger.GetSources then
@@ -59,13 +78,147 @@ local function makeState()
       sources[s.name] = { enabled = true, name = s.name, label = s.label }
     end
   end
+  local defaultPace = presetByKey("balanced")
   return {
     sources = sources,
     strategy = (ns.NetWorth and ns.NetWorth:GetStrategy()) or "DBRegionMarketAvg",
     historyIntervalHours = 12,
     historyRetentionDays = 90,
-    pace = "gentle",  -- "gentle" | "balanced" | "aggressive"
+    -- Backfill sources & window
+    windowMonths = 12,                  -- 1 | 3 | 12 | 0 (all)
+    -- Backfill pace (defaults to "balanced" — 10k rows / 2.0s, matching
+    -- TLY-71's starting point. Testers tune via the probe data on Step 4.)
+    pace          = "balanced",
+    budgetRows    = defaultPace.budget,
+    delaySec      = defaultPace.delay,
+    -- Probe cache. Populated lazily on Step 4 entry — each adapter's
+    -- :ProbeMetadata() is O(rows) and we don't want to pay it twice when
+    -- the player flips back and forth between steps.
+    probes        = nil,                -- { [name] = probe } once computed
   }
+end
+
+-- ============================================================================
+-- Sibling-source helpers
+-- ============================================================================
+
+-- Sibling sources that are loaded + have a probe. Native is excluded; it's
+-- event-driven and has no historical rows to backfill. Returns the registry
+-- entries in registration order so the wizard renders them in a stable list.
+local function detectImportableSources()
+  if not (ns.Ledger and ns.Ledger.GetSources) then return {} end
+  local out = {}
+  for _, s in ipairs(ns.Ledger:GetSources()) do
+    if s.name ~= "native" and ns.Ledger:IsSourceAvailable(s.name) then
+      out[#out + 1] = s
+    end
+  end
+  return out
+end
+
+-- Live count of months touched by the probe's byMonth distribution. Probes
+-- only populate byMonth when rows survived the parse, so an empty byMonth
+-- is a valid "0 rows" signal.
+local function probeMonthCount(probe)
+  if type(probe) ~= "table" or type(probe.byMonth) ~= "table" then return 0 end
+  local n = 0
+  for _ in pairs(probe.byMonth) do n = n + 1 end
+  return n
+end
+
+local function formatNumber(n)
+  if BreakUpLargeNumbers then return BreakUpLargeNumbers(n or 0) end
+  return tostring(n or 0)
+end
+
+local function formatProbeSummary(probe)
+  if type(probe) ~= "table" then return "scanning…" end
+  if probe.error then return "(error: " .. tostring(probe.error) .. ")" end
+  if not probe.available then return "(not available)" end
+  if not probe.count or probe.count == 0 then return "0 rows" end
+  if not probe.fromTs or not probe.toTs then
+    return formatNumber(probe.count) .. " rows"
+  end
+  return string.format("%s rows · %s -> %s · %d months",
+    formatNumber(probe.count),
+    date("%Y-%m", probe.fromTs),
+    date("%Y-%m", probe.toTs),
+    probeMonthCount(probe))
+end
+
+-- Run :ProbeMetadata on each importable source. Block-probes — for a
+-- 90k-row TSM CSV this is multi-second on the input thread. Tradeoff is
+-- worth taking on a one-time setup flow; if testers complain we yield it
+-- per-source via C_Timer.After.
+local function runProbes(importable)
+  local probes = {}
+  for _, s in ipairs(importable) do
+    local adapter = ns.Sources and ns.Sources[
+      ({ tsm = "TSM", flipqueue = "FlipQueue", journalator = "Journalator" })[s.name]
+      or s.name
+    ]
+    if not adapter or type(adapter.ProbeMetadata) ~= "function" then
+      probes[s.name] = { available = false, error = "no probe" }
+    else
+      local ok, result = pcall(adapter.ProbeMetadata, adapter)
+      if not ok then
+        probes[s.name] = { available = false, error = tostring(result) }
+      else
+        probes[s.name] = result
+      end
+    end
+  end
+  return probes
+end
+
+-- Sum rows from each enabled source's byMonth distribution that fall
+-- inside the window. windowMonths == 0 (or nil) means "all history".
+local function estimateRows(state, importable)
+  if not state.probes then return 0 end
+  local windowMonths = state.windowMonths or 0
+  local cutoffMonth = nil
+  if windowMonths > 0 then
+    cutoffMonth = date("%Y-%m", time() - windowMonths * 30 * 86400)
+  end
+  local total = 0
+  for _, s in ipairs(importable) do
+    local enabled = state.sources[s.name] and state.sources[s.name].enabled
+    local probe   = state.probes[s.name]
+    if enabled and probe and probe.available then
+      if cutoffMonth and type(probe.byMonth) == "table" then
+        for mk, n in pairs(probe.byMonth) do
+          if mk >= cutoffMonth then total = total + n end
+        end
+      else
+        total = total + (probe.count or 0)
+      end
+    end
+  end
+  return total
+end
+
+-- Convert (rows, budget, delay) → estimated wall-clock seconds. Each cycle
+-- is `budget` rows + `delay` seconds; on big imports the per-cycle work is
+-- dominated by the delay (parse + insert are sub-frame on modern hardware
+-- for 10k-row chunks). Returns 0 if rows or budget is zero.
+local function estimateSeconds(totalRows, budgetRows, delaySec)
+  if totalRows <= 0 or budgetRows <= 0 then return 0 end
+  local cycles = math.ceil(totalRows / budgetRows)
+  return cycles * (delaySec or 0)
+end
+
+local function formatDuration(seconds)
+  seconds = math.max(0, math.floor(seconds))
+  if seconds < 60 then return seconds .. "s" end
+  local m = math.floor(seconds / 60)
+  local s = seconds % 60
+  if m < 60 then
+    if s == 0 then return m .. "m" end
+    return string.format("%dm %ds", m, s)
+  end
+  local h = math.floor(m / 60)
+  m = m % 60
+  return string.format("%dh %dm", h, m)
 end
 
 -- ============================================================================
@@ -288,6 +441,362 @@ local function buildHistoryStep(parent, state)
 end
 
 -- ============================================================================
+-- Step 4 — sources & window
+-- ============================================================================
+--
+-- Per-source checkbox row + window radio set. The probe runs once on first
+-- entry (blocking; multi-second on big TSM CSVs) and caches into state.probes
+-- so re-entries from Previous are instant. Each row's summary text refreshes
+-- when state changes elsewhere via the panel:RefreshEstimates closure that
+-- Step 5 installs onto state — the only cross-step coupling.
+
+local function buildSourcesStep(parent, state, importable)
+  local f = CreateFrame("Frame", nil, parent)
+  f:SetAllPoints(parent)
+
+  local title = f:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+  title:SetPoint("TOPLEFT", f, "TOPLEFT", 12, -12)
+  title:SetText("Backfill — sources & window")
+  title:SetTextColor(themeColor("brass", { 0.83, 0.63, 0.09, 1 }))
+
+  local intro = f:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+  intro:SetPoint("TOPLEFT", title, "BOTTOMLEFT", 0, -8)
+  intro:SetPoint("RIGHT", f, "RIGHT", -12, 0)
+  intro:SetJustifyH("LEFT")
+  intro:SetSpacing(2)
+  intro:SetText("Pull historical transactions from sibling addons. Each "
+    .. "source has a read-only metadata probe so you can see how much "
+    .. "history is on offer before committing. Toggle the ones you want; "
+    .. "pick a window to bound the import. Tally always keeps capturing "
+    .. "live regardless of what you import.")
+
+  -- Header row above the source list.
+  local sourceHeader = f:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+  sourceHeader:SetPoint("TOPLEFT", intro, "BOTTOMLEFT", 0, -14)
+  sourceHeader:SetJustifyH("LEFT")
+  sourceHeader:SetText("Sources")
+
+  -- Source row stack. Each row gets a checkbox + label + summary FontString.
+  -- Summary text initially reads "scanning…"; flips to the probe summary
+  -- once runProbes finishes.
+  local rowHost = CreateFrame("Frame", nil, f)
+  rowHost:SetPoint("TOPLEFT", sourceHeader, "BOTTOMLEFT", 0, -4)
+  rowHost:SetPoint("RIGHT", f, "RIGHT", -12, 0)
+  rowHost:SetHeight(#importable * 22 + 4)
+
+  local sourceRows = {}
+  for i, s in ipairs(importable) do
+    local row = CreateFrame("Frame", nil, rowHost)
+    row:SetPoint("TOPLEFT", rowHost, "TOPLEFT", 0, -((i - 1) * 22))
+    row:SetPoint("RIGHT", rowHost, "RIGHT", 0, 0)
+    row:SetHeight(20)
+
+    local cb = CreateFrame("CheckButton", nil, row, "UICheckButtonTemplate")
+    cb:SetSize(20, 20)
+    cb:SetPoint("LEFT", row, "LEFT", 0, 0)
+    local enabled = state.sources[s.name] and state.sources[s.name].enabled
+    cb:SetChecked(enabled ~= false)
+    cb:SetScript("OnClick", function(self)
+      state.sources[s.name] = state.sources[s.name] or { name = s.name, label = s.label }
+      state.sources[s.name].enabled = self:GetChecked() and true or false
+      if state.refreshEstimate then state.refreshEstimate() end
+    end)
+
+    local lbl = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    lbl:SetPoint("LEFT", cb, "RIGHT", 4, 0)
+    lbl:SetWidth(140)
+    lbl:SetJustifyH("LEFT")
+    lbl:SetText(s.label or s.name)
+
+    local summary = row:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+    summary:SetPoint("LEFT", lbl, "RIGHT", 8, 0)
+    summary:SetPoint("RIGHT", row, "RIGHT", -4, 0)
+    summary:SetJustifyH("LEFT")
+    summary:SetWordWrap(false)
+    summary:SetText("scanning…")
+
+    sourceRows[s.name] = { cb = cb, summary = summary }
+  end
+
+  -- Window selector. Four mutually-exclusive options; default "last 12mo".
+  -- 0 means "all history" — sends no cutoff to the import driver.
+  local windowHeader = f:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+  windowHeader:SetPoint("TOPLEFT", rowHost, "BOTTOMLEFT", 0, -12)
+  windowHeader:SetJustifyH("LEFT")
+  windowHeader:SetText("Window")
+
+  local WINDOWS = {
+    { months =  1, label = "Last 30 days"  },
+    { months =  3, label = "Last 90 days"  },
+    { months = 12, label = "Last 12 months" },
+    { months =  0, label = "All history"   },
+  }
+
+  local windowHost = CreateFrame("Frame", nil, f)
+  windowHost:SetPoint("TOPLEFT", windowHeader, "BOTTOMLEFT", 0, -4)
+  windowHost:SetPoint("RIGHT", f, "RIGHT", -12, 0)
+  windowHost:SetHeight(#WINDOWS * 22 + 4)
+
+  local windowRadios = {}
+  for i, w in ipairs(WINDOWS) do
+    local row = CreateFrame("Frame", nil, windowHost)
+    row:SetPoint("TOPLEFT", windowHost, "TOPLEFT", 0, -((i - 1) * 22))
+    row:SetPoint("RIGHT", windowHost, "RIGHT", 0, 0)
+    row:SetHeight(20)
+
+    local rb = CreateFrame("CheckButton", nil, row, "UIRadioButtonTemplate")
+    rb:SetSize(18, 18)
+    rb:SetPoint("LEFT", row, "LEFT", 0, 0)
+    rb:SetChecked(w.months == state.windowMonths)
+    windowRadios[#windowRadios + 1] = { rb = rb, months = w.months }
+
+    local lbl = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    lbl:SetPoint("LEFT", rb, "RIGHT", 4, 0)
+    lbl:SetWidth(160)
+    lbl:SetJustifyH("LEFT")
+    lbl:SetText(w.label)
+
+    rb:SetScript("OnClick", function()
+      state.windowMonths = w.months
+      for _, r in ipairs(windowRadios) do r.rb:SetChecked(r.months == w.months) end
+      if state.refreshEstimate then state.refreshEstimate() end
+    end)
+  end
+
+  -- ---------------------------------------------------------------------
+  -- Probe + refresh
+  -- ---------------------------------------------------------------------
+  -- The probe is the expensive bit; defer until the step is shown so the
+  -- earlier steps aren't held up by it. C_Timer.After yields one frame so
+  -- the "scanning…" labels render before the block-probe starts.
+
+  local function paintSummaries()
+    for _, s in ipairs(importable) do
+      local row = sourceRows[s.name]
+      if row then
+        local probe = state.probes and state.probes[s.name]
+        row.summary:SetText(formatProbeSummary(probe))
+      end
+    end
+  end
+
+  f:SetScript("OnShow", function()
+    if state.probes then
+      paintSummaries()
+      return
+    end
+    if C_Timer and C_Timer.After then
+      C_Timer.After(0.05, function()
+        state.probes = runProbes(importable)
+        paintSummaries()
+        if state.refreshEstimate then state.refreshEstimate() end
+      end)
+    else
+      state.probes = runProbes(importable)
+      paintSummaries()
+    end
+  end)
+
+  return f
+end
+
+-- ============================================================================
+-- Step 5 — pace & start
+-- ============================================================================
+--
+-- Pace preset radios + numeric budget/delay inputs + a live estimate line.
+-- Editing budget/delay manually drops the preset selection to no-radio
+-- (custom) so players know their numbers are bespoke. The estimate refreshes
+-- on every state change via state.refreshEstimate — installed here, called
+-- from Step 4 when window/source toggles change row totals.
+
+local function buildPaceStep(parent, state, importable)
+  local f = CreateFrame("Frame", nil, parent)
+  f:SetAllPoints(parent)
+
+  local title = f:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+  title:SetPoint("TOPLEFT", f, "TOPLEFT", 12, -12)
+  title:SetText("Backfill — pace & start")
+  title:SetTextColor(themeColor("brass", { 0.83, 0.63, 0.09, 1 }))
+
+  local intro = f:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+  intro:SetPoint("TOPLEFT", title, "BOTTOMLEFT", 0, -8)
+  intro:SetPoint("RIGHT", f, "RIGHT", -12, 0)
+  intro:SetJustifyH("LEFT")
+  intro:SetSpacing(2)
+  intro:SetText("Tally walks each source in chunks so the import stays "
+    .. "interactive. Pick a preset, or tune the numbers if you know what "
+    .. "you want. The import runs as a detached widget after you Finish — "
+    .. "pause, resume, or cancel it any time without losing progress.")
+
+  -- Preset radios.
+  local presetHeader = f:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+  presetHeader:SetPoint("TOPLEFT", intro, "BOTTOMLEFT", 0, -14)
+  presetHeader:SetJustifyH("LEFT")
+  presetHeader:SetText("Pace")
+
+  local presetHost = CreateFrame("Frame", nil, f)
+  presetHost:SetPoint("TOPLEFT", presetHeader, "BOTTOMLEFT", 0, -4)
+  presetHost:SetPoint("RIGHT", f, "RIGHT", -12, 0)
+  presetHost:SetHeight(#PACE_PRESETS * 22 + 4)
+
+  local presetRadios = {}
+  for i, p in ipairs(PACE_PRESETS) do
+    local row = CreateFrame("Frame", nil, presetHost)
+    row:SetPoint("TOPLEFT", presetHost, "TOPLEFT", 0, -((i - 1) * 22))
+    row:SetPoint("RIGHT", presetHost, "RIGHT", 0, 0)
+    row:SetHeight(20)
+
+    local rb = CreateFrame("CheckButton", nil, row, "UIRadioButtonTemplate")
+    rb:SetSize(18, 18)
+    rb:SetPoint("LEFT", row, "LEFT", 0, 0)
+    rb:SetChecked(p.key == state.pace)
+    presetRadios[#presetRadios + 1] = { rb = rb, preset = p }
+
+    local lbl = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    lbl:SetPoint("LEFT", rb, "RIGHT", 4, 0)
+    lbl:SetWidth(120)
+    lbl:SetJustifyH("LEFT")
+    lbl:SetText(p.label)
+
+    local detail = row:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+    detail:SetPoint("LEFT", lbl, "RIGHT", 8, 0)
+    detail:SetPoint("RIGHT", row, "RIGHT", -4, 0)
+    detail:SetJustifyH("LEFT")
+    detail:SetText(string.format("%s rows / %.1fs", formatNumber(p.budget), p.delay))
+  end
+
+  -- Numeric inputs (budget, delay). Re-use the EditBox pattern from the
+  -- history step: BackdropTemplate-styled inputs that commit on Enter or
+  -- focus loss. Local helper keeps the two rows consistent.
+  local function makeNumericRow(label, suffix, getter, setter, anchor, anchorPt, gap, isFloat)
+    local row = CreateFrame("Frame", nil, f)
+    row:SetPoint("TOPLEFT", anchor, anchorPt, 0, -gap)
+    row:SetPoint("RIGHT", f, "RIGHT", -12, 0)
+    row:SetHeight(24)
+
+    local lbl = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    lbl:SetPoint("LEFT", row, "LEFT", 0, 0)
+    lbl:SetWidth(80)
+    lbl:SetJustifyH("LEFT")
+    lbl:SetText(label)
+
+    local edit = CreateFrame("EditBox", nil, row, "BackdropTemplate")
+    edit:SetPoint("LEFT", lbl, "RIGHT", 6, 0)
+    edit:SetSize(70, 22)
+    edit:SetAutoFocus(false)
+    edit:SetFontObject("GameFontHighlight")
+    edit:SetTextInsets(6, 6, 0, 0)
+    edit:SetBackdrop({
+      bgFile = "Interface\\Buttons\\WHITE8x8",
+      edgeFile = "Interface\\Buttons\\WHITE8x8",
+      edgeSize = 1,
+    })
+    edit:SetBackdropColor(themeColor("bgDark", { 0.04, 0.04, 0.07, 1 }))
+    edit:SetBackdropBorderColor(themeColor("border", { 0.30, 0.30, 0.40, 1 }))
+    local function paint()
+      if isFloat then edit:SetText(string.format("%.1f", getter() or 0))
+      else            edit:SetText(tostring(math.floor(getter() or 0))) end
+    end
+    paint()
+    edit:SetScript("OnEnterPressed", function(self)
+      local n = tonumber(self:GetText())
+      if n and n > 0 then setter(n) end
+      paint()
+      self:ClearFocus()
+    end)
+    edit:SetScript("OnEditFocusLost", function(self)
+      local n = tonumber(self:GetText())
+      if n and n > 0 then setter(n) end
+      paint()
+    end)
+
+    local suf = row:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+    suf:SetPoint("LEFT", edit, "RIGHT", 6, 0)
+    suf:SetText(suffix)
+
+    return row, edit, paint
+  end
+
+  -- Selecting a preset writes both fields + repaints the inputs.
+  local budgetEdit, budgetRepaint, delayEdit, delayRepaint
+  for _, r in ipairs(presetRadios) do
+    r.rb:SetScript("OnClick", function()
+      state.pace       = r.preset.key
+      state.budgetRows = r.preset.budget
+      state.delaySec   = r.preset.delay
+      for _, rr in ipairs(presetRadios) do rr.rb:SetChecked(rr.preset.key == r.preset.key) end
+      if budgetRepaint then budgetRepaint() end
+      if delayRepaint  then delayRepaint()  end
+      if state.refreshEstimate then state.refreshEstimate() end
+    end)
+  end
+
+  -- Manual edit → flip to "custom" (no radio selected). The value is
+  -- already in state by the time the setter callback runs.
+  local function dropPresetSelection()
+    state.pace = "custom"
+    for _, r in ipairs(presetRadios) do r.rb:SetChecked(false) end
+  end
+
+  local budgetRow, budgetEditFrame, budgetPaint = makeNumericRow("Budget", "rows / cycle",
+    function() return state.budgetRows end,
+    function(n)
+      state.budgetRows = math.floor(n)
+      if state.budgetRows ~= presetByKey(state.pace).budget then dropPresetSelection() end
+      if state.refreshEstimate then state.refreshEstimate() end
+    end,
+    presetHost, "BOTTOMLEFT", 14, false)
+  budgetEdit, budgetRepaint = budgetEditFrame, budgetPaint
+
+  local delayRow, delayEditFrame, delayPaint = makeNumericRow("Delay", "seconds between cycles",
+    function() return state.delaySec end,
+    function(n)
+      state.delaySec = n
+      if math.abs(state.delaySec - presetByKey(state.pace).delay) > 0.01 then dropPresetSelection() end
+      if state.refreshEstimate then state.refreshEstimate() end
+    end,
+    budgetRow, "BOTTOMLEFT", 6, true)
+  delayEdit, delayRepaint = delayEditFrame, delayPaint
+
+  -- Live estimate line. Reads probe data + current pace/window choices and
+  -- prints "~3m 20s for 47,000 rows across 2 sources." Refreshed whenever
+  -- state changes via state.refreshEstimate (also called once at end of
+  -- build for initial paint).
+  local estimate = f:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+  estimate:SetPoint("TOPLEFT", delayRow, "BOTTOMLEFT", 0, -16)
+  estimate:SetPoint("RIGHT", f, "RIGHT", -12, 0)
+  estimate:SetJustifyH("LEFT")
+  estimate:SetSpacing(3)
+  estimate:SetTextColor(themeColor("brass", { 0.83, 0.63, 0.09, 1 }))
+
+  state.refreshEstimate = function()
+    if not state.probes then
+      estimate:SetText("Scanning sources…")
+      return
+    end
+    local totalRows = estimateRows(state, importable)
+    if totalRows <= 0 then
+      estimate:SetText("Nothing to import under the current window + source selection.")
+      return
+    end
+    local sourceCount = 0
+    for _, s in ipairs(importable) do
+      if state.sources[s.name] and state.sources[s.name].enabled
+         and state.probes[s.name] and state.probes[s.name].available then
+        sourceCount = sourceCount + 1
+      end
+    end
+    local secs = estimateSeconds(totalRows, state.budgetRows, state.delaySec)
+    estimate:SetText(string.format("Estimate: ~%s for %s rows across %d source%s.",
+      formatDuration(secs), formatNumber(totalRows), sourceCount, sourceCount == 1 and "" or "s"))
+  end
+  state.refreshEstimate()
+
+  return f
+end
+
+-- ============================================================================
 -- Apply state on Finish
 -- ============================================================================
 
@@ -379,12 +888,25 @@ local function createWizardFrame()
 
   local state = makeState()
 
+  -- Sibling-source detection happens once at wizard creation. Steps 4 + 5
+  -- only register when at least one importable sibling adapter is loaded;
+  -- a fresh install with no TSM/FlipQueue/Journalator goes straight from
+  -- History to Finish with no dead-end backfill steps.
+  local importable = detectImportableSources()
+  local steps = {
+    { key = "welcome",  title = "Welcome",          build = function(parent) return buildWelcomeStep(parent) end },
+    { key = "strategy", title = "Pricing Strategy", build = function(parent) return buildStrategyStep(parent, state) end },
+    { key = "history",  title = "History",          build = function(parent) return buildHistoryStep(parent, state) end },
+  }
+  if #importable > 0 then
+    steps[#steps + 1] = { key = "sources", title = "Backfill — sources",
+                          build = function(parent) return buildSourcesStep(parent, state, importable) end }
+    steps[#steps + 1] = { key = "pace",    title = "Backfill — pace",
+                          build = function(parent) return buildPaceStep(parent, state, importable) end }
+  end
+
   wizardWidget = cw:CreateWizard(wizardFrame, {
-    steps = {
-      { key = "welcome",  title = "Welcome",          build = function(parent) return buildWelcomeStep(parent) end },
-      { key = "strategy", title = "Pricing Strategy", build = function(parent) return buildStrategyStep(parent, state) end },
-      { key = "history",  title = "History",          build = function(parent) return buildHistoryStep(parent, state) end },
-    },
+    steps = steps,
     finishLabel = "Finish",
     onComplete = function()
       applyState(state)
