@@ -307,11 +307,11 @@ function ns:PLAYER_LOGIN()
       local ok, report = pcall(ns.Ledger.DivergenceReport, ns.Ledger)
       if not ok or not report then return end
       local n = report.summary.realGapCount
-      if n and n > 0 then
-        print(string.format(
-          "|cffffd070Tally:|r divergence check — %d real gap%s. Run "
-          .. "|cffffffff/tally diag divergence|r to inspect.",
-          n, n == 1 and "" or "s"))
+      if n and n > 0 and ns.Output then
+        ns.Output:Warn(
+          string.format("Divergence check found %d real gap%s — click to inspect.",
+                        n, n == 1 and "" or "s"),
+          { onClick = function() divergenceCopyDialog() end, duration = 8 })
       end
     end)
   end

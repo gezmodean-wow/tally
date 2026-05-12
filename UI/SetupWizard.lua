@@ -329,7 +329,9 @@ local function finishSetup()
   TallyCharDB = TallyCharDB or {}
   TallyCharDB.tallyAcknowledged = true
   if ns.RefreshLDB then pcall(ns.RefreshLDB) end
-  print("|cff7fbfffTally:|r setup complete. Tally is now capturing auction-house, vendor, mail, and repair events live.")
+  if ns.Output then
+    ns.Output:Success("Setup complete. Tally is now capturing auction-house, vendor, mail, and repair events live.")
+  end
 end
 
 -- ============================================================================
@@ -425,7 +427,10 @@ local function createWizardFrame()
         TallyDB.setup.skipped = true
         TallyDB.setup.skippedAt = time()
       end
-      pcall(print, "|cff7fbfffTally:|r setup skipped. Re-run any time from Settings → Re-run setup wizard.")
+      if ns.Output then
+        pcall(ns.Output.Info, ns.Output,
+          "Setup skipped. Re-run any time from Settings → Re-run setup wizard.")
+      end
       if ns.RefreshLDB then pcall(ns.RefreshLDB) end
       pcall(function() wizardFrame:Hide() end)
     end,

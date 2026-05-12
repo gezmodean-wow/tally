@@ -20,6 +20,7 @@ Libs/LibDeflate/LibDeflate.lua
 Libs/Cogworks-1.0/Cogworks-1.0.xml
 
 Util/Items.lua
+Util/Output.lua
 Pricing/Sources.lua
 Inventory/Ownership.lua
 NetWorth/Calculator.lua
