@@ -103,7 +103,9 @@ function Pricing:GetUnitValue(itemID, itemKey, strategy)
     end
   elseif not tsmAvailableWarned then
     tsmAvailableWarned = true
-    print("|cff7fbfffTally:|r TSM not detected — net-worth values fall back to vendor prices.")
+    if ns.Output then
+      ns.Output:Warn("TSM not detected — net-worth values fall back to vendor prices.")
+    end
   end
 
   local vendor = getVendorPrice(itemID)

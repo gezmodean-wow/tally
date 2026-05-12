@@ -524,11 +524,20 @@ function Research:Invalidate(itemKey)
   else cache = {} end
 end
 
--- Pretty-print a research record to chat. Used by the slash command.
+-- Pretty-print a research record to chat. Used by /tally research-chat
+-- (the explicit chat opt-in path) and as a fallback for /tally research
+-- when the UI module is unavailable. The remaining print() call sites in
+-- this function are the body of that explicit-chat output and stay as
+-- chat per the TLY-70 channel taxonomy (chat is acceptable as explicit
+-- opt-in). The "could not resolve" error is a brief status notification
+-- and routes through the channel router so it gets a severity-tinted
+-- toast instead of a chat line.
 function Research:Print(input)
   local record = self:GetRecord(input)
   if not record then
-    print("|cffff4040Tally:|r couldn't resolve item.")
+    if ns.Output then
+      ns.Output:Error("Couldn't resolve item.")
+    end
     return
   end
   local fmt = ns.NetWorth.FormatGold

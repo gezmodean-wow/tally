@@ -1089,7 +1089,9 @@ local function loadFromDisk()
         return
       end
     end
-    print("|cffff8080Tally:|r ledger active set failed to load — starting fresh.")
+    if ns.Output then
+      ns.Output:Error("Ledger active set failed to load — starting fresh.")
+    end
   end
 
   _workingMem = defaultMem()
