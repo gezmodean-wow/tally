@@ -127,24 +127,28 @@ function NetWorth:FormatSnapshot(snap, headerSuffix)
   return table.concat(lines, "\n")
 end
 
--- Backward-compat shim: prints the formatted snapshot to chat line-by-line.
--- New code should call FormatSnapshot + ns.Output:Inspect instead. This
--- path remains for any caller that explicitly wants chat output.
+-- Chat-render the formatted snapshot line by line. First line carries the
+-- "Tally" prefix manually so the chat header reads naturally; subsequent
+-- lines are indented detail. Goes through ns.Output:ChatRaw so each line
+-- is mirrored to the debug log — players who can't copy from chat can
+-- always retrieve it via /tally debug.
 function NetWorth:PrintSnapshot(snap, headerSuffix)
+  local lines = {}
   for line in self:FormatSnapshot(snap, headerSuffix):gmatch("[^\n]+") do
-    print(line)
+    lines[#lines + 1] = line
+  end
+  if #lines > 0 then
+    -- Recolour the first line's "Tally" so the header stays visually
+    -- distinguishable from the indented detail rows.
+    lines[1] = lines[1]:gsub("^Tally", "|cff7fbfffTally|r", 1)
+  end
+  if ns.Output and ns.Output.ChatRaw then
+    for _, line in ipairs(lines) do ns.Output:ChatRaw(line) end
+  else
+    for _, line in ipairs(lines) do print(line) end
   end
 end
 
--- /tally networth output now defaults to a copy-dialog so the multi-line
--- per-character breakdown is paste-ready into a GitHub issue. TLY-70
--- channel taxonomy: multi-line diagnostic content goes through Inspect.
 function NetWorth:Print(opts)
-  local snap = self:Snapshot(opts)
-  if ns.Output and ns.Output.Inspect then
-    ns.Output:Inspect(self:FormatSnapshot(snap),
-      "Tally net-worth snapshot — paste into a GitHub issue or external tool.")
-  else
-    self:PrintSnapshot(snap)
-  end
+  self:PrintSnapshot(self:Snapshot(opts))
 end

@@ -1118,67 +1118,71 @@ local function registerDiagInspectors()
   diagInspectorsRegistered = true
 end
 
--- Chat-friendly formatted dump. Walks each inspector and pretty-prints its
--- output with colors / human-friendly sizes. Same data as DumpDebugState,
--- shaped for inline reading + paste-into-issue.
-local function diagPrintChat()
-  print("|cff7fbfff== Tally diagnostic ==|r")
-  print("|cff999999(copy these lines into a GitHub issue if you're reporting a bug)|r")
+-- Human-readable formatted diagnostic dump. Walks each inspector and
+-- pretty-prints its output as plain text suitable for routing into
+-- ns.Output:Inspect (copy-dialog). Same data as DumpDebugState but
+-- shaped for human reading + paste-into-issue. Colour codes stripped —
+-- the copy dialog renders them as literal escape sequences otherwise.
+local function diagFormatPretty()
+  local lines = {}
+  local function emit(s) lines[#lines + 1] = s end
+
+  emit("== Tally diagnostic ==")
+  emit("(copy this into a GitHub issue if you're reporting a bug)")
 
   local v = inspectVersions()
-  print(string.format("Tally: %s  |  Cogworks: %s  |  Interface: %s",
+  emit(string.format("Tally: %s  |  Cogworks: %s  |  Interface: %s",
     v.tally, v.cogworks, v.interface))
 
   local s = inspectSetup()
-  print(string.format("Setup: completed=%s  grandfathered=%s",
+  emit(string.format("Setup: completed=%s  grandfathered=%s",
     describeBoolean(s.completed), describeBoolean(s.grandfathered)))
 
   local syn = inspectSyndicator()
-  print(string.format("Syndicator: loaded=%s  API.GetAllCharacters=%s",
+  emit(string.format("Syndicator: loaded=%s  API.GetAllCharacters=%s",
     describeBoolean(syn.loaded), describeBoolean(syn.hasGetAllCharacters)))
   if syn.characters then
-    print(string.format("  Syndicator chars (%d):", syn.characterCount))
+    emit(string.format("  Syndicator chars (%d):", syn.characterCount))
     for i, ck in ipairs(syn.characters) do
       if i > 10 then
-        print(string.format("    … and %d more", syn.characterCount - 10))
+        emit(string.format("    … and %d more", syn.characterCount - 10))
         break
       end
-      print("    - " .. tostring(ck))
+      emit("    - " .. tostring(ck))
     end
   elseif syn.characterError then
-    print("  Syndicator GetAllCharacters() failed: " .. syn.characterError)
+    emit("  Syndicator GetAllCharacters() failed: " .. syn.characterError)
   end
 
   local inv = inspectInventory()
   if inv.missing then
-    print("Inventory rollup: |cffff8080missing|r — never built. Try /tally rescan.")
+    emit("Inventory rollup: MISSING — never built. Try /tally rescan.")
   else
-    print(string.format("Inventory rollup: %d chars, %d distinct items, last scan %s",
+    emit(string.format("Inventory rollup: %d chars, %d distinct items, last scan %s",
       inv.charCount, inv.distinctItems, describeAgeAgo(inv.lastScanAge)))
     if inv.warband then
-      print(string.format("  Warband: gold=%s, distinct items=%d",
+      emit(string.format("  Warband: gold=%s, distinct items=%d",
         ns.NetWorth.FormatGold(inv.warband.gold), inv.warband.distinctItems))
     end
     if #inv.emptyChars > 0 then
-      print("  |cffffd070Chars with 0 items in rollup:|r " ..
-        table.concat(inv.emptyChars, ", "))
+      emit("  Chars with 0 items in rollup: " .. table.concat(inv.emptyChars, ", "))
     end
   end
 
   local cur = inspectCurrentChar()
   if cur.seenBySyndicator ~= nil then
-    print(string.format("Current char (%s): seen by Syndicator=%s",
+    emit(string.format("Current char (%s): seen by Syndicator=%s",
       cur.charKey, describeBoolean(cur.seenBySyndicator)))
   end
   if cur.syndicatorGoldFields then
-    print(string.format("  Syndicator gold fields: money=%s gold=%s copper=%s",
+    emit(string.format("  Syndicator gold fields: money=%s gold=%s copper=%s",
       tostring(cur.syndicatorGoldFields.money),
       tostring(cur.syndicatorGoldFields.gold),
       tostring(cur.syndicatorGoldFields.copper)))
   end
   if cur.inRollup ~= nil then
-    print(string.format("  In rollup: %s (%d distinct items, gold=%s)",
-      cur.inRollup and "yes" or "|cffff8080NO|r",
+    emit(string.format("  In rollup: %s (%d distinct items, gold=%s)",
+      cur.inRollup and "yes" or "NO",
       cur.rollupItems or 0,
       cur.rollupGold and ns.NetWorth.FormatGold(cur.rollupGold) or "—"))
   end
@@ -1186,75 +1190,73 @@ local function diagPrintChat()
   local wb = inspectWarbandProbe()
   if wb then
     if wb.error then
-      print("Warband: GetWarband(1) returned " .. wb.error)
+      emit("Warband: GetWarband(1) returned " .. wb.error)
     else
-      print(string.format("Warband (idx=1): money=%s gold=%s copper=%s",
+      emit(string.format("Warband (idx=1): money=%s gold=%s copper=%s",
         tostring(wb.money), tostring(wb.gold), tostring(wb.copper)))
     end
   end
 
   local lg = inspectLedger()
   if lg then
-    print(string.format("Ledger: %d rows", lg.rowCount))
+    emit(string.format("Ledger: %d rows", lg.rowCount))
     if next(lg.bySource or {}) then
       for src, n in pairs(lg.bySource) do
-        print(string.format("  %s: %d", src, n))
+        emit(string.format("  %s: %d", src, n))
       end
     end
   end
 
   local st = inspectStorage()
   if st then
-    print(string.format(
-      "Storage: libs=%s loaded=%s dirty=%s schema=v%d%s",
-      st.libsAvailable and "yes" or "|cffff8080NO|r",
+    emit(string.format("Storage: libs=%s loaded=%s dirty=%s schema=v%d%s",
+      st.libsAvailable and "yes" or "NO",
       st.loaded and "yes" or "no",
       st.dirty and "yes" or "no",
       st.schemaVer or 0,
-      st.legacyPresent and " |cffffa050[legacy blob still on disk]|r" or ""))
+      st.legacyPresent and " [legacy blob still on disk]" or ""))
     if st.pendingLegacyLoad then
-      print(string.format("  |cffffe080Legacy load pending:|r %d rows in legacy blob (%d bytes compressed) — async deserialise in flight",
+      emit(string.format("  Legacy load pending: %d rows in legacy blob (%d bytes compressed) — async deserialise in flight",
         st.pendingLegacyRows or 0, st.pendingLegacyBytes or 0))
     end
     if st.pendingMigration then
-      print(string.format("  |cffffe080Migration pending:|r %d rows in pendingMigration buffer", st.pendingRows or 0))
+      emit(string.format("  Migration pending: %d rows in pendingMigration buffer", st.pendingRows or 0))
     end
     if st.stagingRows and st.stagingRows > 0 then
-      print(string.format("  |cffffe080Staging:|r %d rows across %d buckets — flush on import completion",
+      emit(string.format("  Staging: %d rows across %d buckets — flush on import completion",
         st.stagingRows, st.stagingKeys and #st.stagingKeys or 0))
     end
-    print(string.format("  Active: %d rows, %d bytes", st.activeRows or 0, st.activeBytes or 0))
+    emit(string.format("  Active: %d rows, %d bytes", st.activeRows or 0, st.activeBytes or 0))
     if st.activeSavedAt and st.activeSavedAt > 0 then
-      print(string.format("    saved %s  (serialise %dms + compress %dms; serialised %d bytes)",
+      emit(string.format("    saved %s  (serialise %dms + compress %dms; serialised %d bytes)",
         date("%Y-%m-%d %H:%M:%S", st.activeSavedAt),
         st.serialiseMs or 0, st.compressMs or 0, st.serialisedBytes or 0))
     end
     if (st.archiveCount or 0) > 0 then
       if (st.archiveBytes or 0) > 0 then
-        print(string.format("  Archives: %d archives, %d rows, %d bytes",
+        emit(string.format("  Archives: %d archives, %d rows, %d bytes",
           st.archiveCount, st.archiveRows or 0, st.archiveBytes))
       else
-        print(string.format("  Archives: %d archives, %d rows (slot-resident, raw)",
+        emit(string.format("  Archives: %d archives, %d rows (slot-resident, raw)",
           st.archiveCount, st.archiveRows or 0))
       end
       local cached = st.cachedArchives or {}
       if #cached > 0 then
-        print(string.format("    Cache: %d/%d loaded — %s",
+        emit(string.format("    Cache: %d/%d loaded — %s",
           #cached, st.cacheCap or 3, table.concat(cached, ", ")))
       end
-      -- Surface slot-allocator state for diag purposes.
       if ns.Archive and ns.Archive.DiagInfo then
         local info = ns.Archive:DiagInfo()
         if info then
-          print(string.format("    Slots: %d / %d allocated", info.nextSlot or 0, info.slotCount or 0))
+          emit(string.format("    Slots: %d / %d allocated", info.nextSlot or 0, info.slotCount or 0))
           if (info.legacyCount or 0) > 0 then
-            print(string.format("    |cffffa050%d unmigrated legacy archive(s)|r — will migrate on next access",
+            emit(string.format("    %d unmigrated legacy archive(s) — will migrate on next access",
               info.legacyCount))
           end
         end
       end
     end
-    print(string.format("  Total rows: %d (active + archives)", st.totalRows or st.activeRows or 0))
+    emit(string.format("  Total rows: %d (active + archives)", st.totalRows or st.activeRows or 0))
   end
 
   local sk = inspectSkipCounters()
@@ -1264,25 +1266,25 @@ local function diagPrintChat()
     table.sort(labels)
     for _, label in ipairs(labels) do
       local entry = sk[label]
-      print(string.format("  %s skipped %d rows since last load:", label, entry.total))
+      emit(string.format("  %s skipped %d rows since last load:", label, entry.total))
       local rs = {}
       for r, n in pairs(entry.reasons) do rs[#rs + 1] = string.format("    %s: %d", r, n) end
       table.sort(rs)
-      for _, line in ipairs(rs) do print(line) end
+      for _, line in ipairs(rs) do emit(line) end
     end
   end
 
   local h = inspectHistory()
   if h then
-    print(string.format("History inventory: %d snapshots", h.inventorySnapshots))
+    emit(string.format("History inventory: %d snapshots", h.inventorySnapshots))
     for _, p in ipairs(h.pricing) do
-      print(string.format("  Pricing [%s]: %d snapshots", p.strategy, p.snapshots))
+      emit(string.format("  Pricing [%s]: %d snapshots", p.strategy, p.snapshots))
     end
   end
 
   local ds = inspectDisabledSources()
   if ds then
-    print("Disabled sources: " .. table.concat(ds, ", "))
+    emit("Disabled sources: " .. table.concat(ds, ", "))
   end
 
   local sib = inspectSiblings()
@@ -1290,25 +1292,33 @@ local function diagPrintChat()
   local sibLine = "Siblings: "
   for i, name in ipairs(sibOrder) do
     if i > 1 then sibLine = sibLine .. "  " end
-    sibLine = sibLine .. name .. "=" .. (sib[name] and "|cff7fffaeyes|r" or "|cff888888no|r")
+    sibLine = sibLine .. name .. "=" .. (sib[name] and "yes" or "no")
   end
-  print(sibLine)
+  emit(sibLine)
 
   local m = inspectMemory()
   if m then
-    print(string.format("Memory: %.1f KB", m.kb))
+    emit(string.format("Memory: %.1f KB", m.kb))
   end
 
-  print("|cff7fbfff== end diagnostic ==|r")
+  emit("== end diagnostic ==")
+  return table.concat(lines, "\n")
+end
+
+local function diagPrettyCopyDialog()
+  if ns.Output then
+    ns.Output:Inspect(diagFormatPretty(),
+      "Tally pretty-formatted diagnostic — paste into a GitHub issue.")
+  end
 end
 
 -- Paste-friendly variant: opens Cogworks's CreateCopyDialog with the
 -- DumpDebugState output (Lua-table format, structured, easy to diff
--- between testers). Falls back to chat dump if Cogworks debug toolkit
--- is unavailable for any reason.
+-- between testers). Falls back to the pretty-formatted copy-dialog if
+-- the Cogworks debug toolkit is unavailable for any reason.
 local function diagOpenCopyDialog()
   if not (Cogworks and Cogworks.DumpDebugState and Cogworks.CreateCopyDialog) then
-    diagPrintChat()
+    diagPrettyCopyDialog()
     return
   end
   registerDiagInspectors()
@@ -1317,7 +1327,8 @@ local function diagOpenCopyDialog()
 end
 
 -- Sibling cogs hold a reference to ns.Diag — preserve the contract.
-ns.Diag = diagPrintChat
+-- The pretty-formatted copy-dialog is the human-readable variant.
+ns.Diag = diagPrettyCopyDialog
 ns.DiagCopyDialog = diagOpenCopyDialog
 ns.RegisterDiagInspectors = registerDiagInspectors
 
@@ -1785,8 +1796,10 @@ local function handleNetWorth(rest, includeBound)
     end
     local label = string.format("(at %s, %s ago)",
       date("%Y-%m-%d %H:%M", snap.atTime), describeAge(offsetSec))
-    local text = ns.NetWorth:FormatSnapshot(snap, label)
-    if info and info ~= "" then text = text .. "\n  note: " .. tostring(info) end
+    ns.NetWorth:PrintSnapshot(snap, label)
+    if info and info ~= "" and ns.Output then
+      ns.Output:ChatRaw("  |cffffd070note:|r " .. tostring(info))
+    end
     -- Δ vs current
     local current = ns.NetWorth:Snapshot({ includeBound = includeBound })
     local delta = current.total - snap.total
@@ -1795,10 +1808,9 @@ local function handleNetWorth(rest, includeBound)
     if snap.total > 0 then
       pct = string.format(" (%s%.1f%%)", delta >= 0 and "+" or "-", math.abs(delta / snap.total) * 100)
     end
-    text = text .. string.format("\n  Δ vs now: %s%s%s",
-      sign, ns.NetWorth.FormatGold(math.abs(delta)), pct)
     if ns.Output then
-      ns.Output:Inspect(text, "Tally historical net-worth snapshot.")
+      ns.Output:ChatRaw(string.format("  Δ vs now: %s%s%s",
+        sign, ns.NetWorth.FormatGold(math.abs(delta)), pct))
     end
     return
   end
@@ -2165,17 +2177,18 @@ if Cogworks and Cogworks.RegisterSlashCommands then
         name = "diag", aliases = { "diagnostic" },
         args = "[divergence|gold|chat]",
         -- TLY-45 + alpha10 debug-UX: default opens the structured copy
-        -- dialog (was: chat dump). Chat is preserved as `/tally diag
-        -- chat` for users who specifically want inline output. `copy`
-        -- stays as a no-op alias for the default to avoid breaking
-        -- muscle memory from earlier alphas.
-        help = "Open diagnostic dump as a copy dialog. `divergence` for source-coverage report; `gold` for per-character gold accounting; `sources` for sibling-source row counts + monthly distribution (alpha18 simulated-import readout — runs a multi-second blocking pass on big TSM CSVs); `chat` to print inline.",
+        -- TLY-70: every diag subcommand routes through CreateCopyDialog.
+        -- `pretty` (also alias `chat` for muscle-memory) opens the human-
+        -- readable formatted variant; default opens the structured
+        -- DumpDebugState (Lua-table) variant. Both are paste-ready into
+        -- a GitHub issue; pick whichever reads more cleanly to the eye.
+        help = "Open diagnostic dump as a copy dialog. `divergence` for source-coverage report; `gold` for per-character gold accounting; `sources` for sibling-source row counts + monthly distribution (alpha18 simulated-import readout — runs a multi-second blocking pass on big TSM CSVs); `pretty` (or `chat`) for the human-readable formatted variant.",
         run = function(rest)
           local sub = rest and rest:lower() or ""
           if sub == "divergence" then divergenceCopyDialog()
           elseif sub == "gold" then goldCopyDialog()
           elseif sub == "sources" then sourcesCopyDialog()
-          elseif sub == "chat" then diagPrintChat()
+          elseif sub == "pretty" or sub == "chat" then diagPrettyCopyDialog()
           else diagOpenCopyDialog() end
         end,
       },

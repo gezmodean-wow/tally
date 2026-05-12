@@ -524,33 +524,27 @@ function Research:Invalidate(itemKey)
   else cache = {} end
 end
 
--- Pretty-print a research record to chat. Used by /tally research-chat
--- (the explicit chat opt-in path) and as a fallback for /tally research
--- when the UI module is unavailable. The remaining print() call sites in
--- this function are the body of that explicit-chat output and stay as
--- chat per the TLY-70 channel taxonomy (chat is acceptable as explicit
--- opt-in). The "could not resolve" error is a brief status notification
--- and routes through the channel router so it gets a severity-tinted
--- toast instead of a chat line.
-function Research:Print(input)
+-- Build the per-item research record as a single newline-separated
+-- string suitable for routing into a copy-dialog. Colour codes stripped —
+-- the copy dialog renders them as literal escape sequences otherwise.
+-- Returns the formatted text, or nil if the record couldn't be resolved.
+function Research:FormatRecord(input)
   local record = self:GetRecord(input)
-  if not record then
-    if ns.Output then
-      ns.Output:Error("Couldn't resolve item.")
-    end
-    return
-  end
+  if not record then return nil end
+
   local fmt = ns.NetWorth.FormatGold
-  local prefix = "|cff7fbfffTally|r research:"
+  local lines = {}
+  local function emit(s) lines[#lines + 1] = s end
+
   local linkOrName = record.itemLink or record.name
     or (record.itemID and ("item:" .. record.itemID))
     or record.itemKey
-  print(prefix .. " " .. linkOrName)
+  emit("Tally research: " .. tostring(linkOrName))
   if record.tsmGroup and record.tsmGroup ~= "" then
-    print("  TSM group: " .. record.tsmGroup)
+    emit("  TSM group: " .. record.tsmGroup)
   end
   if record.auctionatorLists and #record.auctionatorLists > 0 then
-    print("  Auctionator lists: " .. table.concat(record.auctionatorLists, ", "))
+    emit("  Auctionator lists: " .. table.concat(record.auctionatorLists, ", "))
   end
   if record.fqTodos and #record.fqTodos > 0 then
     local byAction = {}
@@ -563,25 +557,23 @@ function Research:Print(input)
       parts[#parts + 1] = string.format("%d %s", count, action)
     end
     table.sort(parts)
-    print("  FQ todos: " .. table.concat(parts, ", "))
+    emit("  FQ todos: " .. table.concat(parts, ", "))
   end
   if record.isPet then
-    print(string.format("  Owned: %d (pets aren't priced — net-worth contribution skipped)",
+    emit(string.format("  Owned: %d (pets aren't priced — net-worth contribution skipped)",
       record.totalInventory))
   else
     local boundCount = record.totalInventory - record.saleableInventory
     if boundCount > 0 then
-      print(string.format("  Owned: %d total, %d saleable (%d bound) — saleable worth %s @ %s",
+      emit(string.format("  Owned: %d total, %d saleable (%d bound) — saleable worth %s @ %s",
         record.totalInventory, record.saleableInventory, boundCount,
         fmt(record.valuation.netWorthContribution), record.pricing.strategy))
     else
-      print(string.format("  Owned: %d (worth %s @ %s)",
+      emit(string.format("  Owned: %d (worth %s @ %s)",
         record.totalInventory, fmt(record.valuation.netWorthContribution), record.pricing.strategy))
     end
   end
-  -- Per-character/warband breakdown with per-location detail. Useful for
-  -- confirming warband visibility and seeing where equipped/void/auction
-  -- copies live.
+  -- Per-character/warband breakdown with per-location detail.
   if #record.inventory > 0 then
     local LOC_ORDER = { "bags", "reagent", "bank", "mail", "equipped", "void", "auctions", "warbank" }
     local parts = {}
@@ -590,14 +582,14 @@ function Research:Print(input)
       for _, loc in ipairs(LOC_ORDER) do
         local n = inv.locations and inv.locations[loc]
         if n and n > 0 then
-          locParts[#locParts + 1] = loc .. " ×" .. n
+          locParts[#locParts + 1] = loc .. " x" .. n
         end
       end
       local label
       if inv.saleable and inv.saleable < inv.quantity then
-        label = string.format("%s ×%d (%d saleable)", inv.charKey, inv.quantity, inv.saleable)
+        label = string.format("%s x%d (%d saleable)", inv.charKey, inv.quantity, inv.saleable)
       else
-        label = inv.charKey .. " ×" .. inv.quantity
+        label = inv.charKey .. " x" .. inv.quantity
       end
       if #locParts > 0 then
         parts[#parts + 1] = label .. " [" .. table.concat(locParts, ", ") .. "]"
@@ -605,7 +597,7 @@ function Research:Print(input)
         parts[#parts + 1] = label
       end
     end
-    print("  Locations: " .. table.concat(parts, ", "))
+    emit("  Locations: " .. table.concat(parts, ", "))
   end
   if record.pricing.sources then
     local parts = {}
@@ -617,30 +609,28 @@ function Research:Print(input)
     if record.pricing.sources.vendor then
       parts[#parts + 1] = "vendor " .. fmt(record.pricing.sources.vendor)
     end
-    if #parts > 0 then print("  Prices: " .. table.concat(parts, " | ")) end
+    if #parts > 0 then emit("  Prices: " .. table.concat(parts, " | ")) end
   end
   if record.salesSummary.count > 0 then
-    print(string.format("  Sales (ledger): %d sold, %s revenue, avg %s",
+    emit(string.format("  Sales (ledger): %d sold, %s revenue, avg %s",
       record.salesSummary.count, fmt(record.salesSummary.totalRevenue), fmt(record.salesSummary.avgPrice)))
   end
   if record.purchasesSummary and record.purchasesSummary.count > 0 then
-    print(string.format("  Purchases (ledger): %d bought, %s spent, avg %s",
+    emit(string.format("  Purchases (ledger): %d bought, %s spent, avg %s",
       record.purchasesSummary.count, fmt(record.purchasesSummary.totalCost), fmt(record.purchasesSummary.avgPrice)))
   end
   if record.profitSummary and (record.profitSummary.salesCount > 0
      or record.profitSummary.purchaseCount > 0) then
     local p = record.profitSummary
     local sign = p.netProfit >= 0 and "+" or "-"
-    local color = p.netProfit >= 0 and "|cff7fff7f" or "|cffff8080"
-    local line = string.format("  P&L: %s%s%s|r net (revenue %s − cost %s − fees %s)",
-      color, sign, fmt(math.abs(p.netProfit)),
+    local line = string.format("  P&L: %s%s net (revenue %s - cost %s - fees %s)",
+      sign, fmt(math.abs(p.netProfit)),
       fmt(p.totalRevenue), fmt(p.totalCost), fmt(p.totalFees))
     if p.salesQty > 0 then
       local pSign = p.perUnitProfit >= 0 and "+" or "-"
-      line = line .. string.format("; per-unit %s%s%s|r", color, pSign, fmt(math.abs(p.perUnitProfit)))
+      line = line .. string.format("; per-unit %s%s", pSign, fmt(math.abs(p.perUnitProfit)))
     end
-    print(line)
-    -- Per-realm P&L (top 3 by absolute net profit, when there's any breakdown).
+    emit(line)
     if record.profitByRealm then
       local rows = {}
       for realm, data in pairs(record.profitByRealm) do
@@ -652,21 +642,19 @@ function Research:Print(input)
         for i = 1, math.min(3, #rows) do
           local r = rows[i]
           local rSign = r.data.netProfit >= 0 and "+" or "-"
-          local rColor = r.data.netProfit >= 0 and "|cff7fff7f" or "|cffff8080"
-          parts[#parts + 1] = string.format("%s %s%s%s|r",
-            r.realm, rColor, rSign, fmt(math.abs(r.data.netProfit)))
+          parts[#parts + 1] = string.format("%s %s%s", r.realm, rSign, fmt(math.abs(r.data.netProfit)))
         end
-        print("    by realm: " .. table.concat(parts, ", "))
+        emit("    by realm: " .. table.concat(parts, ", "))
       end
     end
   end
   if record.failureSummary.expiredCount + record.failureSummary.cancelledCount > 0 then
-    print(string.format("  Failures: %d expired / %d cancelled, %s fees",
+    emit(string.format("  Failures: %d expired / %d cancelled, %s fees",
       record.failureSummary.expiredCount, record.failureSummary.cancelledCount,
       fmt(record.failureSummary.totalFeesLost)))
   end
   if #record.activeAuctions > 0 then
-    print("  Active auctions: " .. #record.activeAuctions)
+    emit("  Active auctions: " .. #record.activeAuctions)
   end
   local function spanLabel(span)
     if span >= 86400 then return math.floor(span / 86400) .. "d"
@@ -683,7 +671,7 @@ function Research:Print(input)
     if h.trend30d then
       parts[#parts + 1] = string.format("30d %s%.1f%%", h.trend30d.deltaPct >= 0 and "+" or "", h.trend30d.deltaPct)
     end
-    print("  Price history: " .. table.concat(parts, ", "))
+    emit("  Price history: " .. table.concat(parts, ", "))
   end
   if record.inventoryHistory and #record.inventoryHistory.points > 0 then
     local ih = record.inventoryHistory
@@ -693,7 +681,6 @@ function Research:Print(input)
       if not t then return nil end
       local sign = t.delta >= 0 and "+" or ""
       local label = string.format("%s%d", sign, t.delta)
-      -- Surface per-char detail when more than one character contributed.
       local nonZero = {}
       for ck, d in pairs(t.byCharDelta) do
         if d ~= 0 then nonZero[#nonZero + 1] = { ck = ck, d = d } end
@@ -711,8 +698,27 @@ function Research:Print(input)
     end
     local d7  = formatDelta(ih.trend7d)
     local d30 = formatDelta(ih.trend30d)
-    if d7  then parts[#parts + 1] = "7d Δ "  .. d7  end
-    if d30 then parts[#parts + 1] = "30d Δ " .. d30 end
-    print("  Inventory history: " .. table.concat(parts, ", "))
+    if d7  then parts[#parts + 1] = "7d D "  .. d7  end
+    if d30 then parts[#parts + 1] = "30d D " .. d30 end
+    emit("  Inventory history: " .. table.concat(parts, ", "))
+  end
+
+  return table.concat(lines, "\n")
+end
+
+-- /tally research-chat now opens a copy-dialog with the formatted record
+-- so the multi-line per-character breakdown is paste-ready. Falls back
+-- to chat output (line-by-line) if ns.Output isn't available — defensive
+-- since Util/Output loads earlier in the TOC.
+function Research:Print(input)
+  local text = self:FormatRecord(input)
+  if not text then
+    if ns.Output then ns.Output:Error("Couldn't resolve item.") end
+    return
+  end
+  if ns.Output and ns.Output.Inspect then
+    ns.Output:Inspect(text, "Tally item research record — paste into a GitHub issue or external tool.")
+  else
+    for line in text:gmatch("[^\n]+") do print(line) end
   end
 end

@@ -101,13 +101,22 @@ function Output:Debug(...)
 end
 
 -- ============================================================================
--- Chat (explicit opt-in only)
+-- Chat (kept on-channel, mirrored to debug log)
 -- ============================================================================
 --
--- Degraded fallback for `/tally <cmd> chat`-style subcommands where the
--- user explicitly asked for inline output. Do not call from non-opt-in
--- paths — the channel taxonomy exists precisely so default code doesn't
--- spray chat output.
+-- Two flavours:
+--
+--   Chat(text)    — addon-prefixed line. Use for brief player-facing
+--                   confirmations the player explicitly invoked. Prefix
+--                   "[Tally] " is added by Cogworks:Print.
+--   ChatRaw(text) — passes `text` through to the chat frame as-is, no
+--                   prefix injection. Use for multi-line renderings
+--                   (`/tally networth`, etc.) where the caller controls
+--                   the line shape and prefix.
+--
+-- Both flavours mirror every emitted line to the debug log via
+-- ns.dbg:PrintDebug so chat output is always copyable via /tally debug
+-- even when the chat frame itself doesn't allow selection.
 
 function Output:Chat(text)
   local lib = cw()
@@ -115,5 +124,19 @@ function Output:Chat(text)
     lib:Print(addonName, text)
   else
     print("Tally: " .. tostring(text))
+  end
+  if ns.dbg and ns.dbg.PrintDebug then
+    ns.dbg:PrintDebug("chat: " .. tostring(text))
+  end
+end
+
+function Output:ChatRaw(text)
+  if DEFAULT_CHAT_FRAME and DEFAULT_CHAT_FRAME.AddMessage then
+    DEFAULT_CHAT_FRAME:AddMessage(tostring(text))
+  else
+    print(tostring(text))
+  end
+  if ns.dbg and ns.dbg.PrintDebug then
+    ns.dbg:PrintDebug("chat: " .. tostring(text))
   end
 end
