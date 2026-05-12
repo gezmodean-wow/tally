@@ -1,14 +1,18 @@
 # Tally — next session handoff
 
-Picks up after the alpha18 ship: active-only baseline + TLY-68 gold capture + sibling-source probe live; first real-world tester data in hand and a clear alpha19 plan locked.
+Picks up mid-alpha19. TLY-70 (output-channel consolidation) and TLY-69 v1 (multi-source gold authority) both landed and pushed to `origin/main`; the alpha19 ship awaits manual import controller + on-demand period synthesis, plus an upstream Cogworks fix for the debug-console crash.
 
 ## State
 
-- **Branch:** `main`, one commit ahead of `origin/main` (`ae00460` — warband row UI split, rides with alpha19).
-- **Latest commit:** `ae00460` — `fix(TLY-68): split warband row in NetWorthPage into gold + items`.
-- **Latest tag:** `v0.1.0-alpha18` shipped 2026-05-09; CI built + pushed to CurseForge / Wago successfully.
-- **Cogworks pinned at `v0.13.2`** in `.pkgmeta`.
-- **Standards acknowledgments** (per `CLAUDE.md`): runbooks at `2026-05-05a`, scribe player-facing at `2026-04-30f`. Both checked early in the alpha18 ship session — all current.
+- **Branch:** `main`, fully synced with `origin/main`.
+- **Latest commit:** `1d4235d` — `feat(TLY-69): multi-source gold authority — Tally / Syndicator / TSM`.
+- **Latest tag:** `v0.1.0-alpha18` shipped 2026-05-09. No alpha19 tag yet — work in flight.
+- **Cogworks pinned at `v0.13.2`** in `.pkgmeta`. Will need a bump to whatever ships with cogworks#56's fix.
+- **Standards acknowledgments** (per `CLAUDE.md`): runbooks at `2026-05-05a`, scribe player-facing at `2026-04-30f`. Both current.
+
+## Blockers / waiting
+
+- **[cogworks#56](https://github.com/gezmodean-wow/cogworks/issues/56)** — `CreateDebugConsole` crashes on first open because `CreateTabPanel` eagerly activates the first tab before `Debug.lua`'s `f._build*` methods are defined. `/tally debug` is unusable until a Cogworks tag ships the proposed `lazy = true` opt on `CreateTabPanel` + explicit `SetActiveTab` at the bottom of `CreateDebugConsole`. Tally confirmed the bug on 2026-05-11; comment added to the issue.
 
 ## What shipped in alpha18
 
@@ -49,20 +53,23 @@ User-confirmed (2026-05-11). No further Toeknee or zong follow-up ask. alpha18 c
 
 ## alpha19 plan
 
-### Anchor work
+### Landed (on `main`, awaiting tag)
 
-- **[TLY-69](https://github.com/gezmodean-wow/tally/issues/69) — multi-source gold authority + provenance.** Filed 2026-05-11. Each gold-bearing source gets `:ProbeCharGold(charKey)` returning `{ money, moneyAt, source }`. `Inventory.preferredCharGold` walks them, picks the freshest by `moneyAt`. Sources for v1: `tally-native` (alpha18 capture, already wired), `syndicator`, `tsm` (TSM Accounting's per-char goldLog — same CSV-string shape as the existing csvSales/csvBuys Tally already parses). Stretch: `accountant` adapter. `/tally diag gold` gains a per-source column + provenance "source" column. Same authority pattern Ledger:Reconcile uses today, ported to gold.
-- **[TLY-70](https://github.com/gezmodean-wow/tally/issues/70) — output-channel consolidation.** Filed 2026-05-11. Migrate ~165 `print(...)` call sites off chat onto the right channel per the new taxonomy: status → `cw:Toast`, errors → `cw:Toast` with severity, inspectable → `cw:CreateCopyDialog` (already convention), engineering → `ns.dbg:PrintDebug` + `cw:CreateDebugConsole`. Cogworks v0.13.2 ships all primitives. New code paths (TLY-69 et al.) adopt the conventions from the start; existing call sites migrate in cohort batches by file. May split across alpha19/20 if too large for one ship.
-- **Manual import controller in setup wizard.** Was in the original alpha19 plan. Pause/resume/per-cycle row budget. Starting budget 10k rows per cycle; testers refine via the sibling probe data (`/tally diag sources`) on actual rosters.
+- **[TLY-70](https://github.com/gezmodean-wow/tally/issues/70) — output-channel consolidation.** 6 commits (`c205ae2`, `a8bdd8e`, `37b0715`, `e523b48`, `19a7211`, `13e3e58`). Every player-visible output routes through `ns.Output`: brief status → toast (auto-mirrored to debug log), inspectable detail → copy-dialog, engineering → `ns.dbg:PrintDebug` → debug console. Chat output (`/tally networth`, explicit opt-ins) goes via `ns.Output:ChatRaw` so every chat line mirrors to the debug log automatically — `/tally debug` becomes the always-copyable archive even when chat frame filters block selection. `/tally diag chat` + `/tally research-chat` rerouted to copy-dialog (diagnostic content belongs in inspectable substrate). 7 documented exceptions remain (pre-Cogworks init, defensive fallbacks, vendored libs).
+- **[TLY-69](https://github.com/gezmodean-wow/tally/issues/69) v1 — multi-source gold authority.** Commit `1d4235d`. Each gold-bearing source registers a probe with `Inventory`'s gold-source registry; `preferredCharGold` walks the registry and picks freshest by `moneyAt`. Sources for v1: `tally-native` (alpha18 capture), `syndicator` (with rollup `lastFullScan` as freshness proxy since the API has no per-char timestamp), `tsm` (parses the per-character `goldLog` CSV under `TradeSkillMasterDB.s@<char> - <faction> - <realm>@internalData@goldLog`). `/tally diag gold` shows per-source columns + chosen-source provenance. Closes the path Toeknee's 63M toon-gold gap was sitting on.
+- **`ae00460` warband row UI split** + **`cb83fa6` alpha18 changelog/release docs**. Both pushed.
+
+### Still to do for alpha19 ship
+
+- **Manual import controller in setup wizard.** Pause/resume/per-cycle row budget. Starting budget 10k rows per cycle; testers refine via the sibling-source probe data (`/tally diag sources`) on actual rosters. Substantial UI + state-machine work.
 - **On-demand period synthesis.** When Research/Lifecycle/Compare query a period without a Tally archive, synthesise from siblings, persist into a slot, return. LRU eviction when slot pool fills.
-
-### Rides along
-
-- **`ae00460` warband row UI split.** Committed locally, ships with alpha19's tag.
+- **Bump Cogworks pin** once cogworks#56 ships a tag with the `CreateTabPanel` `lazy` opt — unblocks `/tally debug`.
+- **TLY-69 v2 (stretch)**: optional Accountant_NWB / Classic adapter; multi-source warband gold (TSM doesn't track warband, so the value-add is small — defer unless a tester surfaces something).
+- **CHANGELOG / RELEASES `## Unreleased`** entries for the work above (currently blank).
 
 ### Sequencing
 
-Tackle TLY-69 first (sharpest improvement to per-character gold accuracy; doesn't require manual import flow); then manual import controller (now backed by real probe data); then period synthesis. Warband UI split travels with whatever ships first.
+Manual import controller is the chunky one — needs design pass on pause/resume UX. Period synthesis builds on the import controller (similar pipeline shape). The Cogworks pin bump is opportunistic — do it when the upstream tag ships, no schedule pressure.
 
 ## Open decisions before alpha19 work begins
 
@@ -108,9 +115,10 @@ Open issues most relevant to alpha19:
 
 ## Handy facts
 
-- alpha18 shipped 2026-05-09; `ae00460` (warband UI split) sits local on `main` waiting for alpha19.
+- alpha18 shipped 2026-05-09. alpha19 in flight: TLY-69 v1 + TLY-70 on `origin/main` since 2026-05-11.
 - Last acknowledged scribe player-facing conventions: `2026-04-30f`.
 - All cogworks runbooks acknowledged at `2026-05-05a`.
-- Cogworks pinned at `v0.13.2` in `.pkgmeta`.
-- `TallyActive` declared in `tally.toc` alongside `TallyA001..TallyA060`.
-- Memory entries to read when starting: `project_architecture_rewrite_plan` (now reflects alpha19 scope), `project_pro_service_direction`, `feedback_alpha_cadence`, `feedback_no_push_without_approval`, `feedback_ui_before_ship`, `feedback_player_summary`, `feedback_debug_copy_dialog`.
+- Cogworks pinned at `v0.13.2` in `.pkgmeta`. Bump needed when cogworks#56's fix tags.
+- `TallyActive` declared in `tally.toc` alongside `TallyA001..TallyA060`. `Util/Output.lua` is the channel router for all user-visible output.
+- Memory entries to read when starting: `project_architecture_rewrite_plan` (reflects alpha19 mid-flight), `project_pro_service_direction`, `feedback_alpha_cadence`, `feedback_no_push_without_approval`, `feedback_ui_before_ship`, `feedback_player_summary`, `feedback_output_channels` (TLY-70 channel taxonomy).
+- TSM goldLog storage shape verified in live SV: `s@<char> - <faction> - <realm>@internalData@goldLog`, value = `"minute,copper\n<minute>,<copper>\n..."` (balance snapshots, not deltas).
