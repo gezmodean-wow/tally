@@ -947,7 +947,7 @@ local function inspectGold()
   local nilMoney, zeroMoney, missingRollup, staleRollup = 0, 0, 0, 0
 
   for _, ck in ipairs(sortedKeys) do
-    local e = { charKey = ck }
+    local e = { charKey = ck, sourceGold = {} }
 
     if syndicatorChars[ck] and _G.Syndicator.API.GetByCharacterFullName then
       local ok, data = pcall(_G.Syndicator.API.GetByCharacterFullName, ck)
@@ -984,7 +984,37 @@ local function inspectGold()
       missingRollup = missingRollup + 1
     end
 
+    -- TLY-69 multi-source provenance: walk every registered gold source
+    -- for this charKey, record per-source value + freshness, and capture
+    -- the chosen winner (highest moneyAt). Surfaces which adapter is
+    -- actually contributing to NetWorth's per-character gold.
+    if ns.Inventory and ns.Inventory.ProbeCharGoldAll then
+      local records = ns.Inventory:ProbeCharGoldAll(ck)
+      for _, rec in ipairs(records) do
+        e.sourceGold[rec.source] = { money = rec.money, moneyAt = rec.moneyAt }
+      end
+    end
+    if ns.Inventory and ns.Inventory.PreferredCharGold then
+      local money, chosenRec = ns.Inventory:PreferredCharGold(ck)
+      e.chosenGold   = money
+      e.chosenSource = chosenRec and chosenRec.source or nil
+    end
+
     out.perChar[#out.perChar + 1] = e
+  end
+
+  -- Per-source totals across all chars + chosen total. Lets the report
+  -- header surface "what would each source give us in aggregate" alongside
+  -- the chosen-source view NetWorth actually uses.
+  local sourceSumCopper = {}
+  local chosenSumCopper = 0
+  for _, e in ipairs(out.perChar) do
+    if e.sourceGold then
+      for src, rec in pairs(e.sourceGold) do
+        sourceSumCopper[src] = (sourceSumCopper[src] or 0) + (rec.money or 0)
+      end
+    end
+    chosenSumCopper = chosenSumCopper + (e.chosenGold or 0)
   end
 
   out.summary = {
@@ -996,6 +1026,8 @@ local function inspectGold()
     zeroMoneyCount          = zeroMoney,
     missingFromRollupCount  = missingRollup,
     staleRollupCount        = staleRollup,
+    sourceSumCopper         = sourceSumCopper,
+    chosenSumCopper         = chosenSumCopper,
   }
 
   if _G.Syndicator.API.GetWarband then
@@ -1516,9 +1548,18 @@ local function formatGoldReport()
 
   local s = g.summary
   push(string.format("Characters seen (Syndicator + rollup): %d", s.charCount or 0))
-  push(string.format("Syndicator total: %s g", fmtG(s.syndicatorSumCopper)))
-  push(string.format("Rollup total:     %s g", fmtG(s.rollupSumCopper)))
-  push(string.format("Delta (syn - rollup): %s g", fmtG(s.deltaCopper)))
+  push(string.format("Chosen total (NetWorth uses): %s g", fmtG(s.chosenSumCopper)))
+  if s.sourceSumCopper then
+    local srcNames = {}
+    for name in pairs(s.sourceSumCopper) do srcNames[#srcNames + 1] = name end
+    table.sort(srcNames)
+    for _, name in ipairs(srcNames) do
+      push(string.format("  %-12s total: %s g", name, fmtG(s.sourceSumCopper[name])))
+    end
+  end
+  push(string.format("Rollup total (legacy, pre-TLY-69):  %s g", fmtG(s.rollupSumCopper)))
+  push(string.format("Syndicator total (raw):            %s g", fmtG(s.syndicatorSumCopper)))
+  push(string.format("Delta (syn - rollup):              %s g", fmtG(s.deltaCopper)))
 
   if (s.nilMoneyCount or 0) > 0 then
     push(string.format(">> %d characters report nil .money in Syndicator data", s.nilMoneyCount))
@@ -1533,23 +1574,44 @@ local function formatGoldReport()
     push(string.format(">> %d rollup characters are no longer in Syndicator", s.staleRollupCount))
   end
 
+  -- TLY-69: list every registered gold source (deterministic order from
+  -- Inventory's registry) so the per-character table can column-align.
+  local sourceOrder = {}
+  if ns.Inventory and ns.Inventory.GetGoldSources then
+    for _, name in ipairs(ns.Inventory:GetGoldSources()) do
+      sourceOrder[#sourceOrder + 1] = name
+    end
+  end
+
   push("")
-  push("Per-character (sorted by Syndicator gold descending):")
-  push(string.format("  %-40s  %-14s  %-14s  %s", "charKey", "syndicator", "rollup", "flag"))
+  push("Per-character (sorted by chosen gold descending):")
+
+  -- Header row: charKey + each registered source + chosen + source-of-choice
+  local headerCols = { string.format("  %-40s", "charKey") }
+  for _, name in ipairs(sourceOrder) do
+    headerCols[#headerCols + 1] = string.format("%-14s", name)
+  end
+  headerCols[#headerCols + 1] = string.format("%-14s", "chosen")
+  headerCols[#headerCols + 1] = string.format("%-12s", "source")
+  headerCols[#headerCols + 1] = "flag"
+  push(table.concat(headerCols, "  "))
 
   table.sort(g.perChar, function(a, b)
-    return (a.syndicatorMoney or -1) > (b.syndicatorMoney or -1)
+    return (a.chosenGold or a.syndicatorMoney or -1) > (b.chosenGold or b.syndicatorMoney or -1)
   end)
 
   for _, e in ipairs(g.perChar) do
-    local synStr = e.syndicatorMoney
-                   and (fmtG(e.syndicatorMoney) .. " g")
-                   or  "(nil)"
-    local rolStr = e.inRollup
-                   and (fmtG(e.rollupGold) .. " g")
-                   or  "(missing)"
-    local flag   = e.flag or ""
-    push(string.format("  %-40s  %-14s  %-14s  %s", e.charKey, synStr, rolStr, flag))
+    local row = { string.format("  %-40s", e.charKey) }
+    for _, name in ipairs(sourceOrder) do
+      local rec = e.sourceGold and e.sourceGold[name]
+      local cell = rec and (fmtG(rec.money) .. " g") or "—"
+      row[#row + 1] = string.format("%-14s", cell)
+    end
+    local chosenStr = e.chosenGold and (fmtG(e.chosenGold) .. " g") or "—"
+    row[#row + 1] = string.format("%-14s", chosenStr)
+    row[#row + 1] = string.format("%-12s", e.chosenSource or "—")
+    row[#row + 1] = e.flag or ""
+    push(table.concat(row, "  "))
   end
 
   push("")

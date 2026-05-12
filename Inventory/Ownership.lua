@@ -53,23 +53,77 @@ local function syndicator()
 end
 
 -- ============================================================================
--- Gold capture (TLY-68)
+-- Gold capture + multi-source authority (TLY-68 / TLY-69)
 -- ============================================================================
 --
--- Tally captures char + warband gold via real-time WoW events instead of
--- relying solely on Syndicator's snapshot. Stored account-wide in
--- TallyDB.charGold[charKey] and TallyDB.warbandGold so projectCharacter /
--- projectWarbandBank can prefer Tally's value when available — Syndicator
--- stays as the fallback for characters Tally hasn't seen log in yet
--- (e.g. an alt the user hasn't touched since installing alpha18).
+-- Tally's per-character gold view is built from a registry of source probes
+-- rather than a single source of truth. Each gold-bearing adapter exposes
+-- a probe function returning { money, moneyAt, source }. preferredCharGold
+-- walks the registry and picks the freshest record by `moneyAt`. Same
+-- authority / freshness pattern Ledger:Reconcile uses for transactions.
 --
--- Driven by PLAYER_LOGIN + PLAYER_MONEY (current char) and
--- PLAYER_INTERACTION_MANAGER_FRAME_SHOW for the account banker (warband).
+-- Sources for v1:
+--
+--   tally-native — TallyDB.charGold[charKey] (alpha18 capture). Written
+--                  at PLAYER_LOGIN + every PLAYER_MONEY. Highest fidelity
+--                  for any character Tally has seen log in under alpha18+.
+--   syndicator   — data.money from Syndicator.API.GetByCharacterFullName.
+--                  Snapshot — Syndicator only refreshes a char's gold when
+--                  that char logs in with Syndicator running, so this is
+--                  stale for alts the player hasn't touched in a while.
+--                  No direct timestamp from the API; we use the rollup's
+--                  lastFullScan as a coarse proxy so timestamped sources
+--                  (Tally, TSM) reliably win when fresher.
+--   tsm          — Sources/TSM.lua's :ProbeCharGold. TSM Accounting logs
+--                  per-character balance + minute-precision timestamp on
+--                  every gold transaction; gives us free coverage of any
+--                  char with TSM activity history, including alts the
+--                  player hasn't cycled with Tally yet.
+--
+-- Adapters register via Inventory:RegisterGoldSource(name, probeFn). The
+-- registry walks in deterministic order so /tally diag gold can surface
+-- the per-source contribution audit table.
+
+Ownership._goldSources = {}            -- ordered list of { name, probe }
+Ownership._goldSourcesByName = {}      -- name → registry entry (dedupe)
+
+function Ownership:RegisterGoldSource(name, probeFn)
+  if type(name) ~= "string" or type(probeFn) ~= "function" then return end
+  if self._goldSourcesByName[name] then return end  -- idempotent
+  local entry = { name = name, probe = probeFn }
+  self._goldSources[#self._goldSources + 1] = entry
+  self._goldSourcesByName[name] = entry
+end
+
+function Ownership:GetGoldSources()
+  local out = {}
+  for i, e in ipairs(self._goldSources) do out[i] = e.name end
+  return out
+end
+
+-- Walks every registered source, calls its probe for charKey, and returns
+-- the freshest result by `moneyAt`. Returns the full record for callers
+-- that want provenance, plus a quick accessor for the money value.
+function Ownership:ProbeCharGoldAll(charKey)
+  local results = {}
+  for _, entry in ipairs(self._goldSources) do
+    local ok, record = pcall(entry.probe, charKey)
+    if ok and type(record) == "table" and type(record.money) == "number" then
+      record.source = record.source or entry.name
+      results[#results + 1] = record
+    end
+  end
+  return results
+end
 
 local function preferredCharGold(charKey)
-  local own = TallyDB and TallyDB.charGold and TallyDB.charGold[charKey]
-  if own and own.money then return own.money end
-  return nil
+  local best
+  for _, record in ipairs(Ownership:ProbeCharGoldAll(charKey)) do
+    if not best or (record.moneyAt or 0) > (best.moneyAt or 0) then
+      best = record
+    end
+  end
+  return best and best.money or nil, best
 end
 
 local function preferredWarbandGold()
@@ -77,6 +131,11 @@ local function preferredWarbandGold()
     return TallyDB.warbandGold.money
   end
   return nil
+end
+
+-- Public surface for inspectors / diag that want per-source provenance.
+function Ownership:PreferredCharGold(charKey)
+  return preferredCharGold(charKey)
 end
 
 function Ownership:CaptureCurrentCharGold()
@@ -111,6 +170,32 @@ function Ownership:CaptureWarbandGold()
     TallyDB.warbandGold = { money = money, moneyAt = time() }
   end
 end
+
+-- ----------------------------------------------------------------------------
+-- Built-in gold sources: tally-native + syndicator
+-- ----------------------------------------------------------------------------
+--
+-- Registered at module-load so they're available for the first projectChar
+-- pass during inventory rebuild. Sibling-source probes (TSM, future
+-- Accountant) self-register when their adapter file loads.
+
+Ownership:RegisterGoldSource("tally-native", function(charKey)
+  local rec = TallyDB and TallyDB.charGold and TallyDB.charGold[charKey]
+  if not rec or type(rec.money) ~= "number" then return nil end
+  return { money = rec.money, moneyAt = rec.moneyAt or 0, source = "tally-native" }
+end)
+
+Ownership:RegisterGoldSource("syndicator", function(charKey)
+  local api = syndicator()
+  if not api or not api.GetByCharacterFullName then return nil end
+  local data = api.GetByCharacterFullName(charKey)
+  if type(data) ~= "table" or type(data.money) ~= "number" then return nil end
+  -- Syndicator doesn't expose a per-character cache timestamp; use the
+  -- rollup's lastFullScan as a coarse freshness proxy so any timestamped
+  -- source (Tally-native, TSM) reliably wins when actually fresher.
+  local rollupTs = TallyDB and TallyDB.inventoryRollup and TallyDB.inventoryRollup.lastFullScan
+  return { money = data.money, moneyAt = rollupTs or 0, source = "syndicator" }
+end)
 
 -- WoW Tokens are technically bind-on-pickup but are convertible to gold or
 -- game time, so we count them as saleable regardless of isBound. Items

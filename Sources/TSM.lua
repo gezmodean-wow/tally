@@ -344,6 +344,106 @@ function TSMSrc:ProbeMetadata()
   }
 end
 
+-- ============================================================================
+-- ProbeCharGold (TLY-69 multi-source gold authority)
+-- ============================================================================
+--
+-- TSM Accounting tracks per-character gold balances under
+-- TradeSkillMasterDB["s@<char> - <faction> - <realm>@internalData@goldLog"]
+-- as a CSV string: `minute,copper\n<minute>,<copper>\n...`. Each row is
+-- a balance snapshot at the moment of a gold-changing event; minute is
+-- `floor(epoch / 60)`. The last row gives us the most recently observed
+-- balance + its timestamp — the freshness signal Tally's multi-source
+-- authority needs to outrank a stale Syndicator snapshot.
+--
+-- Realm-name normalisation: TSM stores realm with spaces ("Wyrmrest
+-- Accord"); Tally/Syndicator use space-stripped charKeys
+-- ("Foo-WyrmrestAccord"). The index parser strips spaces from realm when
+-- building the lookup key.
+--
+-- The per-character index is built lazily on first probe per session and
+-- cached for the rest of the session. Refresh on demand via :ResetGoldCache.
+-- Build cost: one O(N) walk over TradeSkillMasterDB pulling only the
+-- goldLog-keyed entries plus a tail-scan of each char's CSV.
+
+local _goldIndex      -- { [charKey] = { money, moneyAt, source = "tsm" } }
+local _goldIndexBuilt = false
+
+local function parseLastBalance(csv)
+  if type(csv) ~= "string" or csv == "" then return nil, nil end
+  -- Walk backwards to find the last non-empty data row, skipping a
+  -- trailing newline if present.
+  local len = #csv
+  local tailEnd = len
+  while tailEnd > 0 and csv:sub(tailEnd, tailEnd) == "\n" do
+    tailEnd = tailEnd - 1
+  end
+  if tailEnd == 0 then return nil, nil end
+  local tailStart = tailEnd
+  while tailStart > 1 and csv:sub(tailStart - 1, tailStart - 1) ~= "\n" do
+    tailStart = tailStart - 1
+  end
+  local lastRow = csv:sub(tailStart, tailEnd)
+  -- Skip header row if that's somehow what we landed on.
+  if lastRow == "minute,copper" then return nil, nil end
+  local minute, copper = lastRow:match("^(%d+),(%-?%d+)$")
+  if not minute then return nil, nil end
+  return tonumber(copper), tonumber(minute) * 60
+end
+
+local function buildGoldIndex()
+  _goldIndex = {}
+  _goldIndexBuilt = true
+  if not isAvailable() then return end
+  -- Key shape: "s@<char> - <faction> - <realm>@internalData@goldLog"
+  -- Faction has no embedded " - " so the three-part split is unambiguous
+  -- even for realm names containing dashes ("Aerie Peak" has none in
+  -- practice; the convention is " - " with surrounding spaces).
+  local pattern = "^s@(.-) %- (.-) %- (.-)@internalData@goldLog$"
+  for key, value in pairs(_G.TradeSkillMasterDB) do
+    if type(value) == "string" and value ~= "" then
+      local char, _faction, realm = key:match(pattern)
+      if char and realm then
+        local money, moneyAt = parseLastBalance(value)
+        if money and moneyAt then
+          local charKey = char .. "-" .. realm:gsub(" ", "")
+          local existing = _goldIndex[charKey]
+          -- A character can exist on multiple factions (rare but possible
+          -- via faction change). Pick the freshest entry.
+          if not existing or moneyAt > (existing.moneyAt or 0) then
+            _goldIndex[charKey] = { money = money, moneyAt = moneyAt, source = "tsm" }
+          end
+        end
+      end
+    end
+  end
+end
+
+function TSMSrc:ProbeCharGold(charKey)
+  if not _goldIndexBuilt then buildGoldIndex() end
+  local rec = _goldIndex and _goldIndex[charKey]
+  if not rec then return nil end
+  return { money = rec.money, moneyAt = rec.moneyAt, source = "tsm" }
+end
+
+-- Force a rebuild of the TSM goldLog index on the next probe. Call after
+-- the user runs a TSM import or a /reload cycle that may have refreshed
+-- the underlying CSV strings.
+function TSMSrc:ResetGoldCache()
+  _goldIndex = nil
+  _goldIndexBuilt = false
+end
+
+-- Self-register with Inventory's multi-source gold registry at module
+-- load time so the probe is available before PLAYER_LOGIN fires. Tally-
+-- native + Syndicator are registered from Inventory/Ownership directly;
+-- adapter-specific probes self-register from their own file.
+if ns.Inventory and ns.Inventory.RegisterGoldSource then
+  ns.Inventory:RegisterGoldSource("tsm", function(charKey)
+    return TSMSrc:ProbeCharGold(charKey)
+  end)
+end
+
 -- Exposed for testing.
 TSMSrc.IsAvailable = isAvailable
 TSMSrc.ImportAll = importAll
