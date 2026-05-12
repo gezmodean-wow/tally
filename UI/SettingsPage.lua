@@ -115,7 +115,7 @@ local function makeNumericField(parent, opts)
     local ok, err = opts.setter(n or 0)
     if not ok then
       flashError(); load()
-      if err then print("|cffff4040Tally:|r " .. err) end
+      if err and ns.Output then ns.Output:Error(tostring(err)) end
     else
       load()
     end
@@ -306,10 +306,10 @@ function ns.UI.CreateSettingsPage(parent)
       C_Timer.After(0.6, function()
         stratInput:SetBackdropBorderColor(themeColor("border", { 0.30, 0.30, 0.40, 1 }))
       end)
-      if err then print("|cffff4040Tally:|r " .. err) end
+      if err and ns.Output then ns.Output:Error(tostring(err)) end
       loadStrategy()
-    else
-      print("|cff7fbfffTally:|r price strategy set to '" .. expr .. "'.")
+    elseif ns.Output then
+      ns.Output:Success("Price strategy set to '" .. expr .. "'.")
     end
   end
   stratInput:SetScript("OnEnterPressed", function(self) commitStrategy(); self:ClearFocus() end)
@@ -374,11 +374,11 @@ function ns.UI.CreateSettingsPage(parent)
   local snapBtn = makeButton(actionRow, "Take snapshot now", 160, function()
     if not ns.History then return end
     local ok, info = ns.History:Snapshot({ force = true })
-    if ok then
-      print(string.format("|cff7fbfffTally:|r snapshot recorded — %d priced items, %d inventory items.",
+    if ok and ns.Output then
+      ns.Output:Success(string.format("Snapshot recorded — %d priced items, %d inventory items.",
         info.pricedItems, info.inventoryItems))
-    else
-      print("|cffff4040Tally:|r " .. tostring(info))
+    elseif not ok and ns.Output then
+      ns.Output:Error(tostring(info))
     end
     loadSnapStatus()
   end)
@@ -394,7 +394,7 @@ function ns.UI.CreateSettingsPage(parent)
       hideOnEscape = true,
       OnAccept = function()
         if ns.History then ns.History:Clear() end
-        print("|cff7fbfffTally:|r all history cleared.")
+        if ns.Output then ns.Output:Success("All history cleared.") end
         if page.Refresh then page:Refresh() end
       end,
     }
@@ -481,10 +481,10 @@ function ns.UI.CreateSettingsPage(parent)
       row.btn:SetEnabled(available)
       row.btn:SetScript("OnClick", function()
         local inserted, skipped, err = ns.Ledger:ImportFromSource(s.name)
-        if err then
-          print("|cffff4040Tally:|r import failed for " .. s.name .. " — " .. tostring(err))
-        else
-          print(string.format("|cff7fbfffTally:|r imported %d new entries from %s (%d skipped as duplicates).",
+        if err and ns.Output then
+          ns.Output:Error("Import failed for " .. s.name .. " — " .. tostring(err))
+        elseif ns.Output then
+          ns.Output:Success(string.format("Imported %d new entries from %s (%d skipped as duplicates).",
             inserted or 0, s.name, skipped or 0))
         end
         loadSources()
@@ -508,8 +508,11 @@ function ns.UI.CreateSettingsPage(parent)
   setupRow:SetHeight(24)
 
   local rerunBtn = makeButton(setupRow, "Re-run setup wizard", 180, function()
-    if ns.UI and ns.UI.ShowSetupWizard then ns.UI.ShowSetupWizard()
-    else print("|cffff4040Tally:|r setup wizard unavailable.") end
+    if ns.UI and ns.UI.ShowSetupWizard then
+      ns.UI.ShowSetupWizard()
+    elseif ns.Output then
+      ns.Output:Error("Setup wizard unavailable.")
+    end
   end)
   rerunBtn:SetPoint("LEFT", setupRow, "LEFT", 0, 0)
 
@@ -567,21 +570,21 @@ function ns.UI.CreateSettingsPage(parent)
 
   local sealBtn = makeButton(sealRow, "Seal old data into archives", 220, function()
     if not (ns.Ledger and ns.Ledger.Seal) then
-      print("|cffff4040Tally:|r seal unavailable.")
+      if ns.Output then ns.Output:Error("Seal unavailable.") end
       return
     end
     if ns.Ledger:IsMigrationRunning() then
-      print("|cffffe080Tally:|r migration in progress — wait for it to finish before sealing.")
+      if ns.Output then ns.Output:Warn("Migration in progress — wait for it to finish before sealing.") end
       return
     end
     if ns.Ledger:IsSealRunning() then
-      print("|cffffe080Tally:|r seal already running.")
+      if ns.Output then ns.Output:Warn("Seal already running.") end
       return
     end
 
     local preview = ns.Ledger:SealPreview()
     if preview.sealCount == 0 then
-      print("|cff7fbfffTally:|r nothing to seal — active set is within the soft cap.")
+      if ns.Output then ns.Output:Info("Nothing to seal — active set is within the soft cap.") end
       return
     end
 
@@ -594,16 +597,21 @@ function ns.UI.CreateSettingsPage(parent)
       hideOnEscape = true,
     }
     StaticPopupDialogs["TALLY_SEAL_CONFIRM"].OnAccept = function()
-      print(string.format("|cff7fbfffTally:|r sealing %d rows into archives…", preview.sealCount))
+      if ns.Output then
+        ns.Output:Info(string.format("Sealing %d rows into archives…", preview.sealCount))
+      end
       ns.Ledger:Seal({
         onProgress = function(phase, idx, total, key)
-          if phase == "flush" then
-            print(string.format("  flushing archive %s (%d / %d)", key or "?", idx, total))
+          if phase == "flush" and ns.Output then
+            ns.Output:Debug(string.format("seal flush archive %s (%d / %d)", key or "?", idx, total))
           end
         end,
         onComplete = function(sealed, archivesWritten)
-          print(string.format("|cff80ff80Tally:|r sealed %d rows into %d archives. Logout will save the slimmed active set.",
-            sealed, archivesWritten))
+          if ns.Output then
+            ns.Output:Success(string.format(
+              "Sealed %d rows into %d archives. Logout will save the slimmed active set.",
+              sealed, archivesWritten))
+          end
           if outer.Refresh then pcall(outer.Refresh, outer) end
           if ns.UI and ns.UI.MainFrame and ns.UI.MainFrame.UpdateHeaderNudge then
             pcall(ns.UI.MainFrame.UpdateHeaderNudge, ns.UI.MainFrame)

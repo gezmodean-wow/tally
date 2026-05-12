@@ -131,16 +131,21 @@ local function build()
       hideOnEscape = true,
     }
     StaticPopupDialogs["TALLY_SEAL_CONFIRM_HEADER"].OnAccept = function()
-      print(string.format("|cff7fbfffTally:|r sealing %d rows into archives…", preview.sealCount))
+      if ns.Output then
+        ns.Output:Info(string.format("Sealing %d rows into archives…", preview.sealCount))
+      end
       ns.Ledger:Seal({
         onProgress = function(phase, idx, total, key)
-          if phase == "flush" then
-            print(string.format("  flushing archive %s (%d / %d)", key or "?", idx, total))
+          if phase == "flush" and ns.Output then
+            ns.Output:Debug(string.format("seal flush archive %s (%d / %d)", key or "?", idx, total))
           end
         end,
         onComplete = function(sealed, archivesWritten)
-          print(string.format("|cff80ff80Tally:|r sealed %d rows into %d archives. Logout will save the slimmed active set.",
-            sealed, archivesWritten))
+          if ns.Output then
+            ns.Output:Success(string.format(
+              "Sealed %d rows into %d archives. Logout will save the slimmed active set.",
+              sealed, archivesWritten))
+          end
           MainFrame:UpdateHeaderNudge()
           MainFrame:RefreshActivePage()
         end,
@@ -304,8 +309,11 @@ end
 function MainFrame:RegisterPage(name, createFn)
   if pages[name] then return end
   if tabPanel then
-    print(string.format("|cffff8000Tally:|r late page registration ignored — '%s' "
-      .. "registered after main frame was first shown.", name))
+    if ns.Output then
+      ns.Output:Debug(string.format(
+        "late page registration ignored — '%s' registered after main frame was first shown",
+        name))
+    end
     return
   end
   pages[name] = { create = createFn, instance = nil }

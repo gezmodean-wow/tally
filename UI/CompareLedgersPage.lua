@@ -364,14 +364,11 @@ function ns.UI.CreateCompareLedgersPage(parent)
     emit("  " .. bucketLine("B-only by source", bBySource))
 
     local text = table.concat(lines, "\n")
-    -- Prefer Cogworks's copy-friendly dialog (same primitive `/tally diag copy`
-    -- uses) so the long multi-section dump is selectable + paste-ready. Fall
-    -- back to chat for installs without the lib.
-    local cw = getCogworks()
-    if cw and cw.CreateCopyDialog then
-      cw:CreateCopyDialog(text, "Paste this into a Tally GitHub issue (Compare divergence report).")
-    else
-      for _, line in ipairs(lines) do print(line) end
+    -- Compare divergence dump is paste-ready text — route through the
+    -- Output router so the chat fallback (degraded path) is centralised
+    -- with the rest of TLY-70's channel taxonomy.
+    if ns.Output then
+      ns.Output:Inspect(text, "Paste this into a Tally GitHub issue (Compare divergence report).")
     end
   end)
 

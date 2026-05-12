@@ -448,7 +448,9 @@ function ns.UI.CreateLifecyclePage(parent)
     end
 
     if not itemID then
-      print("|cffff4040Tally:|r could not resolve '" .. text .. "' to an item ID.")
+      if ns.Output then
+        ns.Output:Error("Could not resolve '" .. text .. "' to an item ID.")
+      end
       return
     end
     state.itemID = itemID

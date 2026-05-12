@@ -466,15 +466,12 @@ function ns.UI.CreateLedgerPage(parent)
     end
 
     local text = table.concat(lines, "\n")
-    local cw = getCogworks()
-    if cw and cw.CreateCopyDialog then
-      cw:CreateCopyDialog(text, string.format(
+    if ns.Output then
+      ns.Output:Inspect(text, string.format(
         "Tally Ledger export (%s, %d %s, %s mode) — paste into a GitHub issue or external tool.",
         filter.label, stats.count or 0,
         state.mode == "reconciled" and "records" or "entries",
         state.mode))
-    else
-      for _, line in ipairs(lines) do print(line) end
     end
   end)
 

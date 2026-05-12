@@ -349,8 +349,9 @@ local function createWizardFrame()
 
   local cw = getCogworks()
   if not (cw and cw.CreateWizard) then
-    print("|cffff4040Tally:|r setup wizard requires Cogworks v0.11.0+. "
-      .. "Update Cogworks-1.0 to get the wizard primitive.")
+    if ns.Output then
+      ns.Output:Error("Setup wizard requires Cogworks v0.11.0+. Update Cogworks-1.0 to get the wizard primitive.")
+    end
     return nil
   end
 
