@@ -1785,8 +1785,8 @@ local function handleNetWorth(rest, includeBound)
     end
     local label = string.format("(at %s, %s ago)",
       date("%Y-%m-%d %H:%M", snap.atTime), describeAge(offsetSec))
-    ns.NetWorth:PrintSnapshot(snap, label)
-    if info then print("  |cffffd070note:|r " .. info) end
+    local text = ns.NetWorth:FormatSnapshot(snap, label)
+    if info and info ~= "" then text = text .. "\n  note: " .. tostring(info) end
     -- Δ vs current
     local current = ns.NetWorth:Snapshot({ includeBound = includeBound })
     local delta = current.total - snap.total
@@ -1795,8 +1795,11 @@ local function handleNetWorth(rest, includeBound)
     if snap.total > 0 then
       pct = string.format(" (%s%.1f%%)", delta >= 0 and "+" or "-", math.abs(delta / snap.total) * 100)
     end
-    print(string.format("  Δ vs now: %s%s%s",
-      sign, ns.NetWorth.FormatGold(math.abs(delta)), pct))
+    text = text .. string.format("\n  Δ vs now: %s%s%s",
+      sign, ns.NetWorth.FormatGold(math.abs(delta)), pct)
+    if ns.Output then
+      ns.Output:Inspect(text, "Tally historical net-worth snapshot.")
+    end
     return
   end
 

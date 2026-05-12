@@ -93,34 +93,58 @@ end
 
 NetWorth.FormatGold = formatGold
 
--- Pretty-print an arbitrary snapshot (current or reconstructed). headerSuffix
--- is appended to the title line — useful for "(at 2026-04-21 14:30)" on
--- historical snapshots.
-function NetWorth:PrintSnapshot(snap, headerSuffix)
-  local prefix = "|cff7fbfffTally|r"
+-- Build a plain-text representation of an arbitrary snapshot (current or
+-- reconstructed). headerSuffix is appended to the title line — useful for
+-- "(at 2026-04-21 14:30)" on historical snapshots. Returns a single string
+-- with newlines so callers can route into ns.Output:Inspect (copy-dialog)
+-- or split for explicit chat opt-in.
+function NetWorth:FormatSnapshot(snap, headerSuffix)
+  local lines = {}
+  local function emit(s) lines[#lines + 1] = s end
+
   local label = snap.view == "owned" and "owned worth (incl. bound)" or "net worth (saleable only)"
-  local header = label .. " — " .. snap.strategy
+  local header = "Tally " .. label .. " — " .. snap.strategy
   if headerSuffix and headerSuffix ~= "" then header = header .. " " .. headerSuffix end
-  print(prefix .. " " .. header .. ":")
-  print("  Total: " .. formatGold(snap.total))
-  print("    Gold: " .. formatGold(snap.gold))
-  print("    Items: " .. formatGold(snap.items))
+  emit(header)
+  emit("  Total: " .. formatGold(snap.total))
+  emit("    Gold: " .. formatGold(snap.gold))
+  emit("    Items: " .. formatGold(snap.items))
   if snap.breakdown and snap.breakdown.none and snap.breakdown.none > 0 then
-    print("    |cffff8080Unpriced items:|r " .. formatGold(snap.breakdown.none))
+    emit("    Unpriced items: " .. formatGold(snap.breakdown.none))
   end
   if snap.warband and snap.warband.total > 0 then
-    print("  Warband: " .. formatGold(snap.warband.total)
-      .. " (" .. formatGold(snap.warband.gold) .. " gold + " .. formatGold(snap.warband.items) .. " items)")
+    emit("  Warband: " .. formatGold(snap.warband.total)
+      .. " (" .. formatGold(snap.warband.gold) .. " gold + "
+      .. formatGold(snap.warband.items) .. " items)")
   end
   local chars = {}
   for k, v in pairs(snap.byCharacter or {}) do chars[#chars + 1] = { key = k, data = v } end
   table.sort(chars, function(a, b) return a.data.total > b.data.total end)
   for _, c in ipairs(chars) do
-    print(string.format("  %s: %s (%s gold + %s items)",
+    emit(string.format("  %s: %s (%s gold + %s items)",
       c.key, formatGold(c.data.total), formatGold(c.data.gold), formatGold(c.data.items)))
+  end
+  return table.concat(lines, "\n")
+end
+
+-- Backward-compat shim: prints the formatted snapshot to chat line-by-line.
+-- New code should call FormatSnapshot + ns.Output:Inspect instead. This
+-- path remains for any caller that explicitly wants chat output.
+function NetWorth:PrintSnapshot(snap, headerSuffix)
+  for line in self:FormatSnapshot(snap, headerSuffix):gmatch("[^\n]+") do
+    print(line)
   end
 end
 
+-- /tally networth output now defaults to a copy-dialog so the multi-line
+-- per-character breakdown is paste-ready into a GitHub issue. TLY-70
+-- channel taxonomy: multi-line diagnostic content goes through Inspect.
 function NetWorth:Print(opts)
-  self:PrintSnapshot(self:Snapshot(opts))
+  local snap = self:Snapshot(opts)
+  if ns.Output and ns.Output.Inspect then
+    ns.Output:Inspect(self:FormatSnapshot(snap),
+      "Tally net-worth snapshot — paste into a GitHub issue or external tool.")
+  else
+    self:PrintSnapshot(snap)
+  end
 end
