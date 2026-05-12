@@ -364,14 +364,15 @@ _G.TallyAPI = {
 -- own backfill on Finish and double-insert / starve the user's input
 -- thread before they've even picked a pace.
 local function resetData()
-  local prefix = "|cff7fbfffTally|r"
   if ns.Ledger and ns.Ledger.Clear then ns.Ledger:Clear() end
   if ns.History and ns.History.Clear then ns.History:Clear() end
   TallyDB.inventoryRollup = nil
   TallyDB.setup = nil          -- clear completed flag so wizard re-fires
   TallyDB.disabledSources = nil -- re-let the user pick sources in the wizard
 
-  print(prefix .. " data cleared (ledger, history, inventory rollup, setup state). Rebuilding inventory…")
+  if ns.Output then
+    ns.Output:Info("Data cleared (ledger, history, inventory rollup, setup state). Rebuilding inventory…")
+  end
 
   if ns.Inventory and ns.Inventory.Rebuild then
     ns.Inventory:Rebuild()
@@ -397,17 +398,23 @@ local function resetData()
       if ns.RefreshLDB then pcall(ns.RefreshLDB) end
       if ns.UI and ns.UI.ShowSetupWizard then
         ns.UI.ShowSetupWizard()
-        print(prefix .. " setup wizard reopened — your data will be re-imported when you finish it.")
+        if ns.Output then
+          ns.Output:Success("Setup wizard reopened — your data will be re-imported when you finish it.")
+        end
       else
         -- Wizard unavailable (no Cogworks v0.11.0?). Fall back to the old
         -- behaviour: synchronous slurp. Better than leaving the user with
         -- an empty ledger.
-        print(prefix .. " setup wizard unavailable; running synchronous backfill instead.")
+        if ns.Output then
+          ns.Output:Warn("Setup wizard unavailable; running synchronous backfill instead.")
+        end
         if ns.Ledger and ns.Ledger.ImportFromAllSources then
           local results = ns.Ledger:ImportFromAllSources()
           local total = 0
           for _, r in ipairs(results) do total = total + (r.inserted or 0) end
-          print(string.format("%s reset complete — %d ledger entries re-imported.", prefix, total))
+          if ns.Output then
+            ns.Output:Success(string.format("Reset complete — %d ledger entries re-imported.", total))
+          end
         end
       end
     end)
@@ -549,20 +556,22 @@ local function handleSeed(rest)
   -- /tally seed clear
   if sub == "clear" then
     if not (ns.Ledger and ns.Ledger.ClearSourceAsync) then
-      print("|cffff4040Tally:|r ledger unavailable.")
+      if ns.Output then ns.Output:Error("Ledger unavailable.") end
       return
     end
-    print("|cff7fbfffTally:|r clearing seeded entries (chunked across archives)…")
+    if ns.Output then ns.Output:Info("Clearing seeded entries (chunked across archives)…") end
     ns.Ledger:ClearSourceAsync(SEED_SOURCE, {
       onProgress = function(idx, total, key, removedSoFar)
-        if idx % 5 == 0 or idx == total then
-          print(string.format("  scanned %s (%d / %d), %d removed so far",
+        if ns.Output then
+          ns.Output:Debug(string.format("seed clear scanned %s (%d / %d), %d removed so far",
             key or "?", idx, total, removedSoFar or 0))
         end
       end,
       onComplete = function(totalRemoved)
-        print(string.format("|cff80ff80Tally:|r cleared %d seeded entries from active + archives.",
-          totalRemoved or 0))
+        if ns.Output then
+          ns.Output:Success(string.format("Cleared %d seeded entries from active + archives.",
+            totalRemoved or 0))
+        end
         if ns.UI and ns.UI.MainFrame then
           if ns.UI.MainFrame.UpdateHeaderNudge then
             pcall(ns.UI.MainFrame.UpdateHeaderNudge, ns.UI.MainFrame)
@@ -582,15 +591,17 @@ local function handleSeed(rest)
     local LibSerialize = LibStub and LibStub("LibSerialize", true)
     local LibDeflate   = LibStub and LibStub("LibDeflate", true)
     if not (LibSerialize and LibDeflate) then
-      print("|cffff4040Tally:|r LibSerialize / LibDeflate unavailable.")
+      if ns.Output then ns.Output:Error("LibSerialize / LibDeflate unavailable.") end
       return
     end
 
-    print(string.format("|cff7fbfffTally:|r generating %d synthetic entries (chunked)…", n))
+    if ns.Output then
+      ns.Output:Info(string.format("Generating %d synthetic entries (chunked)…", n))
+    end
     generateSeedEntriesChunked(n, 12, {
       onProgress = function(idx, total)
-        if idx % 25000 == 0 then
-          print(string.format("  generated %d / %d", idx, total))
+        if ns.Output then
+          ns.Output:Debug(string.format("seed legacy generated %d / %d", idx, total))
         end
       end,
       onComplete = function(entries)
@@ -602,12 +613,16 @@ local function handleSeed(rest)
         -- every entry in one pass). The async handler yields every 4096
         -- items so the work spreads across ticks. After completion, run
         -- the (smaller, faster) compress synchronously.
-        print("|cff7fbfffTally:|r serialising async (yields every 4096 items)…")
+        if ns.Output then
+          ns.Output:Info("Serialising async (yields every 4096 items)…")
+        end
         local handler = LibSerialize:SerializeAsync({ entries = entries, byId = byId })
         local function step()
           local ok, completed, serialised = pcall(handler)
           if not ok then
-            print("|cffff4040Tally:|r serialise failed: " .. tostring(completed))
+            if ns.Output then
+              ns.Output:Error("Serialise failed: " .. tostring(completed))
+            end
             return
           end
           if not completed then
@@ -619,7 +634,9 @@ local function handleSeed(rest)
             return
           end
 
-          print(string.format("|cff7fbfffTally:|r serialise complete (%d bytes); compressing…", #serialised))
+          if ns.Output then
+            ns.Output:Info(string.format("Serialise complete (%d bytes); compressing…", #serialised))
+          end
           local compressed = LibDeflate:CompressDeflate(serialised, { level = 1 })
 
           TallyDB = TallyDB or {}
@@ -661,10 +678,11 @@ local function handleSeed(rest)
             ns.Ledger:WipeForLegacySeed()
           end
 
-          print(string.format("|cff80ff80Tally:|r wrote %d entries to legacy blob (%d bytes compressed, %d serialised).",
-            n, #compressed, #serialised))
-          print("|cffffe080Tally:|r in-memory active wiped — legacy blob is the only ledger now.")
-          print("|cff80ff80Tally:|r run |cff80c0ff/reload|r — loadFromDisk will detect the legacy blob and start the migration pass.")
+          if ns.Output then
+            ns.Output:Success(string.format(
+              "Wrote %d entries to legacy blob (%d bytes compressed, %d serialised). In-memory active wiped — legacy blob is the only ledger now. Run /reload to detect the legacy blob and start migration.",
+              n, #compressed, #serialised))
+          end
         end
         step()
       end,
@@ -677,40 +695,53 @@ local function handleSeed(rest)
   if n < 1 then n = 100000 end
 
   if not (ns.Ledger and ns.Ledger.InsertManyChunkedRouted) then
-    print("|cffff4040Tally:|r tiered storage unavailable — InsertManyChunkedRouted missing.")
+    if ns.Output then
+      ns.Output:Error("Tiered storage unavailable — InsertManyChunkedRouted missing.")
+    end
     return
   end
 
-  print(string.format("|cff7fbfffTally:|r generating %d synthetic entries (chunked)…", n))
+  if ns.Output then
+    ns.Output:Info(string.format("Generating %d synthetic entries (chunked)…", n))
+  end
   generateSeedEntriesChunked(n, 12, {
     onProgress = function(idx, total)
-      if idx % 25000 == 0 then
-        print(string.format("  generated %d / %d", idx, total))
+      if ns.Output then
+        ns.Output:Debug(string.format("seed generated %d / %d", idx, total))
       end
     end,
     onComplete = function(entries)
-      print("|cff7fbfffTally:|r routing into active + staging…")
+      if ns.Output then ns.Output:Info("Routing into active + staging…") end
       ns.Ledger:InsertManyChunkedRouted(entries, {
         chunkSize = 500,
         delaySec  = 0.005,
         onProgress = function(inserted, total)
-          if inserted % 25000 == 0 then
-            print(string.format("  routed %d / %d (%d%%)", inserted, total, math.floor(100 * inserted / total)))
+          if ns.Output then
+            ns.Output:Debug(string.format("seed routed %d / %d (%d%%)",
+              inserted, total, math.floor(100 * inserted / total)))
           end
         end,
         onDone = function(inserted, skipped, insertedActive, insertedStaging)
-          print(string.format("|cff80ff80Tally:|r seeded %d entries — %d to active, %d to staging buckets (%d skipped).",
-            inserted, insertedActive or 0, insertedStaging or 0, skipped or 0))
+          if ns.Output then
+            ns.Output:Success(string.format(
+              "Seeded %d entries — %d to active, %d to staging buckets (%d skipped).",
+              inserted, insertedActive or 0, insertedStaging or 0, skipped or 0))
+          end
           if ns.Ledger.GetStagingRowCount and ns.Ledger:GetStagingRowCount() > 0 then
-            print("|cff7fbfffTally:|r flushing staging buckets to archives…")
+            if ns.Output then ns.Output:Info("Flushing staging buckets to archives…") end
             ns.Ledger:FlushStaging({
               delaySec = 0.005,
               onProgress = function(idx, total, key)
-                print(string.format("  flushing %s (%d / %d)", key or "?", idx, total))
+                if ns.Output then
+                  ns.Output:Debug(string.format("seed flush %s (%d / %d)", key or "?", idx, total))
+                end
               end,
               onComplete = function(archivesWritten, rowsArchived)
-                print(string.format("|cff80ff80Tally:|r flush complete — %d archives, %d archived rows.",
-                  archivesWritten, rowsArchived))
+                if ns.Output then
+                  ns.Output:Success(string.format(
+                    "Flush complete — %d archives, %d archived rows.",
+                    archivesWritten, rowsArchived))
+                end
                 if ns.UI and ns.UI.MainFrame and ns.UI.MainFrame.UpdateHeaderNudge then
                   pcall(ns.UI.MainFrame.UpdateHeaderNudge, ns.UI.MainFrame)
                 end
@@ -1438,15 +1469,8 @@ end
 
 local function divergenceCopyDialog()
   local text = formatDivergenceReport()
-  if Cogworks and Cogworks.CreateCopyDialog then
-    Cogworks:CreateCopyDialog(text,
-      "Tally divergence report — paste into a GitHub issue or external tool.")
-  else
-    -- Cogworks copy dialog unavailable — fall back to chat. Per the
-    -- alpha10 stance, debug output should land in a copy-dialog by
-    -- default; chat is strictly the degraded path.
-    print("|cffff4040Tally:|r CreateCopyDialog unavailable; printing to chat.")
-    for line in text:gmatch("[^\n]+") do print(line) end
+  if ns.Output then
+    ns.Output:Inspect(text, "Tally divergence report — paste into a GitHub issue or external tool.")
   end
 end
 
@@ -1535,12 +1559,8 @@ end
 
 local function goldCopyDialog()
   local text = formatGoldReport()
-  if Cogworks and Cogworks.CreateCopyDialog then
-    Cogworks:CreateCopyDialog(text,
-      "Tally gold report — paste into a GitHub issue.")
-  else
-    print("|cffff4040Tally:|r CreateCopyDialog unavailable; printing to chat.")
-    for line in text:gmatch("[^\n]+") do print(line) end
+  if ns.Output then
+    ns.Output:Inspect(text, "Tally gold report — paste into a GitHub issue.")
   end
 end
 
@@ -1679,12 +1699,8 @@ end
 
 local function sourcesCopyDialog()
   local text = formatSourcesProbeReport()
-  if Cogworks and Cogworks.CreateCopyDialog then
-    Cogworks:CreateCopyDialog(text,
-      "Tally sibling-source probe — paste into a GitHub issue.")
-  else
-    print("|cffff4040Tally:|r CreateCopyDialog unavailable; printing to chat.")
-    for line in text:gmatch("[^\n]+") do print(line) end
+  if ns.Output then
+    ns.Output:Inspect(text, "Tally sibling-source probe — paste into a GitHub issue.")
   end
 end
 
@@ -1697,7 +1713,9 @@ ns.SourcesCopyDialog = sourcesCopyDialog
 local debugConsole
 local function toggleDebugConsole()
   if not (Cogworks and Cogworks.CreateDebugConsole) then
-    print("|cffff4040Tally:|r debug console requires Cogworks v0.13+. Update Cogworks-1.0.")
+    if ns.Output then
+      ns.Output:Error("Debug console requires Cogworks v0.13+. Update Cogworks-1.0.")
+    end
     return
   end
   registerDiagInspectors()
@@ -1743,7 +1761,6 @@ local function parsePastOffsetSec(text)
 end
 
 local function handleNetWorth(rest, includeBound)
-  local err = "|cffff4040Tally:|r"
   rest = (rest or ""):match("^%s*(.-)%s*$")
 
   -- "at <duration>" → reconstruct historical snapshot.
@@ -1751,17 +1768,19 @@ local function handleNetWorth(rest, includeBound)
   if atArg then
     local offsetSec = parsePastOffsetSec(atArg)
     if not offsetSec then
-      print(err .. " usage — /tally networth at -<duration> (e.g. -7d, -1h, -30m)")
+      if ns.Output then
+        ns.Output:Error("Usage: /tally networth at -<duration> (e.g. -7d, -1h, -30m)")
+      end
       return
     end
     if not ns.History or not ns.History.GetNetWorthAt then
-      print(err .. " history module unavailable")
+      if ns.Output then ns.Output:Error("History module unavailable.") end
       return
     end
     local atTime = time() - offsetSec
     local snap, info = ns.History:GetNetWorthAt(atTime, { includeBound = includeBound })
     if not snap then
-      print(err .. " " .. tostring(info or "no historical data"))
+      if ns.Output then ns.Output:Error(tostring(info or "No historical data.")) end
       return
     end
     local label = string.format("(at %s, %s ago)",
@@ -1782,7 +1801,9 @@ local function handleNetWorth(rest, includeBound)
   end
 
   if rest ~= "" then
-    print(err .. " unknown net-worth subcommand. Try `/tally networth` or `/tally networth at -7d`.")
+    if ns.Output then
+      ns.Output:Error("Unknown net-worth subcommand. Try /tally networth or /tally networth at -7d.")
+    end
     return
   end
 
@@ -1790,8 +1811,6 @@ local function handleNetWorth(rest, includeBound)
 end
 
 local function handleHistory(args)
-  local prefix = "|cff7fbfffTally|r"
-  local err = "|cffff4040Tally:|r"
   local sub, rest = args:match("^(%S*)%s*(.*)$")
   sub = (sub or ""):lower()
 
@@ -1799,40 +1818,45 @@ local function handleHistory(args)
     local cfg = ns.History:GetConfig()
     local summary = ns.History:GetSummary()
     local now = time()
-    print(prefix .. " history:")
-    print(string.format("  interval: %s (0 = disabled)", describeAge(cfg.minIntervalSec)))
-    print(string.format("  retention: %s", describeAge(cfg.retentionSec)))
-    print(string.format("  daily-rollup after: %s", describeAge(cfg.rollupAfterSec)))
-    print("  pricing:")
+    local lines = {}
+    local function push(s) lines[#lines + 1] = s end
+    push("Tally history config")
+    push(string.format("  interval: %s (0 = disabled)", describeAge(cfg.minIntervalSec)))
+    push(string.format("  retention: %s", describeAge(cfg.retentionSec)))
+    push(string.format("  daily-rollup after: %s", describeAge(cfg.rollupAfterSec)))
+    push("  pricing:")
     if #summary.pricing == 0 then
-      print("    (no snapshots yet)")
+      push("    (no snapshots yet)")
     else
       for _, row in ipairs(summary.pricing) do
         local ageLast = row.lastSnapshotAt and (now - row.lastSnapshotAt) or nil
         local span = (row.lastSnapshotAt and row.oldestAt) and (row.lastSnapshotAt - row.oldestAt) or 0
-        print(string.format("    [%s] %d snapshots, last %s ago, spanning %s",
+        push(string.format("    [%s] %d snapshots, last %s ago, spanning %s",
           row.strategy, row.snapshotCount, describeAge(ageLast), describeAge(span)))
       end
     end
     local inv = summary.inventory
     if inv.snapshotCount == 0 then
-      print("  inventory: (no snapshots yet)")
+      push("  inventory: (no snapshots yet)")
     else
       local ageLast = inv.lastSnapshotAt and (now - inv.lastSnapshotAt) or nil
       local span = (inv.lastSnapshotAt and inv.oldestAt) and (inv.lastSnapshotAt - inv.oldestAt) or 0
-      print(string.format("  inventory: %d snapshots, last %s ago, spanning %s",
+      push(string.format("  inventory: %d snapshots, last %s ago, spanning %s",
         inv.snapshotCount, describeAge(ageLast), describeAge(span)))
+    end
+    if ns.Output then
+      ns.Output:Inspect(table.concat(lines, "\n"), "Tally history config + snapshot summary.")
     end
     return
   end
 
   if sub == "snapshot" then
     local ok, info = ns.History:Snapshot({ force = true })
-    if ok then
-      print(string.format("%s snapshot recorded under %s — %d priced items, %d inventory items.",
-        prefix, info.strategy, info.pricedItems, info.inventoryItems))
-    else
-      print(err .. " snapshot skipped — " .. tostring(info))
+    if ok and ns.Output then
+      ns.Output:Success(string.format("Snapshot recorded under %s — %d priced items, %d inventory items.",
+        info.strategy, info.pricedItems, info.inventoryItems))
+    elseif not ok and ns.Output then
+      ns.Output:Error("Snapshot skipped — " .. tostring(info))
     end
     return
   end
@@ -1840,47 +1864,53 @@ local function handleHistory(args)
   if sub == "interval" then
     local hours = tonumber(rest)
     if not hours or hours < 0 then
-      print(err .. " usage — /tally history interval <hours> (0 disables auto-snapshot)")
+      if ns.Output then
+        ns.Output:Error("Usage: /tally history interval <hours> (0 disables auto-snapshot)")
+      end
       return
     end
     local ok, e = ns.History:SetInterval(hours * 3600)
-    if ok then print(prefix .. " interval set to " .. hours .. "h.")
-    else print(err .. " " .. tostring(e)) end
+    if ok and ns.Output then ns.Output:Success("Interval set to " .. hours .. "h.")
+    elseif not ok and ns.Output then ns.Output:Error(tostring(e)) end
     return
   end
 
   if sub == "retention" then
     local days = tonumber(rest)
     if not days or days <= 0 then
-      print(err .. " usage — /tally history retention <days>")
+      if ns.Output then ns.Output:Error("Usage: /tally history retention <days>") end
       return
     end
     local ok, e = ns.History:SetRetention(days * 86400)
-    if ok then print(prefix .. " retention set to " .. days .. "d.")
-    else print(err .. " " .. tostring(e)) end
+    if ok and ns.Output then ns.Output:Success("Retention set to " .. days .. "d.")
+    elseif not ok and ns.Output then ns.Output:Error(tostring(e)) end
     return
   end
 
   if sub == "rollup" then
     local days = tonumber(rest)
     if not days or days <= 0 then
-      print(err .. " usage — /tally history rollup <days>")
+      if ns.Output then ns.Output:Error("Usage: /tally history rollup <days>") end
       return
     end
     local ok, e = ns.History:SetRollupThreshold(days * 86400)
-    if ok then print(prefix .. " daily-rollup threshold set to " .. days .. "d.")
-    else print(err .. " " .. tostring(e)) end
+    if ok and ns.Output then ns.Output:Success("Daily-rollup threshold set to " .. days .. "d.")
+    elseif not ok and ns.Output then ns.Output:Error(tostring(e)) end
     return
   end
 
   if sub == "clear" then
     local target = rest ~= "" and rest or nil
     ns.History:Clear(target)
-    print(prefix .. " history cleared" .. (target and (" for " .. target) or "") .. ".")
+    if ns.Output then
+      ns.Output:Success("History cleared" .. (target and (" for " .. target) or "") .. ".")
+    end
     return
   end
 
-  print(err .. " unknown history subcommand '" .. sub .. "'. Try /tally history.")
+  if ns.Output then
+    ns.Output:Error("Unknown history subcommand '" .. sub .. "'. Try /tally history.")
+  end
 end
 
 if Cogworks and Cogworks.RegisterSlashCommands then
@@ -1892,8 +1922,11 @@ if Cogworks and Cogworks.RegisterSlashCommands then
         name = "show", aliases = { "ui" },
         help = "Open the Tally main frame",
         run = function()
-          if ns.UI and ns.UI.MainFrame then ns.UI.MainFrame:Toggle()
-          else print("|cffff4040Tally:|r UI module unavailable.") end
+          if ns.UI and ns.UI.MainFrame then
+            ns.UI.MainFrame:Toggle()
+          elseif ns.Output then
+            ns.Output:Error("UI module unavailable.")
+          end
         end,
       },
       {
@@ -1914,8 +1947,11 @@ if Cogworks and Cogworks.RegisterSlashCommands then
         help = "Open the research panel for an item",
         run = function(rest)
           if rest == "" then
-            if ns.UI and ns.UI.ShowResearch then ns.UI.ShowResearch(nil)
-            else print("|cff7fbfffTally:|r usage — /tally research <itemlink-or-id>") end
+            if ns.UI and ns.UI.ShowResearch then
+              ns.UI.ShowResearch(nil)
+            elseif ns.Output then
+              ns.Output:Info("Usage: /tally research <itemlink-or-id>")
+            end
           else
             if ns.UI and ns.UI.ShowResearch then ns.UI.ShowResearch(rest)
             else ns.Research:Print(rest) end
@@ -1928,7 +1964,9 @@ if Cogworks and Cogworks.RegisterSlashCommands then
         help = "Print research record to chat (power-user / debug)",
         run = function(rest)
           if rest == "" then
-            print("|cff7fbfffTally:|r usage — /tally research-chat <itemlink-or-id>")
+            if ns.Output then
+              ns.Output:Info("Usage: /tally research-chat <itemlink-or-id>")
+            end
           else
             ns.Research:Print(rest)
           end
@@ -1939,8 +1977,8 @@ if Cogworks and Cogworks.RegisterSlashCommands then
         help = "Force inventory rescan via Syndicator",
         run = function()
           local ok, err = ns.Inventory:Rebuild()
-          if ok then print("|cff7fbfffTally:|r inventory rescanned.")
-          else print("|cffff4040Tally:|r rescan failed — " .. tostring(err)) end
+          if ok and ns.Output then ns.Output:Success("Inventory rescanned.")
+          elseif not ok and ns.Output then ns.Output:Error("Rescan failed — " .. tostring(err)) end
         end,
       },
       {
@@ -1956,11 +1994,16 @@ if Cogworks and Cogworks.RegisterSlashCommands then
         run = function(rest)
           rest = rest or ""
           if rest == "" then
-            print("|cff7fbfffTally:|r price strategy = " .. ns.NetWorth:GetStrategy())
+            if ns.Output then
+              ns.Output:Info("Price strategy = " .. ns.NetWorth:GetStrategy())
+            end
           else
             local ok, err = ns.NetWorth:SetStrategy(rest)
-            if ok then print("|cff7fbfffTally:|r price strategy set to '" .. rest .. "'.")
-            else print("|cffff4040Tally:|r " .. tostring(err)) end
+            if ok and ns.Output then
+              ns.Output:Success("Price strategy set to '" .. rest .. "'.")
+            elseif not ok and ns.Output then
+              ns.Output:Error(tostring(err))
+            end
           end
         end,
       },
@@ -1971,9 +2014,11 @@ if Cogworks and Cogworks.RegisterSlashCommands then
         run = function(rest)
           if rest == "confirm" then
             resetData()
-          else
-            print("|cffff4040Tally:|r `/tally reset confirm` will wipe ledger, history, and inventory rollup.")
-            print("|cffff4040Tally:|r Config (strategy, history cadence, minimap, UI prefs) is preserved. Sibling-source import re-runs after.")
+          elseif ns.Output then
+            ns.Output:Warn(
+              "/tally reset confirm wipes ledger + history + inventory rollup. "
+              .. "Settings (strategy, history cadence, minimap, UI prefs) are preserved.",
+              { duration = 8 })
           end
         end,
       },
@@ -1981,8 +2026,11 @@ if Cogworks and Cogworks.RegisterSlashCommands then
         name = "setup", aliases = { "wizard" },
         help = "Re-run the first-time setup wizard",
         run = function()
-          if ns.UI and ns.UI.ShowSetupWizard then ns.UI.ShowSetupWizard()
-          else print("|cffff4040Tally:|r setup wizard unavailable.") end
+          if ns.UI and ns.UI.ShowSetupWizard then
+            ns.UI.ShowSetupWizard()
+          elseif ns.Output then
+            ns.Output:Error("Setup wizard unavailable.")
+          end
         end,
       },
       {
@@ -1990,8 +2038,11 @@ if Cogworks and Cogworks.RegisterSlashCommands then
         args = "<itemlink-or-id>",
         help = "Open per-item lifecycle drill-down",
         run = function(rest)
-          if ns.UI and ns.UI.ShowLifecycle then ns.UI.ShowLifecycle(rest)
-          else print("|cffff4040Tally:|r lifecycle UI unavailable.") end
+          if ns.UI and ns.UI.ShowLifecycle then
+            ns.UI.ShowLifecycle(rest)
+          elseif ns.Output then
+            ns.Output:Error("Lifecycle UI unavailable.")
+          end
         end,
       },
       {
@@ -2001,8 +2052,8 @@ if Cogworks and Cogworks.RegisterSlashCommands then
         run = function(rest)
           if ns.UI and ns.UI.ShowInventory then
             ns.UI.ShowInventory((rest and rest ~= "") and rest or nil)
-          else
-            print("|cffff4040Tally:|r inventory page unavailable.")
+          elseif ns.Output then
+            ns.Output:Error("Inventory page unavailable.")
           end
         end,
       },
@@ -2018,8 +2069,8 @@ if Cogworks and Cogworks.RegisterSlashCommands then
             end
             ns.UI.MainFrame:Show()
             ns.UI.MainFrame:ShowPage("Compare")
-          else
-            print("|cffff4040Tally:|r compare view unavailable.")
+          elseif ns.Output then
+            ns.Output:Error("Compare view unavailable.")
           end
         end,
       },
@@ -2035,15 +2086,17 @@ if Cogworks and Cogworks.RegisterSlashCommands then
         help = "Move ledger rows older than 60 days into monthly archives",
         run = function(rest)
           if not (ns.Ledger and ns.Ledger.Seal) then
-            print("|cffff4040Tally:|r seal unavailable.")
+            if ns.Output then ns.Output:Error("Seal unavailable.") end
             return
           end
           if ns.Ledger:IsMigrationRunning() then
-            print("|cffffe080Tally:|r migration in progress — wait for it to finish before sealing.")
+            if ns.Output then
+              ns.Output:Warn("Migration in progress — wait for it to finish before sealing.")
+            end
             return
           end
           if ns.Ledger:IsSealRunning() then
-            print("|cffffe080Tally:|r seal already running.")
+            if ns.Output then ns.Output:Warn("Seal already running.") end
             return
           end
 
@@ -2051,36 +2104,48 @@ if Cogworks and Cogworks.RegisterSlashCommands then
           local preview = ns.Ledger:SealPreview()
 
           if sub == "preview" or (sub ~= "confirm" and preview.sealCount > 5000) then
-            print(string.format(
-              "|cff7fbfffTally seal preview:|r %d active rows  →  keep %d, archive %d",
-              preview.activeCount, preview.keepCount, preview.sealCount))
+            local lines = {
+              string.format("Tally seal preview: %d active rows  →  keep %d, archive %d",
+                preview.activeCount, preview.keepCount, preview.sealCount),
+            }
             if preview.cutTime then
-              print(string.format("  Cut: rows older than %s; max active rows %d.",
-                date("%Y-%m-%d", preview.cutTime), preview.maxRows))
+              lines[#lines + 1] = string.format("Cut: rows older than %s; max active rows %d.",
+                date("%Y-%m-%d", preview.cutTime), preview.maxRows)
             end
             if sub ~= "preview" then
-              print("|cffffe080Tally:|r large cut — run |cff7fbfff/tally seal confirm|r to proceed.")
+              lines[#lines + 1] = "Large cut — run `/tally seal confirm` to proceed."
+            end
+            if ns.Output then
+              ns.Output:Inspect(table.concat(lines, "\n"), "Tally seal preview.")
             end
             return
           end
 
           if preview.sealCount == 0 then
-            print("|cff7fbfffTally:|r nothing to seal — active set is within the soft cap.")
+            if ns.Output then
+              ns.Output:Info("Nothing to seal — active set is within the soft cap.")
+            end
             return
           end
 
-          print(string.format("|cff7fbfffTally:|r sealing %d rows into archives…", preview.sealCount))
+          if ns.Output then
+            ns.Output:Info(string.format("Sealing %d rows into archives…", preview.sealCount))
+          end
           ns.Ledger:Seal({
             onProgress = function(phase, idx, total, key)
-              if phase == "bucket" and total > 0 and idx % 5000 == 0 then
-                print(string.format("  bucketing %d / %d", idx, total))
-              elseif phase == "flush" then
-                print(string.format("  flushing archive %s (%d / %d)", key or "?", idx, total))
+              if phase == "bucket" and total > 0 and idx % 5000 == 0 and ns.Output then
+                ns.Output:Debug(string.format("seal bucketing %d / %d", idx, total))
+              elseif phase == "flush" and ns.Output then
+                ns.Output:Debug(string.format("seal flush archive %s (%d / %d)",
+                  key or "?", idx, total))
               end
             end,
             onComplete = function(sealed, archivesWritten)
-              print(string.format("|cff80ff80Tally:|r sealed %d rows into %d archives. Logout will save the slimmed active set.",
-                sealed, archivesWritten))
+              if ns.Output then
+                ns.Output:Success(string.format(
+                  "Sealed %d rows into %d archives. Logout will save the slimmed active set.",
+                  sealed, archivesWritten))
+              end
               if ns.UI and ns.UI.MainFrame then
                 if ns.UI.MainFrame.UpdateHeaderNudge then
                   pcall(ns.UI.MainFrame.UpdateHeaderNudge, ns.UI.MainFrame)
@@ -2120,8 +2185,12 @@ if Cogworks and Cogworks.RegisterSlashCommands then
   })
 else
   -- Cogworks v0.13+ is required for slash registration. Surface the failure
-  -- explicitly so it doesn't masquerade as "slash silently broken".
-  print("|cffff4040Tally:|r slash registration skipped — Cogworks v0.13+ required.")
+  -- explicitly so it doesn't masquerade as "slash silently broken". Output
+  -- router gracefully degrades to chat if Cogworks itself is missing or
+  -- below the Toast threshold.
+  if ns.Output then
+    ns.Output:Error("Slash registration skipped — Cogworks v0.13+ required.")
+  end
 end
 
 -- ============================================================================
