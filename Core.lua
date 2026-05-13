@@ -253,6 +253,25 @@ function ns:PLAYER_LOGIN()
       end
     end)
   end
+
+  -- TLY-71: restore a paused/cancelled backfill from the previous session.
+  -- Always wakes in "paused" — testers Resume from the control widget (or
+  -- /tally import resume) when they want to spend frames on it again. A
+  -- toast nudges them so the pending state isn't invisible.
+  if C_Timer and C_Timer.After and ns.Import and ns.Import.HasPending then
+    C_Timer.After(7, function()
+      if ns.Import:HasPending() then
+        ns.Import:RestorePending()
+        if ns.Output then
+          local p = ns.Import:GetPending() or {}
+          local sourceList = (p.config and p.config.sources) or {}
+          ns.Output:Info(string.format(
+            "Backfill paused from previous session — %d source%s queued. Resume via /tally import resume.",
+            #sourceList, #sourceList == 1 and "" or "s"))
+        end
+      end
+    end)
+  end
   -- Invalidate research cache on inventory updates so consumers always see
   -- fresh ownership/valuation. Cogworks event bus is the broadcast channel.
   --
@@ -1990,6 +2009,174 @@ local function handleHistory(args)
   end
 end
 
+-- ============================================================================
+-- /tally import — manage the chunked backfill controller (TLY-71)
+-- ============================================================================
+--
+-- Until the persistent control widget ships, slash is the player's surface
+-- for the import driver. Status renders as a copy-dialog (multiline + paste-
+-- ready for issue reports); pause/resume/cancel/budget/delay flip state and
+-- emit a brief toast so the player knows the action took.
+
+local function formatImportStatus()
+  if not (ns.Import and ns.Import.GetState) then
+    return "Import controller unavailable."
+  end
+  local state = ns.Import:GetState()
+  local lines = {}
+  local push = function(s) lines[#lines + 1] = s end
+  local fmt  = function(n) return BreakUpLargeNumbers and BreakUpLargeNumbers(n or 0) or tostring(n or 0) end
+
+  push("=== Tally — backfill status ===")
+  push("Phase: " .. (state.phase or "idle"))
+
+  if state.phase == "idle" then
+    push("")
+    push("No backfill in progress. Run /tally setup to configure one.")
+    return table.concat(lines, "\n")
+  end
+
+  if state.startedAt then
+    push("Started: " .. date("%Y-%m-%d %H:%M:%S", state.startedAt))
+  end
+  if state.pausedAt then
+    push("Paused:  " .. date("%Y-%m-%d %H:%M:%S", state.pausedAt))
+  end
+  if state.config then
+    local windowText = "all history"
+    if (state.config.windowMonths or 0) > 0 then
+      windowText = string.format("last %d month%s",
+        state.config.windowMonths, state.config.windowMonths == 1 and "" or "s")
+    end
+    push(string.format("Window: %s", windowText))
+    push(string.format("Budget: %s rows / cycle, %.1fs delay",
+      fmt(state.config.budgetRows or 0), state.config.delaySec or 0))
+  end
+  push(string.format("Total imported so far: %s", fmt(ns.Import:GetTotalImported())))
+
+  if state.lastError then
+    push("")
+    push("ERROR: " .. tostring(state.lastError))
+  end
+
+  push("")
+  push("Sources:")
+  for _, r in ipairs(state.results or {}) do
+    if r.skippedSource then
+      push(string.format("  · %-20s skipped (%s)", r.label or r.source, r.reason or "?"))
+    else
+      push(string.format("  ✓ %-20s done — %s imported, %d skipped",
+        r.label or r.source, fmt(r.inserted or 0), r.skipped or 0))
+    end
+  end
+  if state.current then
+    local c = state.current
+    if c.total > 0 then
+      push(string.format("  ▶ %-20s %s / %s (%d%%)",
+        c.label or c.name, fmt(c.idx or 0), fmt(c.total),
+        math.floor(100 * (c.idx or 0) / math.max(c.total, 1))))
+    else
+      push(string.format("  ▶ %-20s parsing…", c.label or c.name))
+    end
+  end
+  for _, name in ipairs(state.sourceQueue or {}) do
+    push(string.format("  · %-20s queued", name))
+  end
+
+  if state.phase == "flushing" then
+    push("")
+    push(string.format("Flushing staging buckets to archives: %d / %d",
+      state.flushIdx or 0, state.flushTotal or 0))
+  elseif state.phase == "done" then
+    push("")
+    push(string.format("Complete — %d archives written, %s rows archived.",
+      state.archivesWritten or 0, fmt(state.rowsArchived or 0)))
+  end
+
+  return table.concat(lines, "\n")
+end
+
+local function handleImport(args)
+  if not (ns.Import and ns.Import.GetState) then
+    if ns.Output then ns.Output:Error("Import controller unavailable.") end
+    return
+  end
+  local sub, rest = (args or ""):match("^(%S*)%s*(.*)$")
+  sub = (sub or ""):lower()
+
+  if sub == "" or sub == "status" then
+    if ns.Output then
+      ns.Output:Inspect(formatImportStatus(), "Tally backfill status.")
+    end
+    return
+  end
+
+  if sub == "pause" then
+    if ns.Import:Pause() then
+      if ns.Output then ns.Output:Info("Backfill paused.") end
+    elseif ns.Output then
+      ns.Output:Warn("Nothing to pause — backfill is not running.")
+    end
+    return
+  end
+
+  if sub == "resume" then
+    if ns.Import:Resume() then
+      if ns.Output then ns.Output:Info("Backfill resumed.") end
+    elseif ns.Output then
+      ns.Output:Warn("Nothing to resume — no paused backfill.")
+    end
+    return
+  end
+
+  if sub == "cancel" then
+    if ns.Import:Cancel() then
+      if ns.Output then
+        ns.Output:Info("Backfill cancelled. Pending state preserved — /tally import resume to pick back up.")
+      end
+    elseif ns.Output then
+      ns.Output:Warn("Nothing to cancel.")
+    end
+    return
+  end
+
+  if sub == "budget" then
+    local n = tonumber(rest)
+    if not n or n <= 0 then
+      if ns.Output then ns.Output:Error("Usage: /tally import budget <rows>") end
+      return
+    end
+    if ns.Import:UpdateBudget(n, nil) then
+      if ns.Output then
+        ns.Output:Info(string.format("Budget set to %d rows / cycle (takes effect next cycle).", math.floor(n)))
+      end
+    elseif ns.Output then
+      ns.Output:Warn("No active backfill to tune.")
+    end
+    return
+  end
+
+  if sub == "delay" then
+    local n = tonumber(rest)
+    if not n or n <= 0 then
+      if ns.Output then ns.Output:Error("Usage: /tally import delay <seconds>") end
+      return
+    end
+    if ns.Import:UpdateBudget(nil, n) then
+      if ns.Output then
+        ns.Output:Info(string.format("Delay set to %.1fs between cycles (takes effect next cycle).", n))
+      end
+    elseif ns.Output then
+      ns.Output:Warn("No active backfill to tune.")
+    end
+    return
+  end
+
+  if ns.Output then
+    ns.Output:Error("Unknown import subcommand '" .. sub .. "'. Try /tally import status.")
+  end
+end
+
 if Cogworks and Cogworks.RegisterSlashCommands then
   Cogworks:RegisterSlashCommands("Tally", {
     globals   = { "/tally", "/tly" },
@@ -2109,6 +2296,12 @@ if Cogworks and Cogworks.RegisterSlashCommands then
             ns.Output:Error("Setup wizard unavailable.")
           end
         end,
+      },
+      {
+        name = "import",
+        args = "[status|pause|resume|cancel|budget <rows>|delay <sec>]",
+        help = "Manage the chunked backfill controller (TLY-71)",
+        run = function(rest) handleImport(rest) end,
       },
       {
         name = "lifecycle", aliases = { "lc" },

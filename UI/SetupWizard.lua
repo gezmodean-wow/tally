@@ -825,10 +825,32 @@ local function applyState(state)
   end
 end
 
-local function finishSetup()
-  -- alpha18 active-only baseline: Finish does NOT trigger any sibling-
-  -- source backfill. Native captures live from PLAYER_LOGIN forward;
-  -- sibling import returns in alpha19 as a user-initiated, pausable flow.
+-- Kick off the chunked backfill via ns.Import, but only if the wizard
+-- collected at least one enabled importable source. Returns the controller
+-- handle (or nil if no backfill ran). Toast wording in finishSetup branches
+-- on this return so testers know whether a background import is in flight.
+local function kickoffBackfill(state, importable)
+  if not (ns.Import and ns.Import.Start) then return nil end
+  if not importable or #importable == 0 then return nil end
+  local enabled = {}
+  for _, s in ipairs(importable) do
+    if state.sources[s.name] and state.sources[s.name].enabled then
+      enabled[#enabled + 1] = s.name
+    end
+  end
+  if #enabled == 0 then return nil end
+  return ns.Import:Start({
+    sources      = enabled,
+    windowMonths = state.windowMonths or 0,
+    budgetRows   = state.budgetRows or 10000,
+    delaySec     = state.delaySec or 2.0,
+  })
+end
+
+local function finishSetup(backfillKicked)
+  -- alpha19: when sibling sources are detected + enabled, Finish kicks off
+  -- a chunked backfill via ns.Import. The driver runs detached; this
+  -- handler just flips setup state, refreshes LDB, and posts a toast.
   TallyDB.setup = TallyDB.setup or {}
   TallyDB.setup.completed   = true
   TallyDB.setup.completedAt = time()
@@ -839,7 +861,11 @@ local function finishSetup()
   TallyCharDB.tallyAcknowledged = true
   if ns.RefreshLDB then pcall(ns.RefreshLDB) end
   if ns.Output then
-    ns.Output:Success("Setup complete. Tally is now capturing auction-house, vendor, mail, and repair events live.")
+    if backfillKicked then
+      ns.Output:Success("Setup complete. Backfill running in the background — manage via /tally import.")
+    else
+      ns.Output:Success("Setup complete. Tally is now capturing auction-house, vendor, mail, and repair events live.")
+    end
   end
 end
 
@@ -911,7 +937,10 @@ local function createWizardFrame()
     onComplete = function()
       applyState(state)
       wizardFrame:Hide()
-      finishSetup()
+      -- Kick off the backfill BEFORE the success toast — so the toast's
+      -- branching reflects whether a controller was actually started.
+      local controller = kickoffBackfill(state, importable)
+      finishSetup(controller ~= nil)
     end,
     onStepChange = function(_, idx)
       -- TLY-35: the moment the player chooses to move forward (clicks Next
