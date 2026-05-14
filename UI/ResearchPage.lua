@@ -132,6 +132,14 @@ function ns.UI.CreateResearchPage(parent)
     end
   end)
 
+  -- TLY-71 Flow B: synthesise missing historical archives from siblings.
+  -- The button is identical across Research / Lifecycle / Compare —
+  -- synthesis is a global archive operation, not a per-page concept.
+  if ns.UI.CreateSynthButton then
+    local synthBtn = ns.UI.CreateSynthButton(row)
+    synthBtn:SetPoint("LEFT", lifecycleBtn, "RIGHT", 6, 0)
+  end
+
   -- Item header ---------------------------------------------------------------
 
   local header = CreateFrame("Frame", nil, page)

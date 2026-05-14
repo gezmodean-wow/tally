@@ -189,6 +189,15 @@ function ns.UI.CreateCompareLedgersPage(parent)
     if page.Refresh then page:Refresh() end
   end)
 
+  -- TLY-71 Flow B: synthesise missing historical archives from siblings.
+  -- Anchored to the row's right edge — Compare's "include archives" toggle
+  -- is the natural left-of-button companion (the toggle controls archive
+  -- READS; this button controls archive WRITES).
+  if ns.UI.CreateSynthButton then
+    local synthBtn = ns.UI.CreateSynthButton(row)
+    synthBtn:SetPoint("RIGHT", row, "RIGHT", 0, 0)
+  end
+
   -- ============================================================================
   -- Summary card
   -- ============================================================================

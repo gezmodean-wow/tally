@@ -125,6 +125,12 @@ function ns.UI.CreateLifecyclePage(parent)
   methodBtn:SetPoint("LEFT", methodLabel, "RIGHT", 6, 0)
   methodBtn:SetText("FIFO")
 
+  -- TLY-71 Flow B: synthesise missing historical archives from siblings.
+  if ns.UI.CreateSynthButton then
+    local synthBtn = ns.UI.CreateSynthButton(row)
+    synthBtn:SetPoint("LEFT", methodBtn, "RIGHT", 18, 0)
+  end
+
   -- ============================================================================
   -- Item header
   -- ============================================================================
