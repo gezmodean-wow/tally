@@ -380,7 +380,15 @@ function Lifecycle:GetCohorts(itemID, opts)
   opts = opts or {}
   local method = opts.costBasisMethod or "fifo"
   local rows = rowsForItem(itemID)
-  if #rows == 0 then return {}, { hasDeposits = false, syntheticCount = 0 } end
+  if #rows == 0 then
+    return {}, {
+      hasDeposits     = false,
+      depositCount    = 0,
+      syntheticCount  = 0,
+      unmatchedSales  = 0,
+      costBasisMethod = method,
+    }
+  end
 
   local b = bucketByKind(rows)
   local costBasis = computeCostBasis(b.purchases, b.sales, method)
@@ -459,7 +467,7 @@ function Lifecycle:Analyze(itemID, opts)
     pricingSeries = {},       -- { { atTime, buyout } }
     info = info,
   }
-  if #cohorts == 0 then return analysis end
+  if #cohorts == 0 then return analysis, cohorts end
 
   local saleTimes = {}
   local listPrices = {}

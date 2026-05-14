@@ -330,15 +330,17 @@ function ns.UI.CreateLifecyclePage(parent)
       (analysis.totalFeesPaid or 0) + (analysis.totalDepositForfeit or 0)))
     statTrend.value:SetText(trendBadge(analysis.pricingTrend))
 
-    -- Info line
+    -- Info line. Lifecycle:GetCohorts is the source of truth for the info
+    -- field set; callers tolerate missing fields so legacy/zero-row paths
+    -- don't crash the page.
     local info = analysis.info or {}
     local notes = {}
-    if not info.hasDeposits and info.syntheticCount > 0 then
+    if not info.hasDeposits and (info.syntheticCount or 0) > 0 then
       notes[#notes + 1] = string.format(
         "|cffffd070note:|r %d cohorts inferred from sale/expire rows — install Journalator for full ah-deposit tracking and post-attempt counts.",
         info.syntheticCount)
     end
-    if info.unmatchedSales > 0 then
+    if (info.unmatchedSales or 0) > 0 then
       notes[#notes + 1] = string.format(
         "|cff999999%d unmatched sale rows — likely pre-existing inventory the ledger didn't see purchased.|r",
         info.unmatchedSales)
@@ -351,7 +353,7 @@ function ns.UI.CreateLifecyclePage(parent)
     -- Cohort rows
     if scrollTable then
       local rows = {}
-      for _, c in ipairs(cohorts) do
+      for _, c in ipairs(cohorts or {}) do
         local r = {
           posted   = c.postedAt and date("%m/%d %H:%M", c.postedAt) or "?",
           char     = c.charKey or "",
