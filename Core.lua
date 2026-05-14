@@ -266,8 +266,13 @@ function ns:PLAYER_LOGIN()
           local p = ns.Import:GetPending() or {}
           local sourceList = (p.config and p.config.sources) or {}
           ns.Output:Info(string.format(
-            "Backfill paused from previous session — %d source%s queued. Resume via /tally import resume.",
+            "Backfill paused from previous session — %d source%s queued. Resume from the import widget or /tally import resume.",
             #sourceList, #sourceList == 1 and "" or "s"))
+        end
+        -- Surface the control widget in its persisted mode (expanded or
+        -- minimised badge). Player Resume button + Cancel live there.
+        if ns.UI and ns.UI.ImportControl then
+          ns.UI.ImportControl:Show()
         end
       end
     end)
@@ -2013,10 +2018,11 @@ end
 -- /tally import — manage the chunked backfill controller (TLY-71)
 -- ============================================================================
 --
--- Until the persistent control widget ships, slash is the player's surface
--- for the import driver. Status renders as a copy-dialog (multiline + paste-
--- ready for issue reports); pause/resume/cancel/budget/delay flip state and
--- emit a brief toast so the player knows the action took.
+-- The control widget (UI/ImportControl.lua) is the primary surface — bare
+-- `/tally import` opens it. Subcommands keep working as a keyboard-only path:
+-- `status` renders the paste-ready copy-dialog (paste into issue reports);
+-- pause/resume/cancel/budget/delay flip state and emit a brief toast so the
+-- player knows the action took.
 
 local function formatImportStatus()
   if not (ns.Import and ns.Import.GetState) then
@@ -2104,7 +2110,22 @@ local function handleImport(args)
   local sub, rest = (args or ""):match("^(%S*)%s*(.*)$")
   sub = (sub or ""):lower()
 
-  if sub == "" or sub == "status" then
+  if sub == "" then
+    -- Default: surface the persistent control widget. Falls back to the
+    -- copy-dialog status if a controller doesn't exist yet (idle state) or
+    -- the widget module didn't load.
+    local state = ns.Import:GetState()
+    if state.phase ~= "idle" and ns.UI and ns.UI.ImportControl then
+      ns.UI.ImportControl:Show()
+      return
+    end
+    if ns.Output then
+      ns.Output:Inspect(formatImportStatus(), "Tally backfill status.")
+    end
+    return
+  end
+
+  if sub == "status" then
     if ns.Output then
       ns.Output:Inspect(formatImportStatus(), "Tally backfill status.")
     end
@@ -2123,6 +2144,10 @@ local function handleImport(args)
   if sub == "resume" then
     if ns.Import:Resume() then
       if ns.Output then ns.Output:Info("Backfill resumed.") end
+      -- Re-surface the widget so testers see live progress after resume.
+      if ns.UI and ns.UI.ImportControl then
+        ns.UI.ImportControl:Show()
+      end
     elseif ns.Output then
       ns.Output:Warn("Nothing to resume — no paused backfill.")
     end
@@ -2300,7 +2325,7 @@ if Cogworks and Cogworks.RegisterSlashCommands then
       {
         name = "import",
         args = "[status|pause|resume|cancel|budget <rows>|delay <sec>]",
-        help = "Manage the chunked backfill controller (TLY-71)",
+        help = "Open the backfill control widget; subcommands manage the controller",
         run = function(rest) handleImport(rest) end,
       },
       {

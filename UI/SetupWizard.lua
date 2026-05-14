@@ -941,6 +941,12 @@ local function createWizardFrame()
       -- branching reflects whether a controller was actually started.
       local controller = kickoffBackfill(state, importable)
       finishSetup(controller ~= nil)
+      -- Surface the persistent control widget so testers see the import
+      -- progress immediately. The widget self-listens to ns.Import and
+      -- auto-fades on done.
+      if controller and ns.UI and ns.UI.ImportControl then
+        ns.UI.ImportControl:Show()
+      end
     end,
     onStepChange = function(_, idx)
       -- TLY-35: the moment the player chooses to move forward (clicks Next
