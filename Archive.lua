@@ -105,6 +105,14 @@ local function archiveSlotsTable()
   return L.archiveSlots
 end
 
+-- Freed slot numbers from Delete(). Allocated before walking nextSlot or
+-- evicting LRU so explicit deletes get reused before we touch foreign data.
+local function freedSlotsList()
+  local L = ledgerTable()
+  L.freedSlots = L.freedSlots or {}
+  return L.freedSlots
+end
+
 local function indexTable()
   local L = ledgerTable()
   L.archiveIndex = L.archiveIndex or {}
@@ -120,22 +128,77 @@ local function slotGlobalName(slotNum)
   return string.format("TallyA%03d", slotNum)
 end
 
+-- Find the LRU archive key by archiveIndex[key].lastAccessedAt. Falls back
+-- to fromTs (oldest period) when lastAccessedAt is missing on older entries
+-- written before the field was added. Returns nil if the slot pool is empty
+-- (shouldn't happen during eviction since the caller has confirmed it's full).
+local function findLRUKey()
+  local idx = indexTable()
+  local slots = archiveSlotsTable()
+  local lruKey, lruTs
+  for key, _ in pairs(slots) do
+    local entry = idx[key]
+    -- Treat missing lastAccessedAt as oldest possible — pre-LRU archives
+    -- evict first so the pool migrates cleanly to tracked-access semantics.
+    local ts = (entry and entry.lastAccessedAt) or (entry and entry.fromTs) or 0
+    if not lruTs or ts < lruTs then
+      lruTs = ts
+      lruKey = key
+    end
+  end
+  return lruKey
+end
+
 -- Resolve archiveKey -> slot number, allocating a new slot if needed.
--- Returns (slotNum, globalName) on success, (nil, errMsg) if all slots
--- are occupied.
+-- Returns (slotNum, globalName) on success, (nil, errMsg) on failure.
+--
+-- When all slots are occupied (TLY-71 Flow B / synthesis ingest can fill
+-- the pool fast), evict the LRU archive and reuse its slot number. The
+-- caller's existing data hasn't been written yet, so the eviction window
+-- is one allocation; we can safely null the global, drop the index entry,
+-- and free the slot map entry without losing in-flight data.
 local function resolveSlot(key)
   local slots = archiveSlotsTable()
   local existing = slots[key]
   if existing then return existing, slotGlobalName(existing) end
 
+  -- Prefer a freed slot (from a prior Delete) before allocating a new one
+  -- or evicting. Avoids unnecessary eviction when the player ran a clear-
+  -- source pass and now wants to backfill into freshly-available slots.
+  local freed = freedSlotsList()
+  local recycled = table.remove(freed)   -- pops the tail; order doesn't matter
+  if recycled then
+    slots[key] = recycled
+    return recycled, slotGlobalName(recycled)
+  end
+
   local L = ledgerTable()
   L.nextSlot = L.nextSlot or 0
-  if L.nextSlot >= Archive.SLOT_COUNT then
-    return nil, "no free archive slots — bump SLOT_COUNT in tally.toc + Archive.lua"
+  if L.nextSlot < Archive.SLOT_COUNT then
+    L.nextSlot = L.nextSlot + 1
+    slots[key] = L.nextSlot
+    return L.nextSlot, slotGlobalName(L.nextSlot)
   end
-  L.nextSlot = L.nextSlot + 1
-  slots[key] = L.nextSlot
-  return L.nextSlot, slotGlobalName(L.nextSlot)
+
+  -- Pool full — evict LRU.
+  local victim = findLRUKey()
+  if not victim then
+    return nil, "no free archive slots and no eviction candidate (slot map empty)"
+  end
+  local victimSlot = slots[victim]
+  if not victimSlot then
+    return nil, "eviction candidate missing slot mapping"
+  end
+  clearSlotGlobal(victimSlot)
+  slots[victim] = nil
+  indexTable()[victim] = nil
+  -- Drop any LRU cache reference to the victim so subsequent reads don't
+  -- return entries pointing at the now-cleared slot.
+  Archive:Unload(victim)
+  -- Reuse the freed slot for the new key. nextSlot stays at SLOT_COUNT
+  -- since we're now operating in steady-state recycle mode.
+  slots[key] = victimSlot
+  return victimSlot, slotGlobalName(victimSlot)
 end
 
 local function getSlotGlobal(key)
@@ -328,6 +391,10 @@ function Archive:Save(key, entries, opts)
     schemaVer = self.SCHEMA_VERSION,
     savedAt   = time(),
   }
+  -- Stamp lastAccessedAt so a fresh write isn't immediately the LRU victim
+  -- on the next allocation (e.g., a synthesis job writing N periods back-
+  -- to-back into a full pool).
+  index.lastAccessedAt = time()
   indexTable()[key] = index
 
   -- Drop any cache entry so subsequent reads pick up the rewrite.
@@ -347,9 +414,18 @@ end
 -- Public API — Load
 -- ============================================================================
 
+-- Stamp the LRU clock for a freshly-touched key. Cheap (one hash lookup +
+-- one field write). Bumped on every cache hit + every slot-resident load
+-- so the eviction policy reflects actual usage rather than save order.
+local function touchAccess(key)
+  local idx = indexTable()[key]
+  if idx then idx.lastAccessedAt = time() end
+end
+
 function Archive:Load(key)
   if _cache[key] then
     cacheBump(key)
+    touchAccess(key)
     return _cache[key]
   end
 
@@ -362,6 +438,7 @@ function Archive:Load(key)
     cacheEvictOldestIfFull()
     _cache[key] = cached
     _cacheOrder[#_cacheOrder + 1] = key
+    touchAccess(key)
     return cached
   end
 
@@ -476,16 +553,16 @@ end
 
 -- Permanently remove an archive from disk + cache. Used by the
 -- ClearSource and seal cleanup paths when an archive ends up empty.
--- Frees the slot for reuse by the next allocation that needs one.
+-- The slot number is pushed onto the freed list so the next allocation
+-- prefers it over advancing nextSlot or triggering LRU eviction.
 function Archive:Delete(key)
   local slots = archiveSlotsTable()
   local slot = slots[key]
   if slot then
     clearSlotGlobal(slot)
     slots[key] = nil
-    -- Don't decrement nextSlot — we don't reuse freed slots in Phase 1
-    -- to keep allocation deterministic. Slot exhaustion is unlikely
-    -- with SLOT_COUNT = 60; bump if it becomes an issue.
+    local freed = freedSlotsList()
+    freed[#freed + 1] = slot
   end
   indexTable()[key] = nil
   local legacy = legacyArchivesTable()

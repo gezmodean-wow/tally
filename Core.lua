@@ -2202,6 +2202,128 @@ local function handleImport(args)
   end
 end
 
+-- ============================================================================
+-- /tally synth — manage on-demand period synthesis (TLY-71 Flow B)
+-- ============================================================================
+--
+-- Synthesises historical archives from sibling adapters' month coverage.
+-- Run by itself, fills every period siblings cover that doesn't already
+-- have a Tally archive. Subcommands: status, cancel, pause, resume.
+
+local function formatSynthStatus()
+  if not (ns.Synthesis and ns.Synthesis.GetState) then
+    return "Synthesis engine unavailable."
+  end
+  local state = ns.Synthesis:GetState()
+  local lines = {}
+  local push = function(s) lines[#lines + 1] = s end
+  local fmt = function(n) return BreakUpLargeNumbers and BreakUpLargeNumbers(n or 0) or tostring(n or 0) end
+  push("=== Tally — synthesis status ===")
+  push("Phase: " .. (state.phase or "idle"))
+  if state.phase == "idle" then
+    push("")
+    push("No synthesis running. Run /tally synth to fill missing archives.")
+    local cands = ns.Synthesis:GetCandidates({})
+    if cands then
+      push("")
+      push(string.format("Coverage probe — %d missing, %d already archived, %d current-month (active).",
+        #cands.missing, #cands.existing, #cands.skippedCurrent))
+      if #cands.missing > 0 then
+        push("")
+        push("Missing periods (would be synthesised):")
+        for _, m in ipairs(cands.missing) do
+          push(string.format("  · %s — ~%s rows across siblings", m.key, fmt(m.rows or 0)))
+        end
+      end
+    end
+    return table.concat(lines, "\n")
+  end
+  push(string.format("Sources: %s", table.concat(state.config.sources, ", ")))
+  if state.currentKey then
+    push("Currently synthesising: " .. state.currentKey)
+  end
+  push(string.format("Queue: %d remaining", #state.queue))
+  push("")
+  push("Completed:")
+  for _, r in ipairs(state.results or {}) do
+    if r.skipped then
+      push(string.format("  · %s — skipped (%s)", r.key, r.skipped))
+    else
+      push(string.format("  ✓ %s — %s rows", r.key, fmt(r.rows or 0)))
+    end
+  end
+  if state.lastError then
+    push("")
+    push("ERROR: " .. tostring(state.lastError))
+  end
+  return table.concat(lines, "\n")
+end
+
+local function handleSynth(args)
+  if not (ns.Synthesis and ns.Synthesis.GetState) then
+    if ns.Output then ns.Output:Error("Synthesis engine unavailable.") end
+    return
+  end
+  local sub = ((args or ""):match("^(%S*)") or ""):lower()
+
+  if sub == "status" then
+    if ns.Output then ns.Output:Inspect(formatSynthStatus(), "Tally synthesis status.") end
+    return
+  end
+
+  if sub == "cancel" then
+    if ns.Synthesis:Cancel() then
+      if ns.Output then ns.Output:Info("Synthesis cancelled.") end
+    elseif ns.Output then
+      ns.Output:Warn("Nothing to cancel.")
+    end
+    return
+  end
+
+  if sub == "pause" then
+    if ns.Synthesis:Pause() then
+      if ns.Output then ns.Output:Info("Synthesis paused.") end
+    elseif ns.Output then
+      ns.Output:Warn("Nothing to pause — synthesis is not running.")
+    end
+    return
+  end
+
+  if sub == "resume" then
+    if ns.Synthesis:Resume() then
+      if ns.Output then ns.Output:Info("Synthesis resumed.") end
+    elseif ns.Output then
+      ns.Output:Warn("Nothing to resume — no paused synthesis.")
+    end
+    return
+  end
+
+  if sub == "" or sub == "start" then
+    local cands = ns.Synthesis:GetCandidates({})
+    local missing = {}
+    for _, m in ipairs(cands.missing) do missing[#missing + 1] = m.key end
+    if #missing == 0 then
+      if ns.Output then
+        ns.Output:Info("Nothing to synthesise — all periods siblings cover already have Tally archives.")
+      end
+      return
+    end
+    if ns.Synthesis:EnsurePeriods(missing, {}) then
+      if ns.Output then
+        ns.Output:Info(string.format("Synthesising %d period%s in the background.",
+          #missing, #missing == 1 and "" or "s"))
+      end
+    elseif ns.Output then
+      ns.Output:Warn("Synthesis didn't start — check /tally synth status.")
+    end
+    return
+  end
+
+  if ns.Output then
+    ns.Output:Error("Unknown synth subcommand '" .. sub .. "'. Try /tally synth status.")
+  end
+end
+
 if Cogworks and Cogworks.RegisterSlashCommands then
   Cogworks:RegisterSlashCommands("Tally", {
     globals   = { "/tally", "/tly" },
@@ -2327,6 +2449,12 @@ if Cogworks and Cogworks.RegisterSlashCommands then
         args = "[status|pause|resume|cancel|budget <rows>|delay <sec>]",
         help = "Open the backfill control widget; subcommands manage the controller",
         run = function(rest) handleImport(rest) end,
+      },
+      {
+        name = "synth",
+        args = "[start|status|pause|resume|cancel]",
+        help = "Fill missing historical archives from siblings (TLY-71 Flow B)",
+        run = function(rest) handleSynth(rest) end,
       },
       {
         name = "lifecycle", aliases = { "lc" },
