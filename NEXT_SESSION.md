@@ -1,113 +1,80 @@
 # Tally — next session handoff
 
-Picks up mid-alpha19. TLY-70 (output-channel consolidation) and TLY-69 v1 (multi-source gold authority) both landed and pushed to `origin/main`; the alpha19 ship awaits manual import controller + on-demand period synthesis, plus an upstream Cogworks fix for the debug-console crash.
+alpha19 is ship-ready. The critical-path work landed across the 2026-05-12 → 2026-05-13 sessions; CHANGELOG + RELEASES are written; the Cogworks pin is bumped to `v0.14.0` (which carries the cogworks#56 fix that was blocking `/tally debug`). Open the next session by deciding whether to tag `v0.1.0-alpha19` immediately or run one more local smoke test.
 
 ## State
 
-- **Branch:** `main`, fully synced with `origin/main`.
-- **Latest commit:** `1d4235d` — `feat(TLY-69): multi-source gold authority — Tally / Syndicator / TSM`.
-- **Latest tag:** `v0.1.0-alpha18` shipped 2026-05-09. No alpha19 tag yet — work in flight.
-- **Cogworks pinned at `v0.13.2`** in `.pkgmeta`. Will need a bump to whatever ships with cogworks#56's fix.
-- **Standards acknowledgments** (per `CLAUDE.md`): runbooks at `2026-05-05a`, scribe player-facing at `2026-04-30f`. Both current.
+- **Branch:** `main`, 7 commits ahead of `origin/main` (unpushed by design — push gated on per-tag approval).
+- **Latest commit:** `<head>` — `chore: bump Cogworks pin to v0.14.0 + refresh NEXT_SESSION` (this session).
+- **Latest tag:** `v0.1.0-alpha18` shipped 2026-05-09. `v0.1.0-alpha19` is the next tag, awaiting approval.
+- **Cogworks pinned at `v0.14.0`** in `.pkgmeta` (bumped from `v0.13.2`). Picks up the cogworks#56 fix + eight new primitives from the FlipQueue v0.13 adoption audit, including `lib:CreateTaskProgress` / `CreateMultiTaskProgress` (release notes literally name Tally's import controller + synthesis flow as the v1 drivers).
+- **Standards acknowledgments** (per `CLAUDE.md`): runbooks at `2026-05-05a`, scribe player-facing at `2026-04-30f`. Both current as of 2026-05-13.
 
-## Blockers / waiting
+## What alpha19 ships
 
-- **[cogworks#56](https://github.com/gezmodean-wow/cogworks/issues/56)** — `CreateDebugConsole` crashes on first open because `CreateTabPanel` eagerly activates the first tab before `Debug.lua`'s `f._build*` methods are defined. `/tally debug` is unusable until a Cogworks tag ships the proposed `lazy = true` opt on `CreateTabPanel` + explicit `SetActiveTab` at the bottom of `CreateDebugConsole`. Tally confirmed the bug on 2026-05-11; comment added to the issue.
+Seven thematic commits stack on top of `1d4235d` (the TLY-69 baseline pushed end of last session). All on `main`, unpushed.
 
-## What shipped in alpha18
+- **`8fe5557` — TLY-71 setup wizard Steps 4+5.** Two new wizard steps that register conditionally when sibling adapters are loaded — fresh installs with no siblings keep alpha18's 3-step flow. Step 4 surfaces per-source checkboxes + 30d/90d/12mo/all window selector; reads `:ProbeMetadata()` into `state.probes` on first entry. Step 5 surfaces budget + delay numeric inputs with gentle/balanced/aggressive pace presets and a live "Estimate: ~3m 20s for 47,213 rows across 2 sources" line.
+- **`45698fd` — TLY-71 import driver state machine + slash.** `Util/Import.lua` is the chunked-backfill controller — `idle → configured → running ⇄ paused → flushing → done`. Survives logouts via `TallyDB.import.pending` (entries[] excluded; re-parsed from sibling SV on Resume with idx seek). PLAYER_LOGIN's 7s deferred restore wakes the controller in paused state — TLY-71 chose explicit Resume over auto-resume. `/tally import` subcommands: `status` (copy-dialog), `pause`, `resume`, `cancel`, `budget <rows>`, `delay <sec>`.
+- **`f8f3b63` — TLY-71 import control widget.** `UI/ImportControl.lua` — singleton draggable always-on-top panel listener-wired to `ns.Import`. Per-source rows with state-coloured progress bars + cadence-derived ETA. Editable budget/delay inputs (commit on Enter or focus-lost). Pause/Resume/Cancel buttons. `[_]` minimises to a 28px badge near the minimap (own persisted position); `[X]` is the same as Cancel — `StaticPopup` confirm that preserves pending state. Position persists at `TallyDB.ui.importController` with separate expanded/minimised positions and a mode flag. Auto-fades 6s after `done`. Show entry points: wizard `onComplete`, PLAYER_LOGIN restore, bare `/tally import`, `/tally import resume`.
+- **`ffe2a38` — TLY-71 period synthesis engine + Archive LRU.** `Util/Synthesis.lua` is the on-demand archive-fill engine — same state-machine shape as `ns.Import` so a future shared widget could subscribe to both. `EnsurePeriods(keys, opts)` parses each enabled source once (cached), bucket-sorts entries by `date("%Y-%m", atTime)`, writes one archive per period. `GetCandidates({})` partitions candidate months into missing / already-archived / current-month (skipped — that's the active set's job). Archive.lua now stamps `lastAccessedAt` on Save+Load and runs LRU eviction when `nextSlot ≥ SLOT_COUNT`; freed slots (from explicit `Delete()`) are pushed onto `TallyDB.ledger.freedSlots` and reused before any eviction. The 60-slot pool runs in steady-state recycle mode indefinitely. `/tally synth` subcommands: `start` (default), `status` (copy-dialog + idle-state coverage probe), `pause`, `resume`, `cancel`.
+- **`d16dda8` — TLY-71 Synthesise history button on three pages.** `UI/SynthButton.lua` exports `ns.UI.CreateSynthButton(parent)`. Tooltip with live coverage probe (uses `ProbeMetadata.byMonth` so it stays cheap — no full sibling parse). Click → `StaticPopup` confirm → `Synthesis:EnsurePeriods`. Listens to the singleton job; disables + relabels across all pages to "Synthesising…" / "Synth paused" / "Flushing…". Anchored: Research (right of "View lifecycle →"), Lifecycle (right of FIFO/Avg toggle), Compare (right edge of toggle row, deliberately paired with "Include archives (slow)").
+- **`6051e61` — alpha19 changelog + release notes.** Engineering `## [Unreleased]` in `CHANGELOG.md` covers the four themes (TLY-69 gold authority, TLY-70 channel taxonomy, TLY-71 Flow A import controller, TLY-71 Flow B synthesis) with file:line refs + TLY-N IDs. Player-facing `## Unreleased` in `RELEASES.md` leads with "what's restored vs alpha18's deferral" and co-mentions the chat-output consolidation + warband row split.
+- **`<head>` — Cogworks pin v0.13.2 → v0.14.0 + this NEXT_SESSION refresh.** Picks up the cogworks#56 fix + the new debug-console / task-progress / loading / stepper primitives. No code change inside Tally yet; the primitives are queued for adoption (see "Migration opportunities" below).
 
-The structural rewrite, phase 1. Three thematic commits, one ship tag.
+Pre-session TLY-69 + TLY-70 + warband-row-split commits (`1d4235d`, the TLY-70 cohort series, `ae00460`) round out the alpha19 bundle. Total alpha19 commit count: 12 thematic + 1 changelog + 1 pin-bump.
 
-- **`47b4654` — alpha18 active-only baseline.** `TallyActive` SV split (active blob in its own SV file, TallyDB stays free of high-cardinality data — kills the constant-pool overflow that haunted alpha13/16); dual schema gate (account-wide `TallyDB.tally_schema_version` for the ledger wipe, per-char `TallyCharDB.tally_schema_version` for the `tallyAcknowledged` clear); auto-import + legacy-blob migration kick removed from PLAYER_LOGIN; setup wizard collapses to 3 steps (Welcome / Strategy / History) with no sibling-source import on Finish; 420+ lines of dead step builders + helpers deleted from `UI/SetupWizard.lua`.
-- **`64f41de` — TLY-68 gold capture surfaces.** `Inventory:CaptureCurrentCharGold` writes `TallyDB.charGold[charKey]` from `GetMoney()` at PLAYER_LOGIN + every `PLAYER_MONEY` event; `Inventory:CaptureWarbandGold` writes `TallyDB.warbandGold` from `C_Bank.FetchDepositedMoney(Enum.BankType.Account)` on account-banker frame open (Syndicator's `GetWarband(1).money` as fallback); `projectCharacter` / `projectWarbandBank` prefer Tally's captured value over Syndicator's snapshot.
-- **`f91cf88` — sibling-source metadata probe.** Each sibling adapter (FlipQueue, TSM, Journalator) gains a `:ProbeMetadata()` returning `{ count, fromTs, toTs, byMonth, notes }`. `/tally diag sources` rolls them into a copy-dialog with per-month distribution + 60-day window peak — the simulated-import substitute for sizing alpha19's per-cycle row budget.
-- **`cb83fa6` — CHANGELOG + RELEASES** for alpha18.
+## Ship steps (when you're ready)
 
-## Known wart on upgrade path
+1. **Smoke-test in-game.** Reload after pulling. Verify: the welcome wizard's new Steps 4/5 render when a sibling is loaded, the import widget appears + accepts budget/delay edits, `/tally import status` opens the widget when a controller exists, `/tally synth status` shows the coverage probe when idle, the Synthesise button tooltip lists candidate months.
+2. **Verify `/tally debug` opens** without the cogworks#56 crash now that v0.14.0 is pinned. If it does, this is the first build where the live debug console is actually usable.
+3. **Push `main`.** `git push origin main` — six unpushed commits land.
+4. **Tag.** `git tag v0.1.0-alpha19` then `git push origin v0.1.0-alpha19`. The BigWigsMods packager picks up the tag, builds against the Cogworks v0.14.0 external, and uploads to CurseForge + Wago with `RELEASES.md`'s `## Unreleased` as the per-release changelog.
+5. **Post the release note** to the Discord testers (Toeknee_atx, _zpectre_, Zong). The two big things they'll care about: the manual import flow restoring sibling-source data they lost on alpha18's wipe, and the per-character gold accounting picking the freshest source (closes Toeknee's 63M toon-gold gap).
 
-Upgraders coming from alpha13/16/17 with a pre-rewrite SV file too large to parse hit a one-time `1x Error loading WTF/Account/<acct>/SavedVariables/tally.lua: constant table overflow` on first alpha18 login. **Recoverable.** WoW parses the SV file before any addon code runs, so the wipe gate can't intercept — the parse fails wholesale, TallyDB stays nil, Tally inits it to `{}`, the wipe gate fires against an empty table, and the next PLAYER_LOGOUT writes a small clean replacement. Toeknee confirmed: second login is clean.
+## Migration opportunities (alpha20+)
 
-Reason there's no code-level avoidance: WoW's SV parse runs before any addon hook. The only true workaround is manually deleting `tally.lua` before installing alpha18, which we didn't document on the ship. Open backlog item: optional post-wipe chat-line softener for testers who saw the error (acknowledges the upgrade, contextualises the popup). Not blocking alpha19.
+Cogworks v0.14.0's release notes call out two primitives whose v1 driver is explicitly Tally's alpha19 work:
 
-## Tester data + diagnoses
+- **`cw:CreateMultiTaskProgress`** (`Cogworks-1.0/TaskProgress.lua`) — dockable multi-row progress widget with per-source rows, state colours (`queued | importing | done | error | skipped`), `:Pulse()` indeterminate animation, `:SetETA()`, persisted position, and a 1.5s linger + 0.6s fade on `:Complete()`. Tally's `UI/ImportControl.lua` (custom-built this session) was the *prior art* the primitive distilled; the alpha20 refactor is "rip out our per-row rendering and chrome, keep our listener wiring + budget/delay inputs + minimise badge." Net reduction: ~250 LOC.
+- **`cw:CreateTaskProgress`** (single-bar variant) — fits the per-period synthesis surface; alternative to the current toast-only progress for synthesis. Optional alpha20 adoption.
 
-Two testers ran alpha17 diag (per Toeknee's ask) + alpha18 diag (Toeknee on alpha18, zong still on alpha17).
+Other v0.14.0 primitives worth knowing about (Tally consumers, not current refactor candidates):
 
-### Toeknee (alpha18, big roster — 68 chars)
+- **`cw:ShowLoading(parent, opts)`** — async-state overlay with indeterminate dot-wave + determinate brass status bar. Could replace the "synthesising…" toast cadence if we want a more focused in-page state.
+- **`cw:CreateStepper`** — queue-based one-at-a-time walkthrough, Wizard's sibling for unknown-length flows. Not currently needed but worth knowing about for any future "process N items" flows.
+- **`CreateDrawer` edge-reveal animation** — additive `opts.animate` on the existing primitive.
+- **`CreateMiniView` `opts.persistKeys`** — whitelist of geometry keys to persist. Useful when we want pinned/collapsed state to reset per-login.
+- **`RegisterDebugAction` opts table + per-cog action registry** — groups, help tooltips, disabled state, lazy-rebuild. Worth a pass over Tally's debug actions once `/tally debug` actually opens.
+- **`cw:ShowItemKeyTooltip`** — collapses six near-identical tooltip-setup blocks across Tally's pages into one call. Cleanup-only, no behavior change.
+- **`CreateWizard` per-step custom footer** — wizard step can supply its own footer. Useful for future setup-wizard variants.
 
-Filed comment summarising the diagnosis: https://github.com/gezmodean-wow/tally/issues/24#issuecomment-4417633107.
+## Open issues / backlog status
 
-- **Warband gold = 29.2M, matches reality to the copper.** The 37M he originally reported was the Net Worth panel showing `warband.total` (gold + items combined) as the Warband row's headline. UI label issue, not a data bug. **Fix committed locally** (`ae00460`) — warband split into "Warband — gold" + "Warband — items" rows, each gated on `> 0`, both click-through to the warband inventory view. Rides with alpha19.
-- **Toon gold gap of ~63M against his 179M reality figure.** Diagnostic shows 27 of his 68 characters reporting 0 gold, with Syndicator + Tally capture + rollup all agreeing on 0. Interpretation: those characters haven't logged in since he installed Syndicator + Tally + FlipQueue together. None of the addons have ever captured their gold balance. Fast path is logging into each affected char with addons loaded; no-cycling path is TLY-69 (TSM goldLog as a third source).
-- **Memory: 6.5 MB** post-rewrite, down from ~100 MB on alpha16 with full-history loaded. Active-only baseline doing its job.
-
-### zong (alpha17, smaller roster — 53 chars)
-
-- `/tally diag gold` shows rollup total 135K vs Syndicator total 90K, delta −45K (rollup higher). Per-char inversions both directions (`DerRatvonDalaran` rollup 19,427g vs Syndicator 999g = ≈18.4k phantom; others smaller).
-- Diagnosis: stale `TallyDB.inventoryRollup` from a Rebuild before he moved gold between alts. alpha18 capture fixes this directly — once each affected char cycles through an alpha18 login, the captured value overrides Syndicator's stale snapshot.
-- Hasn't retested on alpha18 yet (still on alpha17 last we heard). No outstanding ask.
-
-### Decision: "trust the mechanism, move on"
-
-User-confirmed (2026-05-11). No further Toeknee or zong follow-up ask. alpha18 capture is the mechanism; cycling characters is the path to convergence. If testers want validation, they can re-run `/tally diag gold` themselves — we're not actively soliciting another round.
-
-## alpha19 plan
-
-### Landed (on `main`, awaiting tag)
-
-- **[TLY-70](https://github.com/gezmodean-wow/tally/issues/70) — output-channel consolidation.** 6 commits (`c205ae2`, `a8bdd8e`, `37b0715`, `e523b48`, `19a7211`, `13e3e58`). Every player-visible output routes through `ns.Output`: brief status → toast (auto-mirrored to debug log), inspectable detail → copy-dialog, engineering → `ns.dbg:PrintDebug` → debug console. Chat output (`/tally networth`, explicit opt-ins) goes via `ns.Output:ChatRaw` so every chat line mirrors to the debug log automatically — `/tally debug` becomes the always-copyable archive even when chat frame filters block selection. `/tally diag chat` + `/tally research-chat` rerouted to copy-dialog (diagnostic content belongs in inspectable substrate). 7 documented exceptions remain (pre-Cogworks init, defensive fallbacks, vendored libs).
-- **[TLY-69](https://github.com/gezmodean-wow/tally/issues/69) v1 — multi-source gold authority.** Commit `1d4235d`. Each gold-bearing source registers a probe with `Inventory`'s gold-source registry; `preferredCharGold` walks the registry and picks freshest by `moneyAt`. Sources for v1: `tally-native` (alpha18 capture), `syndicator` (with rollup `lastFullScan` as freshness proxy since the API has no per-char timestamp), `tsm` (parses the per-character `goldLog` CSV under `TradeSkillMasterDB.s@<char> - <faction> - <realm>@internalData@goldLog`). `/tally diag gold` shows per-source columns + chosen-source provenance. Closes the path Toeknee's 63M toon-gold gap was sitting on.
-- **`ae00460` warband row UI split** + **`cb83fa6` alpha18 changelog/release docs**. Both pushed.
-
-### Still to do for alpha19 ship
-
-- **Manual import controller in setup wizard.** Pause/resume/per-cycle row budget. Starting budget 10k rows per cycle; testers refine via the sibling-source probe data (`/tally diag sources`) on actual rosters. Substantial UI + state-machine work.
-- **On-demand period synthesis.** When Research/Lifecycle/Compare query a period without a Tally archive, synthesise from siblings, persist into a slot, return. LRU eviction when slot pool fills.
-- **Bump Cogworks pin** once cogworks#56 ships a tag with the `CreateTabPanel` `lazy` opt — unblocks `/tally debug`.
-- **TLY-69 v2 (stretch)**: optional Accountant_NWB / Classic adapter; multi-source warband gold (TSM doesn't track warband, so the value-add is small — defer unless a tester surfaces something).
-- **CHANGELOG / RELEASES `## Unreleased`** entries for the work above (currently blank).
-
-### Sequencing
-
-Manual import controller is the chunky one — needs design pass on pause/resume UX. Period synthesis builds on the import controller (similar pipeline shape). The Cogworks pin bump is opportunistic — do it when the upstream tag ships, no schedule pressure.
-
-## Open decisions before alpha19 work begins
-
-1. **TSM `goldLog` storage shape — verify.** TLY-69 assumes TSM Accounting stores per-character gold in `TradeSkillMasterDB.r@<realm>@internalData@goldLog` as a CSV string mirroring the csvSales/csvBuys shape. Worth confirming against the TSM source before wiring the adapter — could be a different key or a different format. Spot-check on Toeknee's or zong's SV would settle it.
-2. **Per-cycle row budget default.** 10k still the assumption from the alpha18 session. Tester probe data (sibling-source row distributions from `/tally diag sources`) will inform but isn't blocking — pick a starting number, ship, tune.
-3. **TLY-65 (zpectre divergence freeze + empty popup).** Still independent of the rewrite. Pick up in alpha19 if cheap, otherwise defer to alpha20.
-
-## Live testers + tracked issues
-
-- **Toeknee_atx** — primary big-roster tester (68 chars, ~6.5 MB on alpha18). alpha18 first-load overflow recovered cleanly; gold diagnosis posted on TLY-24. No outstanding asks.
-- **zong** — 53-char roster on alpha17 (not yet retested on alpha18). Same gold-staleness pattern at smaller scale. No outstanding asks (per "trust the mechanism").
-- **_zpectre_** — 438k rows on alpha15 last we knew. Hasn't posted on alpha16/17/18. Worth a check-in but not blocking.
-- **Zong** (logout perf, [TLY-55](https://github.com/gezmodean-wow/tally/issues/55)) — should be closed by alpha18's active-only baseline; no recent feedback.
-
-Open issues most relevant to alpha19:
-
-- **[TLY-24](https://github.com/gezmodean-wow/tally/issues/24)** — TSM-vs-Tally ledger comparison. Gold conversation forked to TLY-68. Stays open until alpha19 lands and totals converge.
-- **[TLY-28](https://github.com/gezmodean-wow/tally/issues/28)** — zpectre Inventory empty / freeze. Awaiting zpectre confirmation.
-- **[TLY-31](https://github.com/gezmodean-wow/tally/issues/31)** — Tally as source of truth. Gold is the next domain after ledger — TLY-69 is the implementation of that for gold.
-- **[TLY-65](https://github.com/gezmodean-wow/tally/issues/65)** — zpectre divergence freeze. Independent.
-- **[TLY-66](https://github.com/gezmodean-wow/tally/issues/66)** — CSV-shaped slots. alpha20+.
-- **[TLY-67](https://github.com/gezmodean-wow/tally/issues/67)** — minimap forgets placement. Small bug, alpha19+.
-- **[TLY-68](https://github.com/gezmodean-wow/tally/issues/68)** — gold accounting investigation. Foundation shipped in alpha18; closes once alpha19 lands TLY-69.
-- **[TLY-69](https://github.com/gezmodean-wow/tally/issues/69)** — multi-source gold authority. alpha19 anchor.
-- **[TLY-70](https://github.com/gezmodean-wow/tally/issues/70)** — output-channel consolidation (chat → toasts / debug log / copy dialog). alpha19 scope; may split into multi-alpha cohorts.
+- **[TLY-71](https://github.com/gezmodean-wow/tally/issues/71)** — manual import + period synthesis. Both flows implemented + shipping in alpha19. Stays open until testers validate; close after Toeknee + zong run the new import flow against their rosters and the data converges.
+- **[TLY-69](https://github.com/gezmodean-wow/tally/issues/69)** — multi-source gold authority. Shipped in `1d4235d`. Closes when alpha19 lands and the diag confirms freshest-source picks on Toeknee's roster.
+- **[TLY-70](https://github.com/gezmodean-wow/tally/issues/70)** — output-channel consolidation. Six cohorts shipped; closes with alpha19.
+- **[TLY-68](https://github.com/gezmodean-wow/tally/issues/68)** — gold accounting investigation. Foundation in alpha18; alpha19's TLY-69 + warband-row split close the user-visible paths.
+- **[TLY-24](https://github.com/gezmodean-wow/tally/issues/24)** — TSM-vs-Tally ledger comparison. Gold conversation closes with TLY-69; ledger comparison stays open until Toeknee re-runs Compare with the alpha19 import filled.
+- **[TLY-65](https://github.com/gezmodean-wow/tally/issues/65)** — zpectre divergence freeze. Independent of the rewrite; not in alpha19 scope. Carry to alpha20.
+- **[TLY-67](https://github.com/gezmodean-wow/tally/issues/67)** — minimap forgets placement. Small bug, alpha20+.
+- **[TLY-66](https://github.com/gezmodean-wow/tally/issues/66)** — CSV-shaped slots (lazy-parsed strings, ~20× memory drop). alpha20+ when archive memory growth becomes user-visible (synthesis can fill all 60 slots fast).
+- **[cogworks#56](https://github.com/gezmodean-wow/cogworks/issues/56)** — debug-console crash. **Closed** on the Cogworks side, fix shipped in v0.14.0. Once Tally's alpha19 builds against v0.14.0, `/tally debug` should open cleanly for the first time.
 
 ## Backlog (post-alpha19)
 
+- **Adopt `cw:CreateMultiTaskProgress`** in `UI/ImportControl.lua` (alpha20 refactor — drop ~250 LOC of per-row rendering + frame chrome).
+- **Adopt `cw:ShowItemKeyTooltip`** across the UI pages (cleanup; six near-identical blocks).
 - **Character-key realm-normalisation** — adopt Cogworks `Realms.lua`. Lead from TLY-32 dig.
 - **LedgerPage bundle (TLY-52 + TLY-53 + TLY-56)** — item icon + quality-color name, right-click context menu, filter chip overlap fix.
 - **[TLY-54](https://github.com/gezmodean-wow/tally/issues/54)** — item-finder sidebar. Bigger refactor, needs design pass on the All-WoW scope.
 - **[TLY-61](https://github.com/gezmodean-wow/tally/issues/61)** — Native AHCancel coverage hole.
-- **Refactor `/tally diag` onto `cw:CreateDebug`** when Cogworks v0.13's debug primitive matures.
+- **Refactor `/tally diag` onto `cw:CreateDebug`** now that v0.14.0 unblocks the console. Add `dbg:Print` traces along the way per the alpha18 memory.
 - **Optional post-wipe chat softener** for upgraders who hit the alpha18 first-load overflow error. Not urgent.
 
 ## Cross-cog (waiting on Cogworks)
 
-- **[cogworks#23](https://github.com/gezmodean-wow/cogworks/issues/23)** — `CreateProgressBar` primitive. Lift `UI/ProgressBar.lua` + `UI/MultiProgressBar.lua` when it lands.
+- **[cogworks#23](https://github.com/gezmodean-wow/cogworks/issues/23)** — `CreateProgressBar` primitive. Note: v0.14.0 shipped `CreateTaskProgress` + `CreateMultiTaskProgress` under the "TaskProgress" naming (deliberately distinct from the existing inline-cell `CreateProgressBar` primitive). cogworks#23's original ask was the dockable variant; v0.14.0 satisfies it under the new name. Close cogworks#23 if not already done.
 - **[cogworks#27](https://github.com/gezmodean-wow/cogworks/issues/27)** — verify-package reusable workflow.
 - **[cogworks#29](https://github.com/gezmodean-wow/cogworks/issues/29)** — verify-package backslash → forward-slash TOC normalisation.
 - **[cogworks#34](https://github.com/gezmodean-wow/cogworks/issues/34)** — `sync-standards.sh check` parsing bug.
@@ -115,10 +82,10 @@ Open issues most relevant to alpha19:
 
 ## Handy facts
 
-- alpha18 shipped 2026-05-09. alpha19 in flight: TLY-69 v1 + TLY-70 on `origin/main` since 2026-05-11.
-- Last acknowledged scribe player-facing conventions: `2026-04-30f`.
-- All cogworks runbooks acknowledged at `2026-05-05a`.
-- Cogworks pinned at `v0.13.2` in `.pkgmeta`. Bump needed when cogworks#56's fix tags.
-- `TallyActive` declared in `tally.toc` alongside `TallyA001..TallyA060`. `Util/Output.lua` is the channel router for all user-visible output.
-- Memory entries to read when starting: `project_architecture_rewrite_plan` (reflects alpha19 mid-flight), `project_pro_service_direction`, `feedback_alpha_cadence`, `feedback_no_push_without_approval`, `feedback_ui_before_ship`, `feedback_player_summary`, `feedback_output_channels` (TLY-70 channel taxonomy).
+- alpha19 commits sit on top of alpha18 (`v0.1.0-alpha18` tag at 2026-05-09). Six unpushed commits + one pin-bump on `main`.
+- Cogworks pinned at `v0.14.0` in `.pkgmeta`. v0.14.0 bumped lib MINOR 19 → 26; eight primitives added (Stepper, Drawer animate, ShowLoading, MiniView persistKeys, Debug per-cog action registry, ShowItemKeyTooltip, Wizard per-step footer, TaskProgress).
+- `TallyActive` declared in `tally.toc` alongside `TallyA001..TallyA060`. `Util/Output.lua` is the channel router for all user-visible output. `Util/Import.lua` is the chunked import driver. `Util/Synthesis.lua` is the on-demand archive-fill engine. `UI/ImportControl.lua` is the persistent import widget. `UI/SynthButton.lua` is the reusable Synthesise-history button.
+- Last acknowledged scribe player-facing conventions: `2026-04-30f` (verified 2026-05-13 — no newer entries).
+- All cogworks runbooks acknowledged at `2026-05-05a`. Cogworks v0.14.0 release didn't touch the runbooks; no re-ack needed.
 - TSM goldLog storage shape verified in live SV: `s@<char> - <faction> - <realm>@internalData@goldLog`, value = `"minute,copper\n<minute>,<copper>\n..."` (balance snapshots, not deltas).
+- Memory entries to read when starting: `project_architecture_rewrite_plan` (alpha19 closes its scope), `project_pro_service_direction`, `feedback_alpha_cadence`, `feedback_no_push_without_approval`, `feedback_ui_before_ship`, `feedback_player_summary`, `feedback_output_channels`.
