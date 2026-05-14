@@ -8,6 +8,36 @@ The engineering-detail companion lives in `CHANGELOG.md` (commit-readerese — f
 
 ## Unreleased
 
+Restoring the things alpha18's structural rewrite deferred. The active-only baseline did its job — big rosters stopped hitting the saved-variables ceiling — but the cost was that sibling-source import had been ripped out and historical periods couldn't be reconstructed. alpha19 puts both back, this time as user-initiated flows you can pause, resume, and tune mid-flight. Net Worth's gold accounting also got more reliable for the case where one of your characters hasn't been touched in months.
+
+### The import flow returns — pause-able, resume-able, tune-able
+
+alpha18 stripped the per-login sibling-source import because it was the dominant logout/login tax on big rosters. alpha19 brings it back as an explicit flow with its own controls. The setup wizard gets two new steps when sibling addons (TSM Accounting, FlipQueue, Journalator) are detected: one to pick which sources and how much history (last 30 days through all history), one to pick the import speed (gentle / balanced / aggressive presets, or a custom budget per cycle).
+
+While the import is in flight, a draggable control widget sits on screen showing per-source progress, current speed, and an estimated time remaining. You can pause it at any time, tweak the rows-per-cycle or seconds-between-cycles live, or stop it and resume later — even across `/reload` or relogging. The widget collapses to a small badge near the minimap if you want it out of the way; clicking the badge brings it back. The same controls are available via `/tally import` (`pause`, `resume`, `cancel`, `budget`, `delay`) for keyboard-driven setups.
+
+The Finish button on the wizard kicks the import into the background and gets out of your way — Tally is live-capturing your auction-house, vendor, mail, and repair events the whole time, so nothing has to wait for the import to complete.
+
+### Fill historical archives on demand
+
+The Research, Lifecycle, and Compare tabs all get a new **Synthesise history** button. Each month your sibling addons cover but Tally doesn't have an archive for shows up here — the button's tooltip lists how many months are missing and roughly how many rows it would synthesise. Clicking it confirms, then writes one Tally archive per month in the background. Each completed period announces itself with a brief toast; the same archives then power Lifecycle's historical drill-downs, Research's per-item history, and Compare's full-history scope.
+
+If you only ever want the current month's data and don't care about historical analysis, just leave the button alone — Tally won't touch sibling sources until you ask it to. If you fill more than the 60-archive pool can hold, Tally now quietly evicts the oldest archive to make room (rather than failing the save outright); evicted archives can always be re-synthesised on demand.
+
+### Net Worth picks the freshest gold source
+
+If you've been seeing one or more characters report 0 gold even though you know they had a balance last time you played, alpha19 fixes the most common path. Tally now considers up to three sources for each character's gold — its own live capture (added in alpha18), Syndicator's snapshot, and TSM Accounting's per-character gold log — and picks the one with the most recent timestamp. The character that hasn't logged in since you installed Syndicator+Tally now gets its gold from TSM if you have TSM Accounting installed, instead of reading 0.
+
+`/tally diag gold` grows columns for each source it considers and a "winning source" column showing which one Net Worth is using per character, so you can confirm the freshest-source pick is doing the right thing on your account.
+
+### Quieter, more organised output
+
+Tally's chat output has been routed through a handful of focused channels. Brief acknowledgements ("snapshot taken", "import paused") now show up as toasts on the bottom-right of the screen instead of cluttering the chat frame. Multi-line diagnostic dumps like `/tally diag gold` open in a copy-paste dialog that's easier to grab from for issue reports. Engineering traces go to the in-game debug console (`/tally debug` — pending a Cogworks fix to land; not usable on this build). The few things that still print to chat — the on-demand net-worth readout, source-status notes — also mirror to the debug log automatically so you can always paste the last thing Tally told you regardless of where it appeared.
+
+### Net Worth's Warband row split
+
+The Warband row in Net Worth used to show one combined number for gold plus warband-bank items. It's now two rows — **Warband — gold** and **Warband — items** — each clickable to the warband inventory view. The old single number was the most common cause of "Tally's warband total looks too high" reports; this makes the breakdown obvious.
+
 ## v0.1.0-alpha18
 
 The architecture rewrite, phase 1. **Your Tally ledger has been wiped as part of this upgrade — that's intentional, not a bug.** Settings, history snapshots, your pricing strategy, and your minimap button position are preserved; only the transaction ledger was reset. Sibling-source import (TSM, FlipQueue, Journalator) returns in the next alpha as a user-initiated, pausable flow.
