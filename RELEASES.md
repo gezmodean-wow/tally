@@ -8,6 +8,8 @@ The engineering-detail companion lives in `CHANGELOG.md` (commit-readerese — f
 
 ## Unreleased
 
+## v0.1.0-alpha19
+
 Restoring the things alpha18's structural rewrite deferred. The active-only baseline did its job — big rosters stopped hitting the saved-variables ceiling — but the cost was that sibling-source import had been ripped out and historical periods couldn't be reconstructed. alpha19 puts both back, this time as user-initiated flows you can pause, resume, and tune mid-flight. Net Worth's gold accounting also got more reliable for the case where one of your characters hasn't been touched in months.
 
 ### The import flow returns — pause-able, resume-able, tune-able

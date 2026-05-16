@@ -4,6 +4,8 @@ All notable changes to Tally will be documented in this file.
 
 ## [Unreleased]
 
+## [v0.1.0-alpha19]
+
 Restoring sibling-source import and historical archive coverage on top of alpha18's active-only baseline. Two structurally distinct flows under one TLY-71 umbrella: a chunked import controller for live backfill (Flow A) and an on-demand period-synthesis engine for archive gaps (Flow B). Plus the alpha18 follow-ups — TLY-69 multi-source gold authority closes Toeknee's 63M toon-gold gap, TLY-70 chat-output consolidation moves every player-visible string off `print()` onto `ns.Output`'s channel router, and the warband row split removes the "warband total looks wrong" UI bug from TLY-68.
 
 - **[TLY-71](https://github.com/gezmodean-wow/tally/issues/71) Flow A — manual import controller.**
