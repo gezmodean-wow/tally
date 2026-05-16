@@ -1,93 +1,58 @@
 # Tally — next session handoff
 
-alpha19 shipped 2026-05-14. Nothing is in flight — `main` is clean and synced with `origin`. The next session is greenfield: pick up either the TLY-73 tab-structure rework (the next planned major piece) or whatever tester feedback lands on alpha19 first.
+alpha19 shipped 2026-05-14. Since then a full architecture **redesign** was scoped and broken out into GitHub issues. The next session's work is the redesign — but the build-out plan should not be locked until tester feedback lands on the feedback issue (#76).
 
 ## State
 
-- **Branch:** `main`, synced with `origin/main`. Working tree clean.
-- **Latest commit:** `95d1099` — `fix: Lifecycle:Analyze returns (analysis, cohorts) even on zero-row items`.
-- **Latest tag:** `v0.1.0-alpha19` (at `95d1099`), shipped 2026-05-14 → CurseForge + Wago via the BigWigsMods packager. Release page: https://github.com/gezmodean-wow/tally/releases/tag/v0.1.0-alpha19
-- **Cogworks pinned at `v0.14.1`** in `.pkgmeta`. Verified in the alpha19 release build log — the packager fetched `v0.14.1` and vendored it into the shipped zip, so players get the debug-console tab-overlap fix.
-- **Standards acknowledgments** (per `CLAUDE.md`): runbooks at `2026-05-05a`, scribe player-facing at `2026-04-30f`. Both verified current 2026-05-13.
+- **Branch:** `main`, synced with `origin/main` (modulo this file's commit — see "Loose ends").
+- **Latest tag:** `v0.1.0-alpha19` (at `95da...95d1099`), shipped 2026-05-14 → CurseForge + Wago.
+- **Recent commits:** `eb2905b` changelog heading promotion · `8ab1b25` `docs/REDESIGN.md`.
+- **Cogworks pinned at `v0.14.1`** in `.pkgmeta`.
+- **Standards acknowledgments:** runbooks `2026-05-05a`, scribe player-facing `2026-04-30f`. Verified current 2026-05-16.
 
-## What alpha19 shipped
+## The redesign — read this first
 
-Four themes, ~14 commits, one tag. Full engineering detail in `CHANGELOG.md` `## [v0.1.0-alpha19]` once promoted from `## [Unreleased]` (see "Loose end" below).
+**`docs/REDESIGN.md` is the canonical design.** Tally stops being a *store* of transactions and becomes a *projection layer* over sibling sources (TSM, FlipQueue, Journalator): no native capture, no stored ledger, recompute-on-parse dedup/merge, persists only net-worth snapshots + aggregates. The Lua constant-pool wall is structurally gone because nothing persisted grows with row count. New navigation: a `Live · Historical · Tools · Settings · Appearance` left bar.
 
-- **TLY-71 Flow A — manual import controller.** Setup wizard Steps 4+5 (source picker + window + pace presets), `Util/Import.lua` chunked-backfill state machine (pause/resume/cancel, logout-survivable via `TallyDB.import.pending`), `/tally import` slash, `UI/ImportControl.lua` persistent draggable control widget.
-- **TLY-71 Flow B — on-demand period synthesis.** `Util/Synthesis.lua` engine (parses siblings once, buckets by month, writes one archive per period), `Archive.lua` LRU slot eviction + freed-slot recycling, `/tally synth` slash, `UI/SynthButton.lua` "Synthesise history" button on Research / Lifecycle / Compare.
-- **TLY-69 — multi-source gold authority.** Per-character gold picks the freshest of Tally-native capture / Syndicator snapshot / TSM goldLog. `/tally diag gold` shows per-source columns + chosen-source provenance.
-- **TLY-70 — output-channel taxonomy.** Every player-visible string routes through `ns.Output` (toast / copy-dialog / debug-console / mirrored-chat).
-- Plus the `ae00460` warband-row UI split (gold vs items) and the `95d1099` Lifecycle zero-row crash fix found during the post-ship smoke test.
+GitHub structure:
+- **[#77](https://github.com/gezmodean-wow/tally/issues/77)** — engineering umbrella, with the 14-item task checklist.
+- **Task issues [#78](https://github.com/gezmodean-wow/tally/issues/78)–[#90](https://github.com/gezmodean-wow/tally/issues/90)** + **[#72](https://github.com/gezmodean-wow/tally/issues/72)** (Appearance). Each links back to #77.
+- **[#76](https://github.com/gezmodean-wow/tally/issues/76)** — tester feedback issue. A `## Player update` comment with 8 questions is posted; scribe mirrors it to the Discord thread.
+- Supersedes **#73** (tab rework — should be closed in favour of #77). Reframes **#24** (→ Ledger reconciliation facet) and **#66** (→ no slots, CSV is the export format).
+- **[flipqueue#203](https://github.com/gezmodean-wow/flipqueue/issues/203)** — cross-cog heads-up: FlipQueue's ledger no longer migrates into Tally; its data stays put.
 
-## Post-ship done
+## Gated on tester feedback
 
-- Player-update comments posted on TLY-24, TLY-68, TLY-69, TLY-71 — scribe mirrors them to the Discord forum threads.
-- Cogworks pin confirmed correct (v0.14.1) in the shipped artifact.
-- `/tally debug` confirmed working in-game on v0.14.1.
+**Do not lock the build-out plan until #76 gets replies.** Questions 1/3/8 specifically gate real decisions: how long the Live window should be (#84), how hard the sibling dependency is, and whether the on-demand 2–3s parse latency is acceptable (#79). Watch #76's Discord thread for Toeknee / zong / zpectre.
 
-## Loose end to clear early next session
+## Suggested implementation order (once feedback lands)
 
-- **`CHANGELOG.md` + `RELEASES.md` still have the alpha19 content under `## [Unreleased]` / `## Unreleased`.** The release flow convention (see other cogs) is to promote the heading to the tagged version after the tag lands. Rename `## [Unreleased]` → `## [v0.1.0-alpha19]` in `CHANGELOG.md` and `## Unreleased` → `## v0.1.0-alpha19` in `RELEASES.md`, then re-add empty `## [Unreleased]` / `## Unreleased` stubs at the top. (alpha17's `647858c` "promote Unreleased" commit is the pattern.) Low-priority but do it before the next changelog entry so the next alpha's notes don't pile onto alpha19's.
+Data spine before views:
+1. **#79 parse cache + #80 dedup/merge engine** — the spine everything reads from.
+2. **#81 net-worth snapshot store + #82 aggregates store** — the only persisted data.
+3. **#78 retire the old store** — alongside/after the spine works.
+4. **#83 nav shell + #84 historical date picker** — the frame.
+5. **#85 Summary / #86 Ledger / #87 Research views, #88 minimap, #89 Tools, #72 Appearance.**
+- **#90 multi-realm** is a data-model concern (realm dimension, buy/sell-side classification) that threads through #80/#82/#86 — settle its model decisions inside those, don't treat it as a late add.
 
-## Not yet smoke-tested live
+## alpha cadence
 
-These shipped but weren't exercised in-game before the tag — verify when convenient, or wait for tester reports:
+Multi-alpha effort. alpha20 ≈ teardown + data spine; views land across alpha20–22. Phase internally via commits, tag per the cadence. Tester data is expendable — clean break, no migration.
 
-- **Import wizard Steps 4+5 + control widget.** Needs a setup-wizard run, which only auto-shows when setup isn't complete (`/tally reset` triggers it but wipes the ledger — alpha-tester data is expendable per the project memory, so this is acceptable if you want to test). The widget itself: drag, minimise-to-badge, budget/delay edit, pause/resume/cancel.
-- **A real synthesis run.** The Synthesise button tooltip + confirm popup were the only parts touched. An actual `EnsurePeriods` run against a big TSM CSV (the 2-3s first-parse block, per-period toasts, LRU eviction when the 60-slot pool fills) is unverified.
+## Loose ends
 
-## Next major piece — TLY-73
-
-**[TLY-73](https://github.com/gezmodean-wow/tally/issues/73)** — tab-structure rework, filed 2026-05-13 from the alpha19 smoke-test reframe. Two parts:
-
-1. **Fold Lifecycle into Research as a per-item drill-down.** Today Lifecycle is a peer tab; the "View lifecycle →" button at `UI/ResearchPage.lua:123` jumps to it. Intended: Lifecycle becomes an in-page expander/sub-view under Research, collapsing one top-level tab.
-2. **Global History time-window navigator.** A cross-cutting date-range selector that every page scopes its data against — closest current analogue is Compare's binary "Include archives (slow)" toggle. Wants a `ns.History.activeWindow`-style state pages subscribe to; the Synthesise button becomes period-scoped ("fill the periods this window covers") rather than "fill everything missing."
-
-TLY-73 needs a design pass before implementation — the History navigator is a real architecture decision (how pages subscribe, how the active window interacts with the active-only working set vs lazy archive loads). Start there with a Plan, not code.
-
-## alpha20 candidate work
-
-Per the alpha cadence, alpha20 = tester-reported alpha19 fixes + planned work. Planned candidates:
-
-- **TLY-73** (above) — the anchor if no urgent tester fixes land.
-- **Adopt `cw:CreateMultiTaskProgress`** in `UI/ImportControl.lua`. Cogworks v0.14.0 shipped this primitive with Tally's import controller named as its v1 driver. The refactor: drop ~250 LOC of per-row rendering + frame chrome onto the primitive, keep the listener wiring + budget/delay inputs + minimise badge. Optionally `cw:CreateTaskProgress` (single-bar) for the synthesis surface.
-- **[TLY-72](https://github.com/gezmodean-wow/tally/issues/72)** — adopt `cw:CreateAppearanceTab` as the Settings Appearance tab (mirrors cogworks#71). Self-contained, small.
-- **Adopt `cw:ShowItemKeyTooltip`** — collapses ~6 near-identical tooltip-setup blocks across the UI pages. Cleanup, no behavior change.
-- **`RegisterDebugAction` pass** — now that `/tally debug` opens, register Tally debug actions via v0.14.0's opts-table form (groups, help tooltips). The Actions tab is currently empty by design.
-- **[TLY-65](https://github.com/gezmodean-wow/tally/issues/65)** — zpectre divergence freeze. Independent of the rewrite; deferred from alpha19.
-- **[TLY-67](https://github.com/gezmodean-wow/tally/issues/67)** is CLOSED (minimap placement); don't re-pick it.
-
-## Open issues (status)
-
-- **[TLY-71](https://github.com/gezmodean-wow/tally/issues/71)** — import controller + synthesis. Shipped in alpha19. Close after testers run the import flow and data converges.
-- **[TLY-69](https://github.com/gezmodean-wow/tally/issues/69)** — multi-source gold authority. Shipped. Close after Toeknee's `/tally diag gold` confirms freshest-source picks.
-- **[TLY-70](https://github.com/gezmodean-wow/tally/issues/70)** — output-channel consolidation. Shipped; close with alpha19 confirmation.
-- **[TLY-68](https://github.com/gezmodean-wow/tally/issues/68)** — gold accounting. alpha19's TLY-69 + warband split close the user-visible paths; close pending tester confirmation.
-- **[TLY-24](https://github.com/gezmodean-wow/tally/issues/24)** — TSM-vs-Tally ledger comparison. Stays open until Toeknee re-runs Compare with the alpha19 import filled.
-- **[TLY-73](https://github.com/gezmodean-wow/tally/issues/73)** — tab rework. New, design-pending.
-- **[TLY-66](https://github.com/gezmodean-wow/tally/issues/66)** — CSV-shaped slots (~20× archive memory drop). alpha20+ when synthesis filling the slot pool makes archive memory growth user-visible.
-- **[TLY-65](https://github.com/gezmodean-wow/tally/issues/65)** — zpectre divergence freeze. Independent; alpha20 candidate.
+- **#73** should be closed (superseded by #77) — left open so a human confirms.
+- This `NEXT_SESSION.md` commit may be local-only — push if a future session needs it.
 
 ## Live testers
 
-- **Toeknee_atx** — primary big-roster tester (68 chars). alpha19's import flow restores the sibling-source data alpha18's wipe removed; TLY-69 should close his 63M toon-gold gap. Player updates posted on TLY-24/68/69/71 — watch those threads for his alpha19 response.
-- **zong** — 53-char roster, was on alpha17 last we heard. Same gold-staleness pattern at smaller scale.
-- **_zpectre_** — last known on alpha15 (438k rows). Hasn't posted on alpha16-19. Worth a check-in; TLY-65 is his.
+- **Toeknee_atx** — primary big-roster tester (68 chars). **zong** — 53-char roster. **_zpectre_** — last known alpha15, worth a check-in; TLY-65 is his. Point all three at #76's Discord thread for redesign feedback.
 
-## Cross-cog (waiting on Cogworks)
+## Open issues snapshot
 
-- **[cogworks#23](https://github.com/gezmodean-wow/cogworks/issues/23)** — `CreateProgressBar` primitive. Likely satisfied by v0.14.0's `CreateTaskProgress` / `CreateMultiTaskProgress` (shipped under the "TaskProgress" name to avoid colliding with the existing inline-cell `CreateProgressBar`). Close it if not already done.
-- **[cogworks#27](https://github.com/gezmodean-wow/cogworks/issues/27)** / **[#29](https://github.com/gezmodean-wow/cogworks/issues/29)** — verify-package workflow + TOC-slash normalisation.
-- **[cogworks#34](https://github.com/gezmodean-wow/cogworks/issues/34)** — `sync-standards.sh check` parsing bug.
-- **[cogworks#35](https://github.com/gezmodean-wow/cogworks/issues/35)** — `.gitattributes` for `*.sh eol=lf`.
-- **[cogworks#56](https://github.com/gezmodean-wow/cogworks/issues/56)** — debug-console crash. CLOSED; fix shipped in v0.14.0, tab-overlap follow-up in v0.14.1. Resolved for Tally.
-
-## Handy facts
-
-- alpha19 at `95d1099`, tagged `v0.1.0-alpha19`. `main` synced with `origin`.
-- Cogworks pinned `v0.14.1` in `.pkgmeta`. v0.14.x added eight primitives (Stepper, Drawer animate, ShowLoading, MiniView persistKeys, Debug per-cog action registry, ShowItemKeyTooltip, Wizard per-step footer, TaskProgress).
-- New modules from alpha19: `Util/Import.lua` (import driver), `Util/Synthesis.lua` (archive-fill engine), `UI/ImportControl.lua` (import widget), `UI/SynthButton.lua` (Synthesise-history button). `Util/Output.lua` is the channel router.
-- `Archive.lua` now runs LRU slot eviction — `archiveIndex[key].lastAccessedAt` stamped on Save+Load; `TallyDB.ledger.freedSlots` recycles explicit deletes.
-- TSM goldLog storage shape: `s@<char> - <faction> - <realm>@internalData@goldLog`, value = `"minute,copper\n..."` (balance snapshots).
-- Memory entries to read when starting: `project_architecture_rewrite_plan` (alpha19 closed its scope — the rewrite is done), `project_pro_service_direction`, `feedback_alpha_cadence`, `feedback_no_push_without_approval`, `feedback_ui_before_ship`, `feedback_player_summary`, `feedback_output_channels`, `feedback_enhancements_to_issues`.
+- **#77** redesign umbrella · **#76** redesign feedback · **#78–#90, #72** redesign tasks.
+- **#73** tab rework — close (superseded by #77).
+- **#24** TSM-vs-Tally compare — reframed into #86; keep open until the Ledger reconciliation facet ships.
+- **#66** CSV slots — reframed into #89's CSV exporter.
+- **#65** zpectre divergence freeze — independent of the redesign; still open.
+- **#69 / #70 / #71 / #68** — alpha19 shipped fixes; close after tester confirmation.
