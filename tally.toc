@@ -38,6 +38,8 @@ Sources/Native/Mail.lua
 Sources/FlipQueue.lua
 Sources/TSM.lua
 Sources/Journalator.lua
+Spine/Overrides.lua
+Spine/Dedup.lua
 Research/Lifecycle.lua
 Research/Aggregator.lua
 UI/Chart.lua
