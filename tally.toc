@@ -41,6 +41,7 @@ Sources/Journalator.lua
 Spine/Overrides.lua
 Spine/Dedup.lua
 Spine/ParseCache.lua
+Spine/UnifiedLedger.lua
 Research/Lifecycle.lua
 Research/Aggregator.lua
 UI/Chart.lua

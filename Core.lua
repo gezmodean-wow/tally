@@ -1448,6 +1448,18 @@ local function spineFormatReport()
         fmt(summary.merged), fmt(summary.review)))
     end
   end
+  if PC:IsReady() and ns.Spine.UnifiedLedger then
+    local ok, stats = pcall(ns.Spine.UnifiedLedger.Stats, ns.Spine.UnifiedLedger)
+    if ok and stats then
+      local realmCount = 0
+      for _ in pairs(stats.byRealm or {}) do realmCount = realmCount + 1 end
+      emit("")
+      emit("Unified ledger (post-override projection):")
+      emit(string.format("  %s records across %d realm%s",
+        fmt(stats.count), realmCount, realmCount == 1 and "" or "s"))
+      emit(string.format("  %s flagged for review", fmt(stats.review)))
+    end
+  end
   if ns.Spine.Overrides then
     emit(string.format("Manual overrides stored: %d", ns.Spine.Overrides:Count()))
   end
