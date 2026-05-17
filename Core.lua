@@ -238,6 +238,12 @@ function ns:PLAYER_LOGIN()
     if TallyDB.ui.showCompareTab and ns.UI.CreateCompareLedgersPage then
       ns.UI.MainFrame:RegisterPage("Compare", ns.UI.CreateCompareLedgersPage)
     end
+    -- TLY-77: data-spine verification tab — gated like Compare, default
+    -- off. Debug surface for diffing the spine's unified ledger against
+    -- the live LedgerPage during the projection-layer transition.
+    if TallyDB.ui.showSpineTab and ns.UI.CreateSpinePage then
+      ns.UI.MainFrame:RegisterPage("Spine", ns.UI.CreateSpinePage)
+    end
     if ns.UI.CreateSettingsPage then
       ns.UI.MainFrame:RegisterPage("Settings", ns.UI.CreateSettingsPage)
     end
