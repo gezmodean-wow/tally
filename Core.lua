@@ -1392,6 +1392,77 @@ ns.DiagCopyDialog = diagOpenCopyDialog
 ns.RegisterDiagInspectors = registerDiagInspectors
 
 -- ============================================================================
+-- /tally spine — data-spine readout (TLY-79 / TLY-80)
+-- ============================================================================
+--
+-- The projection-layer redesign's verification surface while the spine is
+-- still additive (the old store is retired later, TLY-78). Shows the parse
+-- cache state, per-source row counts, and — once the cache is ready — the
+-- recompute-on-parse dedup/merge summary. `/tally spine parse` forces a
+-- re-parse and opens the readout when it settles.
+
+local function spineFormatReport()
+  local lines = {}
+  local function emit(s) lines[#lines + 1] = s end
+  local fmt = BreakUpLargeNumbers or tostring
+
+  emit("== Tally data-spine ==")
+  local PC = ns.Spine and ns.Spine.ParseCache
+  if not PC then
+    emit("Spine modules not loaded.")
+    emit("== end ==")
+    return table.concat(lines, "\n")
+  end
+
+  emit(string.format("Enabled: %s",
+    PC:IsEnabled() and "yes" or "no — escape-hatch flag is off (/tally spine on)"))
+  local st = PC:GetState()
+  emit(string.format("Parse phase: %s  (%d / %d sources)",
+    st.phase or "?", st.done or 0, st.total or 0))
+  if st.currentSource then
+    emit("Currently parsing: " .. st.currentSource)
+  end
+  if st.sources and #st.sources > 0 then
+    emit("Sources:")
+    for _, slot in ipairs(st.sources) do
+      if slot.status == "done" then
+        emit(string.format("  %-12s %s rows%s", slot.name, fmt(slot.count or 0),
+          (slot.skipped and slot.skipped > 0)
+            and string.format(" (%d skipped)", slot.skipped) or ""))
+      elseif slot.status == "error" then
+        emit(string.format("  %-12s ERROR: %s", slot.name, tostring(slot.error)))
+      else
+        emit(string.format("  %-12s %s", slot.name, slot.status or "pending"))
+      end
+    end
+  end
+
+  if PC:IsReady() and ns.Spine.Dedup then
+    local ok, _, summary = pcall(ns.Spine.Dedup.run, PC:GetAllEntries())
+    if ok and summary then
+      emit("")
+      emit("Dedup/merge (recompute-on-parse):")
+      emit(string.format("  %s parsed entries -> %s unified records",
+        fmt(summary.entries), fmt(summary.records)))
+      emit(string.format("  %s cross-source merges, %s flagged for review",
+        fmt(summary.merged), fmt(summary.review)))
+    end
+  end
+  if ns.Spine.Overrides then
+    emit(string.format("Manual overrides stored: %d", ns.Spine.Overrides:Count()))
+  end
+  emit("== end ==")
+  return table.concat(lines, "\n")
+end
+
+local function spineCopyDialog()
+  if ns.Output then
+    ns.Output:Inspect(spineFormatReport(),
+      "Tally data-spine status — paste into a GitHub issue.")
+  end
+end
+
+-- ============================================================================
 -- /tally diag divergence — multi-source coverage analysis (TLY-45)
 -- ============================================================================
 --
@@ -2601,6 +2672,49 @@ if Cogworks and Cogworks.RegisterSlashCommands then
           elseif sub == "sources" then sourcesCopyDialog()
           elseif sub == "pretty" or sub == "chat" then diagPrettyCopyDialog()
           else diagOpenCopyDialog() end
+        end,
+      },
+      {
+        name = "spine",
+        args = "[parse|status|on|off]",
+        help = "Data-spine diagnostics (TLY-79/80 projection-layer redesign). `parse` re-parses sibling sources into the session cache and opens the readout when it settles; `status` (default) opens the current spine readout; `on`/`off` toggle the escape-hatch flag.",
+        run = function(rest)
+          local sub = rest and rest:lower() or ""
+          local PC = ns.Spine and ns.Spine.ParseCache
+          if sub == "parse" then
+            if not PC then
+              if ns.Output then ns.Output:Error("Spine not loaded.") end
+              return
+            end
+            if not PC:IsEnabled() then
+              if ns.Output then
+                ns.Output:Warn("Spine is disabled — `/tally spine on` to enable.")
+              end
+              return
+            end
+            if ns.Output then
+              ns.Output:Info("Spine: parsing sibling sources…")
+            end
+            PC:RegisterListener("slash-spine-parse", function(st)
+              if st.phase == "ready" or st.phase == "error" then
+                PC:UnregisterListener("slash-spine-parse")
+                spineCopyDialog()
+              end
+            end)
+            PC:Refresh()
+          elseif sub == "on" then
+            if PC then
+              PC:SetEnabled(true)
+              if ns.Output then ns.Output:Success("Spine enabled.") end
+            end
+          elseif sub == "off" then
+            if PC then
+              PC:SetEnabled(false)
+              if ns.Output then ns.Output:Info("Spine disabled.") end
+            end
+          else
+            spineCopyDialog()
+          end
         end,
       },
       {

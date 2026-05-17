@@ -40,6 +40,7 @@ Sources/TSM.lua
 Sources/Journalator.lua
 Spine/Overrides.lua
 Spine/Dedup.lua
+Spine/ParseCache.lua
 Research/Lifecycle.lua
 Research/Aggregator.lua
 UI/Chart.lua
