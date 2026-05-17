@@ -1,55 +1,59 @@
 # Tally — next session handoff
 
-alpha19 shipped 2026-05-14. The active workstream is the **projection-layer redesign** (umbrella #77). Design is captured, the work is broken into GitHub issues, and the first task (#72) has landed. The build-out plan is still gated on tester feedback (#76).
+alpha19 shipped 2026-05-14. The active workstream is the **projection-layer redesign** (umbrella #77). The data spine is now functionally complete in code; the remaining build-out is the verification UI, then persistence, then the teardown and the new navigation/views.
 
 ## State
 
-- **Branch:** `main`. **2 commits ahead of `origin/main`, unpushed** — `e909cf0` (NEXT_SESSION refresh) and `6d1470f` (#72). Plus this handoff commit. Push needs explicit approval.
-- **Latest tag:** `v0.1.0-alpha19`, shipped 2026-05-14.
-- **Cogworks pin:** `.pkgmeta` external now at **`v0.14.2`** (bumped from v0.14.1 by #72, for `cw:CreateAppearanceTab`). The local `Libs/Cogworks-1.0/` checkout is gitignored/package-time — still v0.14.1 until re-fetched.
-- **Standards acknowledgments:** runbooks `2026-05-05a`, scribe player-facing `2026-04-30f`. Verified current 2026-05-16.
+- **Branch:** `main`. **7 commits ahead of `origin/main`, unpushed.** Push needs explicit approval.
+- **Latest tag:** `v0.1.0-alpha19`, shipped 2026-05-14. alpha20 not yet tagged.
+- **Cogworks pin:** `.pkgmeta` external at **`v0.14.2`**. Local `Libs/Cogworks-1.0/` is gitignored/package-time — still v0.14.1 until re-fetched.
+- **Standards acknowledgments:** runbooks `2026-05-05a`, scribe player-facing `2026-04-30f`. The player-facing doc was WebFetched 2026-05-17 — top changelog entry still `2026-04-30f`, no update needed.
 
 ## The redesign — read this first
 
-**`docs/REDESIGN.md` is the canonical design.** Tally stops being a *store* of transactions and becomes a *projection layer* over sibling sources (TSM, FlipQueue, Journalator): no native capture, no stored ledger, recompute-on-parse dedup/merge, persists only net-worth snapshots + aggregates. New navigation: a `Live · Historical · Tools · Settings · Appearance` left bar.
+**`docs/REDESIGN.md` is the canonical design.** Tally stops being a *store* of transactions and becomes a *projection layer* over sibling sources: no native capture, no stored ledger, recompute-on-parse dedup/merge, persists only net-worth snapshots + aggregates + sparse manual overrides.
 
-GitHub structure:
-- **[#77](https://github.com/gezmodean-wow/tally/issues/77)** — engineering umbrella with the 14-item task checklist.
-- **Task issues [#78](https://github.com/gezmodean-wow/tally/issues/78)–[#90](https://github.com/gezmodean-wow/tally/issues/90)** + **[#72](https://github.com/gezmodean-wow/tally/issues/72)** (Appearance).
-- **[#76](https://github.com/gezmodean-wow/tally/issues/76)** — tester feedback issue; `## Player update` comment posted, mirrored to Discord.
-- Supersedes **#73**; reframes **#24** and **#66**. Cross-cog heads-up filed: **[flipqueue#203](https://github.com/gezmodean-wow/flipqueue/issues/203)**.
+GitHub: **[#77](https://github.com/gezmodean-wow/tally/issues/77)** umbrella (14-item checklist) · task issues **[#78](https://github.com/gezmodean-wow/tally/issues/78)–[#90](https://github.com/gezmodean-wow/tally/issues/90)** + **[#72](https://github.com/gezmodean-wow/tally/issues/72)**.
 
-## Done this session
+## Done this session — the data spine (4 commits)
 
-- **#72 Appearance tab** — committed `6d1470f`. New `UI/AppearancePage.lua` (`ns.UI.CreateAppearancePage`) wraps the shared Cogworks appearance primitive with `{ cog = "Tally" }`; registered in `Core.lua` after Settings, added to `tally.toc`. Builder call prefers `cw:CreateAppearanceTab`, falls back to `cw:CreateUIScalingSettingsBlock` (works on stale v0.14.1). `.pkgmeta` bumped to v0.14.2. CHANGELOG + RELEASES updated under Unreleased. Lua syntax-checked clean.
+The architecture was planned first (Plan agent), then built as **additive** modules under a new `Spine/` directory — nothing in the live addon changed behaviour. All four commits syntax-check clean (`luac -p`). No player-visible behaviour yet beyond the `/tally spine` diagnostic.
 
-## Loose ends to clear early
+- **`f2032c0` feat(TLY-80) — dedup/merge pure core.** `Spine/Dedup.lua` (`ns.Spine.Dedup`): pure recompute-on-parse dedup/merge — coarse-key bucketing (`kind|itemID|charKey|count|counterparty`) + windowed clustering with the source-uniqueness gate ported from `Ledger.clusterGroup`, so distinct same-source events never collapse. **Price is a tolerance-gated match constraint, not a key field** — keying on exact price would split the records whose prices conflict and hide the conflict; instead near-prices merge and flag, far-apart prices stay distinct (user-confirmed design call). Field-merge reuses `ns.Ledger:GetAuthority`. `Spine/Overrides.lua` (`ns.Spine.Overrides`): the one persisted piece — sparse manual corrections in a new `TallyDB.merge` sub-key, keyed on relog-stable `Dedup.entryKey`.
+- **`18cf1fc` feat(TLY-79) — session parse cache.** `Spine/ParseCache.lua` (`ns.Spine.ParseCache`): parses each sibling source once per session via its `getEntriesFn`, chunked one-source-per-tick, `generation`-guarded. **Lazy, not login-eager** — deliberately NOT hooked into `PLAYER_LOGIN` (an unconditional login parse would re-create the flipper-loop relog tax the alpha18 rewrite removed); populates on first demand. `TallyDB.spine.enabled` escape-hatch flag, default on. New `/tally spine` slash command (`parse`/`status`/`on`/`off`).
+- **`6619aff` feat(TLY-80) — projection API.** `Spine/UnifiedLedger.lua` (`ns.Spine.UnifiedLedger`): the read surface views call — `Query(filter)`, `GetReviewList()`, `Stats(filter)`, `IsReady()`. Memoized recompute, invalidated when the parse cache refreshes. **Realm dimension (#90)**: every record gains `realm = { key, side }` (key from the charKey, normalized via Cogworks; side buy/sell/neutral from kind).
+- **`e4482cf` feat(TLY-79) — parse loading bar.** `UI/ParseProgress.lua`: listener on `ParseCache` rendering the parse via `ns.UI.CreateProgressBar`. Satisfies toeknee's #76 Q8 requirement (2-3s parse OK only if a loading bar shows).
 
-- **Check `- [x] #72` on the #77 umbrella checklist.** The edit was started but interrupted — the box is still unchecked.
-- **#72 not smoke-tested in-game.** The fallback means it renders on the local v0.14.1 lib; to exercise the real `CreateAppearanceTab` path, re-fetch the `.pkgmeta` external at v0.14.2. New tab appears last in the main-frame tab strip.
-- **2 (soon 3) unpushed commits on `main`.** Push when ready.
+**Data flow now in place:** `ParseCache → Dedup → Overrides → realm dimension → UnifiedLedger:Query`. Verify in-game with `/tally spine parse`.
 
-## Next work — the data spine
+## Next work — Commit 5: the spine verification UI (#77 checklist)
 
-The correct next chunk is the data spine: **#79 (session-lifetime parse cache)** + **#80 (dedup/merge engine)**. Both are feedback-independent in their core design and can be built as *additive* modules without breaking the current addon. **They are the architectural core — start with a Plan, not code.** Then #81/#82 (persistence). **#78 (retire the old store) must come AFTER the spine works, never before** — retiring it first leaves Tally with no ledger data until the spine + persistence land.
+The one remaining piece of the spine build-out: a **gated "Spine" verification view** — a `MainFrame` page rendering `UnifiedLedger:Query` + the `GetReviewList` flag-for-review list, so testers can diff spine output against the live `LedgerPage` before #78 retires the old store. Model the gating on the existing **Compare tab** (`Core.lua` ~line 244 — `TallyDB.ui.showCompareTab`, registered conditionally; Settings toggle). New `UI/SpinePage.lua` + `tally.toc` line + `Core.lua` registration + a Settings toggle. The page should trigger `ParseCache:Ensure()` on open (this is the lazy auto-trigger — the loading bar fires here) and show a spinner while `UnifiedLedger:IsReady()` is false.
 
-Order: #79 + #80 → #81 + #82 → #78 → #83 + #84 (nav) → #85/#86/#87 views, #88 minimap, #89 tools, #90 multi-realm model. #90 is a data-model concern threading through #80/#82/#86 — settle it inside those.
+Then, per the #77 order: **#81/#82 (persistence — net-worth snapshots + aggregates)** → **#78 (retire the old store)** → **#83/#84 (Live/Historical nav)** → **#85/#86/#87 views, #88 minimap, #89 tools**. #78 must come AFTER persistence — retiring the store first leaves Tally with no ledger data.
 
-## Still gated on tester feedback
+## Loose ends
 
-Do not lock the build-out plan until #76 gets replies. Questions 1/3/8 gate the Live window length (#84), the sibling-dependency assumptions, and the on-demand parse-latency tradeoff (#79). Watch #76's Discord thread for Toeknee / zong / zpectre.
+- **Check `- [x] #72` on the #77 umbrella checklist** — still unchecked (needs a `gh` remote write; approval).
+- **7 unpushed commits on `main`** — push when ready.
+- **#72 not smoke-tested in-game** — renders on the fallback path on stale v0.14.1; re-fetch the `.pkgmeta` external at v0.14.2 to exercise the real `CreateAppearanceTab`.
+- **Spine not smoke-tested in-game** — all four commits are syntax-checked only. First in-game check: `/tally spine parse` should show the loading bar and a non-zero unified-record count.
+
+## Tester feedback (#76)
+
+**toeknee replied** (zong / zpectre have not). Key answers: looks back ~30d, mostly leans on TSM for detail; runs TSM + FlipQueue (TSM keeps 1yr); net worth = everything-sellable + all gold; **84 buy realms / 25 sell realms**; minimap wants gold (toons/warbank/GB) + items (toons/AH/warbank) + grand total; **2-3s parse pause OK if a loading bar shows** (drove `UI/ParseProgress.lua`). Still waiting on zong / zpectre before locking the Live-window length (#84).
 
 ## alpha cadence
 
-Multi-alpha effort. alpha20 ≈ teardown + data spine; views land across alpha20–22. Phase internally via commits, tag once. Tester data is expendable — clean break, no migration.
+Multi-alpha. alpha20 ≈ teardown + data spine; views land across alpha20–22. Phase internally via commits, tag once. Tester data is expendable — clean break, no migration.
 
 ## Live testers
 
-- **Toeknee_atx** (68 chars) · **zong** (53 chars) · **_zpectre_** (last on alpha15; TLY-65 is his). Point all three at #76's Discord thread for redesign feedback.
+- **Toeknee_atx** (68 chars) · **zong** (53 chars) · **_zpectre_** (last on alpha15; TLY-65 is his). Point all three at #76's Discord thread.
 
 ## Open issues snapshot
 
-- **#77** umbrella · **#76** feedback · **#78–#90, #72** tasks (#72 code-complete, committed).
+- **#77** umbrella · **#76** feedback · **#78–#90, #72** tasks. #72 + the spine core (#79/#80/#90) are code-complete; #79/#80 stay open until the verification UI + persistence land.
 - **#73** tab rework — close (superseded by #77).
 - **#24** → reframed into #86 · **#66** → reframed into #89 · **#65** zpectre divergence — independent, still open.
 - **#69 / #70 / #71 / #68** — alpha19 shipped fixes; close after tester confirmation.
