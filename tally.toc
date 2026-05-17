@@ -53,5 +53,6 @@ UI/LifecyclePage.lua
 UI/LedgerPage.lua
 UI/CompareLedgersPage.lua
 UI/SettingsPage.lua
+UI/AppearancePage.lua
 UI/SetupWizard.lua
 Core.lua

@@ -4,6 +4,8 @@ All notable changes to Tally will be documented in this file.
 
 ## [Unreleased]
 
+- **[TLY-72](https://github.com/gezmodean-wow/tally/issues/72) — Appearance tab.** New `UI/AppearancePage.lua` registers an "Appearance" tab (`ns.UI.CreateAppearancePage`, wired in `Core.lua` after Settings) whose body is the shared Cogworks appearance primitive called with `{ cog = "Tally" }`. Adopts the suite-wide convention from cogworks#71: UI scale + theme are suite-wide, font scale + font family are per-cog-overridable, all writes flowing through Cogworks into `CogworksSharedDB`. The builder call prefers `cw:CreateAppearanceTab` and falls back to `cw:CreateUIScalingSettingsBlock` so a stale vendored v0.14.1 lib still renders the tab; the block is re-anchored left+right to the page so it tracks tab width (the primitive sizes itself off `parent:GetWidth()` at build time, before MainFrame has anchored the page). `.pkgmeta` Cogworks external bumped `v0.14.1 → v0.14.2` to pick up the `CreateAppearanceTab` alias. First task landed off the [#77](https://github.com/gezmodean-wow/tally/issues/77) projection-layer redesign umbrella.
+
 ## [v0.1.0-alpha19]
 
 Restoring sibling-source import and historical archive coverage on top of alpha18's active-only baseline. Two structurally distinct flows under one TLY-71 umbrella: a chunked import controller for live backfill (Flow A) and an on-demand period-synthesis engine for archive gaps (Flow B). Plus the alpha18 follow-ups — TLY-69 multi-source gold authority closes Toeknee's 63M toon-gold gap, TLY-70 chat-output consolidation moves every player-visible string off `print()` onto `ns.Output`'s channel router, and the warband row split removes the "warband total looks wrong" UI bug from TLY-68.

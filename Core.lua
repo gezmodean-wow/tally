@@ -241,6 +241,9 @@ function ns:PLAYER_LOGIN()
     if ns.UI.CreateSettingsPage then
       ns.UI.MainFrame:RegisterPage("Settings", ns.UI.CreateSettingsPage)
     end
+    if ns.UI.CreateAppearancePage then
+      ns.UI.MainFrame:RegisterPage("Appearance", ns.UI.CreateAppearancePage)
+    end
   end
 
   -- TLY-25: auto-show the setup wizard for fresh installs with detected
