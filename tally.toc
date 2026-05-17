@@ -46,6 +46,7 @@ Research/Lifecycle.lua
 Research/Aggregator.lua
 UI/Chart.lua
 UI/ProgressBar.lua
+UI/ParseProgress.lua
 UI/MultiProgressBar.lua
 UI/ImportControl.lua
 UI/SynthButton.lua
