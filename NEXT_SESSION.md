@@ -17,31 +17,36 @@ GitHub: **[#77](https://github.com/gezmodean-wow/tally/issues/77)** umbrella (14
 
 ## Done this session — the data spine (4 commits)
 
-The architecture was planned first (Plan agent), then built as **additive** modules under a new `Spine/` directory — nothing in the live addon changed behaviour. All four commits syntax-check clean (`luac -p`). No player-visible behaviour yet beyond the `/tally spine` diagnostic.
+The architecture was planned first (Plan agent), then built as **additive** modules under a new `Spine/` directory — nothing in the live addon changed behaviour. All five commits syntax-check clean (`luac -p`). The only player-visible surfaces are the `/tally spine` diagnostic and the (default-off) Spine verification tab.
 
 - **`f2032c0` feat(TLY-80) — dedup/merge pure core.** `Spine/Dedup.lua` (`ns.Spine.Dedup`): pure recompute-on-parse dedup/merge — coarse-key bucketing (`kind|itemID|charKey|count|counterparty`) + windowed clustering with the source-uniqueness gate ported from `Ledger.clusterGroup`, so distinct same-source events never collapse. **Price is a tolerance-gated match constraint, not a key field** — keying on exact price would split the records whose prices conflict and hide the conflict; instead near-prices merge and flag, far-apart prices stay distinct (user-confirmed design call). Field-merge reuses `ns.Ledger:GetAuthority`. `Spine/Overrides.lua` (`ns.Spine.Overrides`): the one persisted piece — sparse manual corrections in a new `TallyDB.merge` sub-key, keyed on relog-stable `Dedup.entryKey`.
 - **`18cf1fc` feat(TLY-79) — session parse cache.** `Spine/ParseCache.lua` (`ns.Spine.ParseCache`): parses each sibling source once per session via its `getEntriesFn`, chunked one-source-per-tick, `generation`-guarded. **Lazy, not login-eager** — deliberately NOT hooked into `PLAYER_LOGIN` (an unconditional login parse would re-create the flipper-loop relog tax the alpha18 rewrite removed); populates on first demand. `TallyDB.spine.enabled` escape-hatch flag, default on. New `/tally spine` slash command (`parse`/`status`/`on`/`off`).
 - **`6619aff` feat(TLY-80) — projection API.** `Spine/UnifiedLedger.lua` (`ns.Spine.UnifiedLedger`): the read surface views call — `Query(filter)`, `GetReviewList()`, `Stats(filter)`, `IsReady()`. Memoized recompute, invalidated when the parse cache refreshes. **Realm dimension (#90)**: every record gains `realm = { key, side }` (key from the charKey, normalized via Cogworks; side buy/sell/neutral from kind).
-- **`e4482cf` feat(TLY-79) — parse loading bar.** `UI/ParseProgress.lua`: listener on `ParseCache` rendering the parse via `ns.UI.CreateProgressBar`. Satisfies toeknee's #76 Q8 requirement (2-3s parse OK only if a loading bar shows).
+- **`e4482cf` feat(TLY-79) — parse loading bar.** `UI/ParseProgress.lua`: listener on `ParseCache` rendering the parse via `ns.UI.CreateProgressBar`. Satisfies the #76 Q8 requirement (2-3s parse OK only if a loading bar shows).
+- **`3867469` feat(TLY-77) — verification tab.** `UI/SpinePage.lua` (`ns.UI.CreateSpinePage`): gated debug tab (`TallyDB.ui.showSpineTab`, default off, new Settings toggle), renders `UnifiedLedger:Query` / `GetReviewList` in a scroll table so the spine can be diffed against the live `LedgerPage`. **`OnShow` is the lazy-parse trigger** — calls `ParseCache:Ensure()`.
 
-**Data flow now in place:** `ParseCache → Dedup → Overrides → realm dimension → UnifiedLedger:Query`. Verify in-game with `/tally spine parse`.
+**Data flow now in place:** `ParseCache → Dedup → Overrides → realm dimension → UnifiedLedger:Query`. Verify in-game with `/tally spine parse`, or enable the Spine tab in Settings.
 
-## Next work — Commit 5: the spine verification UI (#77 checklist)
+## Next work — persistence, then teardown
 
-The one remaining piece of the spine build-out: a **gated "Spine" verification view** — a `MainFrame` page rendering `UnifiedLedger:Query` + the `GetReviewList` flag-for-review list, so testers can diff spine output against the live `LedgerPage` before #78 retires the old store. Model the gating on the existing **Compare tab** (`Core.lua` ~line 244 — `TallyDB.ui.showCompareTab`, registered conditionally; Settings toggle). New `UI/SpinePage.lua` + `tally.toc` line + `Core.lua` registration + a Settings toggle. The page should trigger `ParseCache:Ensure()` on open (this is the lazy auto-trigger — the loading bar fires here) and show a spinner while `UnifiedLedger:IsReady()` is false.
+The spine build-out is complete. Per the #77 order: **#81/#82 (persistence — net-worth snapshot store + aggregates store)** → **#78 (retire the alpha18/19 store)** → **#83/#84 (Live/Historical nav)** → **#85/#86/#87 views, #88 minimap, #89 tools**. #78 must come AFTER persistence — retiring the store first leaves Tally with no ledger data. #90 (multi-realm) is partly delivered (the `realm` dimension on every unified record); the remaining #90 work — per-source realm accuracy (FlipQueue `targetRealm`), connected-realm `group` rollup — is a fast-follow threading through #82/#86.
 
-Then, per the #77 order: **#81/#82 (persistence — net-worth snapshots + aggregates)** → **#78 (retire the old store)** → **#83/#84 (Live/Historical nav)** → **#85/#86/#87 views, #88 minimap, #89 tools**. #78 must come AFTER persistence — retiring the store first leaves Tally with no ledger data.
+**Start #81/#82 with a Plan.** Both stores are "bounded by time/period, not row count" — the redesign's whole storage thesis — so their shapes must be designed deliberately. Net-worth snapshots already have a precedent in `History.lua`; aggregates are new.
 
 ## Loose ends
 
 - **Check `- [x] #72` on the #77 umbrella checklist** — still unchecked (needs a `gh` remote write; approval).
-- **7 unpushed commits on `main`** — push when ready.
 - **#72 not smoke-tested in-game** — renders on the fallback path on stale v0.14.1; re-fetch the `.pkgmeta` external at v0.14.2 to exercise the real `CreateAppearanceTab`.
-- **Spine not smoke-tested in-game** — all four commits are syntax-checked only. First in-game check: `/tally spine parse` should show the loading bar and a non-zero unified-record count.
+- **Spine not smoke-tested in-game** — all five commits are syntax-checked only. First in-game check: enable the Spine tab in Settings (or `/tally spine parse`) — expect the loading bar and a non-zero unified-record count.
 
 ## Tester feedback (#76)
 
-**toeknee replied** (zong / zpectre have not). Key answers: looks back ~30d, mostly leans on TSM for detail; runs TSM + FlipQueue (TSM keeps 1yr); net worth = everything-sellable + all gold; **84 buy realms / 25 sell realms**; minimap wants gold (toons/warbank/GB) + items (toons/AH/warbank) + grand total; **2-3s parse pause OK if a loading bar shows** (drove `UI/ParseProgress.lua`). Still waiting on zong / zpectre before locking the Live-window length (#84).
+Both testers have replied (**zong and _zpectre_ are the same person** — no third reply pending).
+
+- **toeknee** — runs TSM + FlipQueue (TSM keeps 1yr); looks back ~30d; net worth = everything-sellable + all gold; **84 buy realms / 25 sell realms**; minimap wants gold (toons/warbank/GB) + items (toons/AH/warbank) + grand total; 2-3s parse pause OK **if a loading bar shows** (drove `UI/ParseProgress.lua`). Wants cross-toon flip tracking — "bought on one toon, sold on another," a TSM gap.
+- **zpectre** — runs **FlipQueue + Journalator, no TSM** (the TSM-less test case — the spine handles it: `ParseCache` parses only available sources, `Dedup` falls through `Ledger`'s `DEFAULT_PRIORITY`); looks back "a few weeks"; net worth without bound items (= saleable); profit as a **%**, avg-per-item + overall-per-item; minimap wants total net worth + total gold; trades **52 realms**, buys and sells on all.
+
+**Both testers confirm Q8** (2-3s parse acceptable). **Both look back only a few weeks** → the implicit Live window (#84) can be short, not 60 days. Cross-toon flip P&L (toeknee Q4) is a Research-view (#87) capability the unified ledger can support — worth a note on #87. There is no third tester pending — **zong and _zpectre_ are the same person** — so #76 feedback is as complete as it will get; the build-out plan can be locked.
 
 ## alpha cadence
 
@@ -49,7 +54,10 @@ Multi-alpha. alpha20 ≈ teardown + data spine; views land across alpha20–22. 
 
 ## Live testers
 
-- **Toeknee_atx** (68 chars) · **zong** (53 chars) · **_zpectre_** (last on alpha15; TLY-65 is his). Point all three at #76's Discord thread.
+Two testers, not three — **zong and _zpectre_ are the same person**.
+
+- **Toeknee_atx** (68 chars) — runs TSM + FlipQueue.
+- **_zpectre_** (also posts as **zong**; TLY-65 is his) — runs FlipQueue + Journalator, no TSM.
 
 ## Open issues snapshot
 
