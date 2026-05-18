@@ -96,6 +96,17 @@ if (TallyCharDB.tally_schema_version or 0) < TALLY_SCHEMA_VERSION then
   TallyCharDB.tally_schema_version = TALLY_SCHEMA_VERSION
 end
 
+-- TLY-81: History.lua is retired — its net-worth role moved to
+-- Spine/NetWorthStore.lua, and its per-item × per-character inventory
+-- snapshots are the row-growing structure REDESIGN.md §3.2 forbids.
+-- Drop the orphaned saved data. Unconditional + idempotent: nothing
+-- recreates these keys now that History.lua is gone. This is a targeted
+-- nil, deliberately not a TALLY_SCHEMA_VERSION bump — bumping the master
+-- gate would re-wipe the still-live alpha18/19 ledger, which is #78's
+-- job, not #81's. Per-item price history is tracked as TLY-91.
+TallyDB.history = nil
+TallyDB.pricingHistory = nil
+
 -- ============================================================================
 -- Event dispatch
 -- ============================================================================
@@ -362,12 +373,16 @@ _G.TallyAPI = {
     GetItemResearch = function(input, itemName) return ns.Research:GetRecord(input, itemName) end,
     InvalidateItemResearch = function(itemKey) ns.Research:Invalidate(itemKey) end,
     GetNetWorthSnapshot = function(opts) return ns.NetWorth:Snapshot(opts) end,
-    GetNetWorthSnapshotAt = function(atTime, opts) return ns.History:GetNetWorthAt(atTime, opts) end,
+    GetNetWorthSnapshotAt = function(atTime)
+      return ns.Spine and ns.Spine.NetWorthStore and ns.Spine.NetWorthStore:GetAt(atTime) or nil
+    end,
     GetInventoryRollup = function() return ns.Inventory:Get() end,
-    GetItemPriceHistory = function(itemID, strategy) return ns.History:GetItemHistory(itemID, strategy) end,
-    GetItemPriceTrend = function(itemID, windowSec, strategy) return ns.History:GetItemTrend(itemID, windowSec, strategy) end,
-    GetItemInventoryHistory = function(itemID) return ns.History:GetItemInventoryHistory(itemID) end,
-    GetItemInventoryTrend = function(itemID, windowSec) return ns.History:GetItemInventoryTrend(itemID, windowSec) end,
+    -- TLY-81: per-item price/inventory history retired with History.lua.
+    -- Stubbed to empty until TLY-91 restores a bounded price-history store.
+    GetItemPriceHistory = function() return {} end,
+    GetItemPriceTrend = function() return nil end,
+    GetItemInventoryHistory = function() return {} end,
+    GetItemInventoryTrend = function() return nil end,
     QueryLedger = function(filter) return ns.Ledger:Query(filter) end,
     LedgerStats = function(filter) return ns.Ledger:Stats(filter) end,
     -- v1.5 (TLY-26 / TLY-27)
@@ -385,12 +400,12 @@ _G.TallyAPI = {
 -- (handleNetWorth, handleHistory, resetData) stay here because they're
 -- substantial and benefit from named scope.
 
--- Wipes the data stores Tally accumulates at runtime — ledger, history,
--- inventory rollup, the setup-completed flag, and any user source opt-outs
--- — then re-runs the inventory scan and re-shows the setup wizard so the
--- user lands back in the first-run flow. Config that doesn't represent
--- accumulated data is preserved (strategy, history cadence, minimap, UI
--- position).
+-- Wipes the data stores Tally accumulates at runtime — ledger, net-worth
+-- snapshots, inventory rollup, the setup-completed flag, and any user
+-- source opt-outs — then re-runs the inventory scan and re-shows the
+-- setup wizard so the user lands back in the first-run flow. Config that
+-- doesn't represent accumulated data is preserved (strategy, snapshot
+-- retention, minimap, UI position).
 --
 -- The wizard handles the chunked backfill from sibling sources — reset
 -- intentionally does NOT auto-import. Otherwise we'd race the wizard's
@@ -398,13 +413,13 @@ _G.TallyAPI = {
 -- thread before they've even picked a pace.
 local function resetData()
   if ns.Ledger and ns.Ledger.Clear then ns.Ledger:Clear() end
-  if ns.History and ns.History.Clear then ns.History:Clear() end
+  if ns.Spine and ns.Spine.NetWorthStore then ns.Spine.NetWorthStore:Clear() end
   TallyDB.inventoryRollup = nil
   TallyDB.setup = nil          -- clear completed flag so wizard re-fires
   TallyDB.disabledSources = nil -- re-let the user pick sources in the wizard
 
   if ns.Output then
-    ns.Output:Info("Data cleared (ledger, history, inventory rollup, setup state). Rebuilding inventory…")
+    ns.Output:Info("Data cleared (ledger, net-worth snapshots, inventory rollup, setup state). Rebuilding inventory…")
   end
 
   if ns.Inventory and ns.Inventory.Rebuild then
@@ -1122,14 +1137,14 @@ local function inspectSkipCounters()
   return out
 end
 
-local function inspectHistory()
-  if not (ns.History and ns.History.GetSummary) then return nil end
-  local sum = ns.History:GetSummary()
-  local out = { inventorySnapshots = sum.inventory.snapshotCount or 0, pricing = {} }
-  for _, p in ipairs(sum.pricing or {}) do
-    out.pricing[#out.pricing + 1] = { strategy = p.strategy, snapshots = p.snapshotCount }
-  end
-  return out
+local function inspectNetWorthSnapshots()
+  if not (ns.Spine and ns.Spine.NetWorthStore) then return nil end
+  local sum = ns.Spine.NetWorthStore:GetSummary()
+  return {
+    snapshots      = sum.snapshotCount or 0,
+    oldestAt       = sum.oldestAt,
+    lastSnapshotAt = sum.lastSnapshotAt,
+  }
 end
 
 local function inspectDisabledSources()
@@ -1166,7 +1181,7 @@ local DIAG_INSPECTORS = {
   { name = "Ledger",          fn = inspectLedger },
   { name = "Storage",         fn = inspectStorage },
   { name = "SkipCounters",    fn = inspectSkipCounters },
-  { name = "History",         fn = inspectHistory },
+  { name = "NetWorthSnapshots", fn = inspectNetWorthSnapshots },
   { name = "DisabledSources", fn = inspectDisabledSources },
   { name = "Siblings",        fn = inspectSiblings },
   { name = "Memory",          fn = inspectMemory },
@@ -1339,12 +1354,9 @@ local function diagFormatPretty()
     end
   end
 
-  local h = inspectHistory()
-  if h then
-    emit(string.format("History inventory: %d snapshots", h.inventorySnapshots))
-    for _, p in ipairs(h.pricing) do
-      emit(string.format("  Pricing [%s]: %d snapshots", p.strategy, p.snapshots))
-    end
+  local nw = inspectNetWorthSnapshots()
+  if nw then
+    emit(string.format("Net-worth snapshots: %d", nw.snapshots))
   end
 
   local ds = inspectDisabledSources()
@@ -1962,22 +1974,35 @@ local function handleNetWorth(rest, includeBound)
       end
       return
     end
-    if not ns.History or not ns.History.GetNetWorthAt then
-      if ns.Output then ns.Output:Error("History module unavailable.") end
+    local NWS = ns.Spine and ns.Spine.NetWorthStore
+    if not NWS then
+      if ns.Output then ns.Output:Error("Net-worth snapshot store unavailable.") end
       return
     end
-    local atTime = time() - offsetSec
-    local snap, info = ns.History:GetNetWorthAt(atTime, { includeBound = includeBound })
-    if not snap then
-      if ns.Output then ns.Output:Error(tostring(info or "No historical data.")) end
+    local rec = NWS:GetAt(time() - offsetSec)
+    if not rec then
+      if ns.Output then
+        ns.Output:Error("No net-worth snapshot at or before that time.")
+      end
       return
     end
+    -- NetWorthStore keeps a lean per-day record (no per-character /
+    -- warband breakdown — that history isn't stored). Build a
+    -- print-shaped table so PrintSnapshot renders the totals it has.
+    local snap = {
+      view        = includeBound and "owned" or "net",
+      strategy    = rec.strategy,
+      total       = includeBound and rec.ownedTotal or rec.total,
+      gold        = rec.gold,
+      items       = includeBound and rec.ownedItems or rec.items,
+      breakdown   = rec.breakdown,
+      warband     = { gold = 0, items = 0, total = 0 },
+      byCharacter = {},
+      atTime      = rec.atTime,
+    }
     local label = string.format("(at %s, %s ago)",
-      date("%Y-%m-%d %H:%M", snap.atTime), describeAge(offsetSec))
+      date("%Y-%m-%d %H:%M", rec.atTime), describeAge(offsetSec))
     ns.NetWorth:PrintSnapshot(snap, label)
-    if info and info ~= "" and ns.Output then
-      ns.Output:ChatRaw("  |cffffd070note:|r " .. tostring(info))
-    end
     -- Δ vs current
     local current = ns.NetWorth:Snapshot({ includeBound = includeBound })
     local delta = current.total - snap.total
@@ -2007,64 +2032,44 @@ local function handleHistory(args)
   local sub, rest = args:match("^(%S*)%s*(.*)$")
   sub = (sub or ""):lower()
 
-  if sub == "" or sub == "config" then
-    local cfg = ns.History:GetConfig()
-    local summary = ns.History:GetSummary()
+  local NWS = ns.Spine and ns.Spine.NetWorthStore
+  if not NWS then
+    if ns.Output then ns.Output:Error("Net-worth snapshot store unavailable.") end
+    return
+  end
+
+  if sub == "" or sub == "status" or sub == "config" then
+    local cfg = NWS:GetConfig()
+    local summary = NWS:GetSummary()
     local now = time()
     local lines = {}
     local function push(s) lines[#lines + 1] = s end
-    push("Tally history config")
-    push(string.format("  interval: %s (0 = disabled)", describeAge(cfg.minIntervalSec)))
-    push(string.format("  retention: %s", describeAge(cfg.retentionSec)))
-    push(string.format("  daily-rollup after: %s", describeAge(cfg.rollupAfterSec)))
-    push("  pricing:")
-    if #summary.pricing == 0 then
-      push("    (no snapshots yet)")
+    push("Tally net-worth snapshots")
+    push(string.format("  cadence: one per day, retention %d days",
+      cfg.retentionDays or 180))
+    if summary.snapshotCount == 0 then
+      push("  (no snapshots yet)")
     else
-      for _, row in ipairs(summary.pricing) do
-        local ageLast = row.lastSnapshotAt and (now - row.lastSnapshotAt) or nil
-        local span = (row.lastSnapshotAt and row.oldestAt) and (row.lastSnapshotAt - row.oldestAt) or 0
-        push(string.format("    [%s] %d snapshots, last %s ago, spanning %s",
-          row.strategy, row.snapshotCount, describeAge(ageLast), describeAge(span)))
-      end
-    end
-    local inv = summary.inventory
-    if inv.snapshotCount == 0 then
-      push("  inventory: (no snapshots yet)")
-    else
-      local ageLast = inv.lastSnapshotAt and (now - inv.lastSnapshotAt) or nil
-      local span = (inv.lastSnapshotAt and inv.oldestAt) and (inv.lastSnapshotAt - inv.oldestAt) or 0
-      push(string.format("  inventory: %d snapshots, last %s ago, spanning %s",
-        inv.snapshotCount, describeAge(ageLast), describeAge(span)))
+      local ageLast = summary.lastSnapshotAt and (now - summary.lastSnapshotAt) or nil
+      local span = (summary.lastSnapshotAt and summary.oldestAt)
+        and (summary.lastSnapshotAt - summary.oldestAt) or 0
+      push(string.format("  %d snapshots, last %s ago, spanning %s",
+        summary.snapshotCount, describeAge(ageLast), describeAge(span)))
     end
     if ns.Output then
-      ns.Output:Inspect(table.concat(lines, "\n"), "Tally history config + snapshot summary.")
+      ns.Output:Inspect(table.concat(lines, "\n"), "Tally net-worth snapshot summary.")
     end
     return
   end
 
   if sub == "snapshot" then
-    local ok, info = ns.History:Snapshot({ force = true })
+    local ok, info = NWS:MaybeSnapshot({ force = true })
     if ok and ns.Output then
-      ns.Output:Success(string.format("Snapshot recorded under %s — %d priced items, %d inventory items.",
-        info.strategy, info.pricedItems, info.inventoryItems))
+      ns.Output:Success("Net-worth snapshot recorded — "
+        .. ns.NetWorth.FormatGold(info.total) .. ".")
     elseif not ok and ns.Output then
       ns.Output:Error("Snapshot skipped — " .. tostring(info))
     end
-    return
-  end
-
-  if sub == "interval" then
-    local hours = tonumber(rest)
-    if not hours or hours < 0 then
-      if ns.Output then
-        ns.Output:Error("Usage: /tally history interval <hours> (0 disables auto-snapshot)")
-      end
-      return
-    end
-    local ok, e = ns.History:SetInterval(hours * 3600)
-    if ok and ns.Output then ns.Output:Success("Interval set to " .. hours .. "h.")
-    elseif not ok and ns.Output then ns.Output:Error(tostring(e)) end
     return
   end
 
@@ -2074,30 +2079,15 @@ local function handleHistory(args)
       if ns.Output then ns.Output:Error("Usage: /tally history retention <days>") end
       return
     end
-    local ok, e = ns.History:SetRetention(days * 86400)
-    if ok and ns.Output then ns.Output:Success("Retention set to " .. days .. "d.")
-    elseif not ok and ns.Output then ns.Output:Error(tostring(e)) end
-    return
-  end
-
-  if sub == "rollup" then
-    local days = tonumber(rest)
-    if not days or days <= 0 then
-      if ns.Output then ns.Output:Error("Usage: /tally history rollup <days>") end
-      return
-    end
-    local ok, e = ns.History:SetRollupThreshold(days * 86400)
-    if ok and ns.Output then ns.Output:Success("Daily-rollup threshold set to " .. days .. "d.")
+    local ok, e = NWS:SetRetentionDays(days)
+    if ok and ns.Output then ns.Output:Success("Retention set to " .. math.floor(days) .. "d.")
     elseif not ok and ns.Output then ns.Output:Error(tostring(e)) end
     return
   end
 
   if sub == "clear" then
-    local target = rest ~= "" and rest or nil
-    ns.History:Clear(target)
-    if ns.Output then
-      ns.Output:Success("History cleared" .. (target and (" for " .. target) or "") .. ".")
-    end
+    NWS:Clear()
+    if ns.Output then ns.Output:Success("Net-worth snapshots cleared.") end
     return
   end
 
@@ -2486,8 +2476,8 @@ if Cogworks and Cogworks.RegisterSlashCommands then
       },
       {
         name = "history", aliases = { "h" },
-        args = "[snapshot|interval|retention|rollup|clear]",
-        help = "Show pricing-history config / take snapshot / set retention",
+        args = "[status|snapshot|retention|clear]",
+        help = "Net-worth snapshot summary / take snapshot now / set retention days / clear",
         run = function(rest) handleHistory(rest) end,
       },
       {
@@ -2858,8 +2848,8 @@ if LDB then
       -- the available snapshot is fresher than half the requested window —
       -- otherwise we'd be comparing "now" to "1h ago" and calling it Δ7d.
       local function deltaLine(label, windowSec)
-        if not (ns.History and ns.History.GetNetWorthAt) then return end
-        local past = ns.History:GetNetWorthAt(time() - windowSec)
+        if not (ns.Spine and ns.Spine.NetWorthStore) then return end
+        local past = ns.Spine.NetWorthStore:GetAt(time() - windowSec)
         if not past then return end
         if (time() - past.atTime) < (windowSec * 0.5) then return end
         local delta = snap.total - past.total

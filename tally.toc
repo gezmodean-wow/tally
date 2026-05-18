@@ -26,7 +26,6 @@ Util/Synthesis.lua
 Pricing/Sources.lua
 Inventory/Ownership.lua
 NetWorth/Calculator.lua
-History.lua
 Archive.lua
 Ledger.lua
 Sources/Native.lua

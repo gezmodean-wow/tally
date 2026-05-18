@@ -205,65 +205,38 @@ function ns.UI.CreateSettingsPage(parent)
   local refreshFns = {}
 
   -- ============================================================================
-  -- SECTION 1: History cadence
+  -- SECTION 1: Net-worth snapshots
   -- ============================================================================
+  --
+  -- TLY-81: the snapshot cadence is fixed (one per calendar day) — there
+  -- is no interval or daily-rollup to configure any more, only how long
+  -- the bounded time series is kept.
 
-  local hCadenceHdr = makeSectionHeader(page, page, "TOPLEFT", 2, "HISTORY CADENCE")
-
-  local intervalRow, loadInterval = makeNumericField(page, {
-    label = "Interval",
-    suffix = "hours",
-    note = "0 disables auto-snapshots; default 6",
-    allowZero = true,
-    getter = function()
-      if not ns.History then return 6 end
-      return (ns.History:GetConfig().minIntervalSec or 0) / 3600
-    end,
-    setter = function(hours)
-      if not ns.History then return false, "history unavailable" end
-      return ns.History:SetInterval(hours * 3600)
-    end,
-  })
-  intervalRow:SetPoint("TOPLEFT", hCadenceHdr, "BOTTOMLEFT", 0, -10)
-  refreshFns[#refreshFns + 1] = loadInterval
+  local hCadenceHdr = makeSectionHeader(page, page, "TOPLEFT", 2, "NET-WORTH SNAPSHOTS")
 
   local retentionRow, loadRetention = makeNumericField(page, {
     label = "Retention",
     suffix = "days",
-    note = "snapshots older than this are pruned; default 365",
+    note = "net-worth snapshots older than this are pruned; default 180",
     getter = function()
-      if not ns.History then return 365 end
-      return math.floor((ns.History:GetConfig().retentionSec or 0) / 86400)
+      if not (ns.Spine and ns.Spine.NetWorthStore) then return 180 end
+      return ns.Spine.NetWorthStore:GetConfig().retentionDays or 180
     end,
     setter = function(days)
-      if not ns.History then return false, "history unavailable" end
-      return ns.History:SetRetention(days * 86400)
+      if not (ns.Spine and ns.Spine.NetWorthStore) then
+        return false, "snapshot store unavailable"
+      end
+      return ns.Spine.NetWorthStore:SetRetentionDays(days)
     end,
   })
-  retentionRow:SetPoint("TOPLEFT", intervalRow, "BOTTOMLEFT", 0, -4)
+  retentionRow:SetPoint("TOPLEFT", hCadenceHdr, "BOTTOMLEFT", 0, -10)
   refreshFns[#refreshFns + 1] = loadRetention
-
-  local rollupRow, loadRollup = makeNumericField(page, {
-    label = "Daily-rollup after",
-    suffix = "days",
-    note = "snapshots older than this are kept at one per day; default 30",
-    getter = function()
-      if not ns.History then return 30 end
-      return math.floor((ns.History:GetConfig().rollupAfterSec or 0) / 86400)
-    end,
-    setter = function(days)
-      if not ns.History then return false, "history unavailable" end
-      return ns.History:SetRollupThreshold(days * 86400)
-    end,
-  })
-  rollupRow:SetPoint("TOPLEFT", retentionRow, "BOTTOMLEFT", 0, -4)
-  refreshFns[#refreshFns + 1] = loadRollup
 
   -- ============================================================================
   -- SECTION 2: Pricing strategy
   -- ============================================================================
 
-  local stratHdr = makeSectionHeader(page, rollupRow, "BOTTOMLEFT", 18, "PRICING STRATEGY")
+  local stratHdr = makeSectionHeader(page, retentionRow, "BOTTOMLEFT", 18, "PRICING STRATEGY")
 
   local stratRow = CreateFrame("Frame", nil, page)
   stratRow:SetPoint("TOPLEFT", stratHdr, "BOTTOMLEFT", 0, -10)
@@ -337,33 +310,22 @@ function ns.UI.CreateSettingsPage(parent)
   snapStatus:SetSpacing(2)
 
   local function loadSnapStatus()
-    if not (ns.History and ns.History.GetSummary) then
-      snapStatus:SetText("(history unavailable)")
+    if not (ns.Spine and ns.Spine.NetWorthStore) then
+      snapStatus:SetText("(snapshot store unavailable)")
       return
     end
-    local summary = ns.History:GetSummary()
+    local sum = ns.Spine.NetWorthStore:GetSummary()
+    if (sum.snapshotCount or 0) == 0 then
+      snapStatus:SetText("Net-worth snapshots: none yet")
+      return
+    end
     local now = time()
-    local lines = {}
-    if #summary.pricing == 0 then
-      lines[#lines + 1] = "Pricing: no snapshots yet"
-    else
-      for _, row in ipairs(summary.pricing) do
-        local ageLast = row.lastSnapshotAt and (now - row.lastSnapshotAt) or nil
-        local span = (row.lastSnapshotAt and row.oldestAt) and (row.lastSnapshotAt - row.oldestAt) or 0
-        lines[#lines + 1] = string.format("Pricing [%s]: %d snapshots, last %s ago, spanning %s",
-          row.strategy, row.snapshotCount, describeAge(ageLast), describeAge(span))
-      end
-    end
-    if summary.inventory.snapshotCount == 0 then
-      lines[#lines + 1] = "Inventory: no snapshots yet"
-    else
-      local inv = summary.inventory
-      local ageLast = inv.lastSnapshotAt and (now - inv.lastSnapshotAt) or nil
-      local span = (inv.lastSnapshotAt and inv.oldestAt) and (inv.lastSnapshotAt - inv.oldestAt) or 0
-      lines[#lines + 1] = string.format("Inventory: %d snapshots, last %s ago, spanning %s",
-        inv.snapshotCount, describeAge(ageLast), describeAge(span))
-    end
-    snapStatus:SetText(table.concat(lines, "\n"))
+    local ageLast = sum.lastSnapshotAt and (now - sum.lastSnapshotAt) or nil
+    local span = (sum.lastSnapshotAt and sum.oldestAt)
+      and (sum.lastSnapshotAt - sum.oldestAt) or 0
+    snapStatus:SetText(string.format(
+      "Net-worth snapshots: %d, last %s ago, spanning %s",
+      sum.snapshotCount, describeAge(ageLast), describeAge(span)))
   end
   refreshFns[#refreshFns + 1] = loadSnapStatus
 
@@ -372,11 +334,11 @@ function ns.UI.CreateSettingsPage(parent)
   actionRow:SetSize(540, 24)
 
   local snapBtn = makeButton(actionRow, "Take snapshot now", 160, function()
-    if not ns.History then return end
-    local ok, info = ns.History:Snapshot({ force = true })
+    if not (ns.Spine and ns.Spine.NetWorthStore) then return end
+    local ok, info = ns.Spine.NetWorthStore:MaybeSnapshot({ force = true })
     if ok and ns.Output then
-      ns.Output:Success(string.format("Snapshot recorded — %d priced items, %d inventory items.",
-        info.pricedItems, info.inventoryItems))
+      ns.Output:Success("Net-worth snapshot recorded — "
+        .. ns.NetWorth.FormatGold(info.total) .. ".")
     elseif not ok and ns.Output then
       ns.Output:Error(tostring(info))
     end
@@ -384,17 +346,17 @@ function ns.UI.CreateSettingsPage(parent)
   end)
   snapBtn:SetPoint("LEFT", actionRow, "LEFT", 0, 0)
 
-  local clearBtn = makeButton(actionRow, "Clear all history", 160, function()
+  local clearBtn = makeButton(actionRow, "Clear all snapshots", 160, function()
     StaticPopupDialogs["TALLY_CLEAR_HISTORY"] = StaticPopupDialogs["TALLY_CLEAR_HISTORY"] or {
-      text = "Wipe all Tally pricing + inventory history?\n\nThis cannot be undone. Tally will start collecting fresh snapshots from your next login.",
+      text = "Wipe all Tally net-worth snapshots?\n\nThis cannot be undone. Tally will start collecting fresh snapshots from your next login.",
       button1 = ACCEPT or "Accept",
       button2 = CANCEL or "Cancel",
       timeout = 0,
       whileDead = true,
       hideOnEscape = true,
       OnAccept = function()
-        if ns.History then ns.History:Clear() end
-        if ns.Output then ns.Output:Success("All history cleared.") end
+        if ns.Spine and ns.Spine.NetWorthStore then ns.Spine.NetWorthStore:Clear() end
+        if ns.Output then ns.Output:Success("Net-worth snapshots cleared.") end
         if page.Refresh then page:Refresh() end
       end,
     }

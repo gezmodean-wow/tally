@@ -82,8 +82,6 @@ local function makeState()
   return {
     sources = sources,
     strategy = (ns.NetWorth and ns.NetWorth:GetStrategy()) or "DBRegionMarketAvg",
-    historyIntervalHours = 12,
-    historyRetentionDays = 90,
     -- Backfill sources & window
     windowMonths = 12,                  -- 1 | 3 | 12 | 0 (all)
     -- Backfill pace (defaults to "balanced" — 10k rows / 2.0s, matching
@@ -351,91 +349,6 @@ local function buildStrategyStep(parent, state)
   note:SetSpacing(3)
   note:SetText("|cff999999You can change this any time from Settings, or "
     .. "set a custom expression like `min(DBMarket, DBRegionMarketAvg)`.|r")
-
-  return f
-end
-
-local function buildHistoryStep(parent, state)
-  local f = CreateFrame("Frame", nil, parent)
-  f:SetAllPoints(parent)
-
-  local title = f:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
-  title:SetPoint("TOPLEFT", f, "TOPLEFT", 12, -12)
-  title:SetText("History cadence")
-  title:SetTextColor(themeColor("brass", { 0.83, 0.63, 0.09, 1 }))
-
-  local intro = f:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
-  intro:SetPoint("TOPLEFT", title, "BOTTOMLEFT", 0, -8)
-  intro:SetPoint("RIGHT", f, "RIGHT", -12, 0)
-  intro:SetJustifyH("LEFT")
-  intro:SetSpacing(2)
-  intro:SetText("Tally takes periodic snapshots of your inventory + prices "
-    .. "so it can replay net worth at any past time. Defaults are tuned for "
-    .. "heavy users (90k-row ledgers, 700M+ gold) — you can extend retention "
-    .. "later from Settings if you want longer history.")
-
-  local function makeIntInput(label, suffix, getter, setter, anchor, anchorPt, gap)
-    local row = CreateFrame("Frame", nil, f)
-    row:SetPoint("TOPLEFT", anchor, anchorPt, 0, -gap)
-    row:SetPoint("RIGHT", f, "RIGHT", -12, 0)
-    row:SetHeight(24)
-
-    local lbl = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    lbl:SetPoint("LEFT", row, "LEFT", 0, 0)
-    lbl:SetWidth(140)
-    lbl:SetJustifyH("LEFT")
-    lbl:SetText(label)
-
-    local edit = CreateFrame("EditBox", nil, row, "BackdropTemplate")
-    edit:SetPoint("LEFT", lbl, "RIGHT", 6, 0)
-    edit:SetSize(60, 22)
-    edit:SetAutoFocus(false)
-    edit:SetFontObject("GameFontHighlight")
-    edit:SetTextInsets(6, 6, 0, 0)
-    edit:SetBackdrop({
-      bgFile = "Interface\\Buttons\\WHITE8x8",
-      edgeFile = "Interface\\Buttons\\WHITE8x8",
-      edgeSize = 1,
-    })
-    edit:SetBackdropColor(themeColor("bgDark", { 0.04, 0.04, 0.07, 1 }))
-    edit:SetBackdropBorderColor(themeColor("border", { 0.30, 0.30, 0.40, 1 }))
-    edit:SetText(tostring(getter()))
-    edit:SetScript("OnEnterPressed", function(self)
-      local n = tonumber(self:GetText())
-      if n and n > 0 then setter(n) end
-      self:ClearFocus()
-    end)
-    edit:SetScript("OnEditFocusLost", function(self)
-      local n = tonumber(self:GetText())
-      if n and n > 0 then setter(n)
-      else self:SetText(tostring(getter())) end
-    end)
-
-    local suf = row:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
-    suf:SetPoint("LEFT", edit, "RIGHT", 6, 0)
-    suf:SetText(suffix)
-
-    return row
-  end
-
-  local intervalRow = makeIntInput("Snapshot interval", "hours",
-    function() return state.historyIntervalHours end,
-    function(n) state.historyIntervalHours = n end,
-    intro, "BOTTOMLEFT", 16)
-
-  local retentionRow = makeIntInput("Retention", "days",
-    function() return state.historyRetentionDays end,
-    function(n) state.historyRetentionDays = n end,
-    intervalRow, "BOTTOMLEFT", 6)
-
-  local note = f:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
-  note:SetPoint("TOPLEFT", retentionRow, "BOTTOMLEFT", 0, -16)
-  note:SetPoint("RIGHT", f, "RIGHT", -12, 0)
-  note:SetJustifyH("LEFT")
-  note:SetSpacing(3)
-  note:SetText("Defaults of 12h / 90d give you ~14 hi-fi snapshots plus "
-    .. "~83 daily-rollup snapshots. Snapshots older than 7 days collapse "
-    .. "to one-per-day so the saved-variables file stays bounded.")
 
   return f
 end
@@ -806,16 +719,6 @@ local function applyState(state)
     ns.NetWorth:SetStrategy(state.strategy)
   end
 
-  -- History config
-  if ns.History then
-    if state.historyIntervalHours then
-      ns.History:SetInterval(state.historyIntervalHours * 3600)
-    end
-    if state.historyRetentionDays then
-      ns.History:SetRetention(state.historyRetentionDays * 86400)
-    end
-  end
-
   -- Disabled-source list persisted so Settings reflects the choice and
   -- ImportFromSource respects it. We don't actually unregister sources —
   -- the user can toggle them back on later.
@@ -914,15 +817,14 @@ local function createWizardFrame()
 
   local state = makeState()
 
-  -- Sibling-source detection happens once at wizard creation. Steps 4 + 5
+  -- Sibling-source detection happens once at wizard creation. Steps 3 + 4
   -- only register when at least one importable sibling adapter is loaded;
   -- a fresh install with no TSM/FlipQueue/Journalator goes straight from
-  -- History to Finish with no dead-end backfill steps.
+  -- Pricing Strategy to Finish with no dead-end backfill steps.
   local importable = detectImportableSources()
   local steps = {
     { key = "welcome",  title = "Welcome",          build = function(parent) return buildWelcomeStep(parent) end },
     { key = "strategy", title = "Pricing Strategy", build = function(parent) return buildStrategyStep(parent, state) end },
-    { key = "history",  title = "History",          build = function(parent) return buildHistoryStep(parent, state) end },
   }
   if #importable > 0 then
     steps[#steps + 1] = { key = "sources", title = "Backfill — sources",

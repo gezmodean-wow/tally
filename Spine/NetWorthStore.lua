@@ -207,6 +207,18 @@ function NetWorthStore:GetLatest()
   return s[#s]
 end
 
+-- The snapshot in effect at a past time: the nearest snapshot at or
+-- before atTime, or nil if every snapshot is newer than it. Snapshots
+-- are stored append-ordered (ascending atTime), so a forward walk works.
+function NetWorthStore:GetAt(atTime)
+  if type(atTime) ~= "number" then return nil end
+  local found
+  for _, snap in ipairs(db().snapshots) do
+    if (snap.atTime or 0) <= atTime then found = snap else break end
+  end
+  return found
+end
+
 -- Count / oldest / newest, for diag + Settings.
 function NetWorthStore:GetSummary()
   local s = db().snapshots
