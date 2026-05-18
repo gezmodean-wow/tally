@@ -291,7 +291,7 @@ function ns.UI.CreateNetWorthPage(parent)
   -- Refresh logic ------------------------------------------------------------
 
   function page:Refresh()
-    if not (ns.History and ns.History.GetNetWorthSeries) then return end
+    if not (ns.Spine and ns.Spine.NetWorthStore) then return end
     local range = RANGES[state.rangeIdx]
     local view = VIEWS[state.viewIdx]
     for i, btn in ipairs(rangeButtons) do btn:SetSelected(i == state.rangeIdx) end
@@ -299,7 +299,7 @@ function ns.UI.CreateNetWorthPage(parent)
 
     local now = time()
     local startTime = range.seconds and (now - range.seconds) or nil
-    local series = ns.History:GetNetWorthSeries(startTime, nil, { includeBound = view.includeBound })
+    local series = ns.Spine.NetWorthStore:GetSeries(startTime, nil, { includeBound = view.includeBound })
 
     local points = {}
     for _, p in ipairs(series) do

@@ -144,11 +144,9 @@ function ns:PLAYER_INTERACTION_MANAGER_FRAME_SHOW(interactionType)
 end
 
 function ns:PLAYER_LOGIN()
-  -- TLY-21: force a one-shot history prune on login so users coming from the
-  -- pre-fix legacy defaults (365d retention) immediately reclaim memory once
-  -- the migration in History.db() trims their config to 90d.
-  if ns.History and ns.History.Prune then
-    pcall(ns.History.Prune, ns.History)
+  -- TLY-81: prune net-worth snapshots past the retention window on login.
+  if ns.Spine and ns.Spine.NetWorthStore then
+    pcall(ns.Spine.NetWorthStore.Prune, ns.Spine.NetWorthStore)
   end
   if ns.Inventory and ns.Inventory.RegisterSyndicatorCallbacks then
     ns.Inventory:RegisterSyndicatorCallbacks()
@@ -299,9 +297,11 @@ function ns:PLAYER_LOGIN()
   if Cogworks and Cogworks.RegisterCallback and Cogworks.Events then
     Cogworks.RegisterCallback(addonName, Cogworks.Events.InventoryChanged, function()
       if ns.Research then ns.Research:Invalidate() end
-      -- History:MaybeSnapshot is gated on min-interval (default 6h), so
-      -- this is cheap unless a snapshot is genuinely due.
-      if ns.History then ns.History:MaybeSnapshot() end
+      -- TLY-81: refresh today's net-worth snapshot. MaybeSnapshot is
+      -- debounced (min-interval), so this is cheap unless one is due.
+      if ns.Spine and ns.Spine.NetWorthStore then
+        ns.Spine.NetWorthStore:MaybeSnapshot()
+      end
       -- Refresh open UI so live values stay current.
       if ns.UI and ns.UI.MainFrame and ns.UI.MainFrame:IsShown() then
         ns.UI.MainFrame:RefreshActivePage()

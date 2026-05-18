@@ -42,6 +42,7 @@ Spine/Overrides.lua
 Spine/Dedup.lua
 Spine/ParseCache.lua
 Spine/UnifiedLedger.lua
+Spine/NetWorthStore.lua
 Research/Lifecycle.lua
 Research/Aggregator.lua
 UI/Chart.lua
