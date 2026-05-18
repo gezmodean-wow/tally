@@ -27,17 +27,26 @@ The architecture was planned first (Plan agent), then built as **additive** modu
 
 **Data flow now in place:** `ParseCache → Dedup → Overrides → realm dimension → UnifiedLedger:Query`. Verify in-game with `/tally spine parse`, or enable the Spine tab in Settings.
 
-## Next work — persistence, then teardown
+## Done this session — net-worth snapshot store (#81, complete)
 
-The spine build-out is complete. Per the #77 order: **#81/#82 (persistence — net-worth snapshot store + aggregates store)** → **#78 (retire the alpha18/19 store)** → **#83/#84 (Live/Historical nav)** → **#85/#86/#87 views, #88 minimap, #89 tools**. #78 must come AFTER persistence — retiring the store first leaves Tally with no ledger data. #90 (multi-realm) is partly delivered (the `realm` dimension on every unified record); the remaining #90 work — per-source realm accuracy (FlipQueue `targetRealm`), connected-realm `group` rollup — is a fast-follow threading through #82/#86.
+#81 was planned (Plan agent — full design in the session) and built in two commits:
 
-**Start #81/#82 with a Plan.** Both stores are "bounded by time/period, not row count" — the redesign's whole storage thesis — so their shapes must be designed deliberately. Net-worth snapshots already have a precedent in `History.lua`; aggregates are new.
+- **`f83531d` feat(TLY-81)** — `Spine/NetWorthStore.lua` (`ns.Spine.NetWorthStore`): net-worth time series in `TallyDB.networth_snapshots`, one bounded row per calendar day (180-day retention), `capture()` runs net + owned valuations, `byRealm` fold. Cadence wired into `InventoryChanged`; `GetSeries` repointed the net-worth chart. `History.lua` still loaded.
+- **`64c5094` refactor(TLY-81)** — `History.lua` deleted. Orphaned `TallyDB.history`/`pricingHistory` dropped via a targeted nil (not a schema bump — that would re-wipe the live ledger, #78's job). `Core.lua` `GetNetWorthAt` consumers repointed to `NetWorthStore:GetAt`; `/tally history` reworked; `SettingsPage` "History cadence" → retention-only; `SetupWizard` history step removed. `Research/Aggregator`'s per-item price/inventory-history calls are `ns.History`-guarded — they no-op cleanly; Research's value-over-time returns with **[#91](https://github.com/gezmodean-wow/tally/issues/91)** (filed this session — bounded `Spine/PriceHistory.lua`).
+
+## Next work — #82 aggregates, then teardown
+
+Per the #77 order: **#82 (aggregates / summaries store)** → **#78 (retire the alpha18/19 store)** → **#83/#84 (Live/Historical nav)** → **#85/#86/#87 views, #88 minimap, #89 tools**. #78 must come AFTER persistence.
+
+**#82 is planned already** (the persistence Plan from this session covers both #81 and #82). `Spine/Aggregates.lua` (`ns.Spine.Aggregates`) → `TallyDB.aggregates`: per-item P&L / per-realm rollups / operating-cost buckets keyed by `YYYY-MM` period, recomputed wholesale from `UnifiedLedger:Query({})` via a one-line hook in `ParseCache.finish()` (at most once per session). Current month persisted but flagged `partial`. Bound: periods × items-traded-that-month × realms — never row count. Then diag + Summary-view consumers, then retention polish.
+
+#90 (multi-realm) is partly delivered (the `realm` dimension on every unified record); the remainder — per-source realm accuracy (FlipQueue `targetRealm`), connected-realm `group` rollup — is a fast-follow threading through #82/#86.
 
 ## Loose ends
 
 - **Check `- [x] #72` on the #77 umbrella checklist** — still unchecked (needs a `gh` remote write; approval).
 - **#72 not smoke-tested in-game** — renders on the fallback path on stale v0.14.1; re-fetch the `.pkgmeta` external at v0.14.2 to exercise the real `CreateAppearanceTab`.
-- **Spine not smoke-tested in-game** — all five commits are syntax-checked only. First in-game check: enable the Spine tab in Settings (or `/tally spine parse`) — expect the loading bar and a non-zero unified-record count.
+- **Spine + #81 not smoke-tested in-game** — all commits are syntax-checked only. First in-game checks: enable the Spine tab in Settings (or `/tally spine parse`) for the loading bar + non-zero record count; `/tally history snapshot` then `/tally history status` for the net-worth store; the net-worth chart still draws.
 
 ## Tester feedback (#76)
 
