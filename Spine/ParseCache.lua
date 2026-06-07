@@ -140,6 +140,11 @@ local function finish(phase)
   if ns.Spine.UnifiedLedger and ns.Spine.UnifiedLedger.Invalidate then
     pcall(ns.Spine.UnifiedLedger.Invalidate, ns.Spine.UnifiedLedger)
   end
+  -- Recompute the period aggregates from the freshly-parsed ledger
+  -- (TLY-82). Runs after the memo invalidation so it queries fresh data.
+  if ns.Spine.Aggregates and ns.Spine.Aggregates.Recompute then
+    pcall(ns.Spine.Aggregates.Recompute, ns.Spine.Aggregates)
+  end
 end
 
 local function step(gen)

@@ -1478,6 +1478,14 @@ local function spineFormatReport()
       emit(string.format("  %s flagged for review", fmt(stats.review)))
     end
   end
+  if ns.Spine.Aggregates then
+    local ok, asum = pcall(ns.Spine.Aggregates.Summary, ns.Spine.Aggregates)
+    if ok and asum then
+      emit(string.format("Aggregates: %d periods, %s records folded%s",
+        asum.periods, fmt(asum.records),
+        asum.stale and " (stale — re-parse)" or ""))
+    end
+  end
   if ns.Spine.Overrides then
     emit(string.format("Manual overrides stored: %d", ns.Spine.Overrides:Count()))
   end
