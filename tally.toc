@@ -3,7 +3,7 @@
 ## Notes: Personal Capital for WoW — ledger, net-worth, and per-item research across all your characters and accounts.
 ## Author: Gezmodean
 ## Version: @project-version@
-## SavedVariables: TallyDB, TallyActive, CogworksSharedDB, TallyA001, TallyA002, TallyA003, TallyA004, TallyA005, TallyA006, TallyA007, TallyA008, TallyA009, TallyA010, TallyA011, TallyA012, TallyA013, TallyA014, TallyA015, TallyA016, TallyA017, TallyA018, TallyA019, TallyA020, TallyA021, TallyA022, TallyA023, TallyA024, TallyA025, TallyA026, TallyA027, TallyA028, TallyA029, TallyA030, TallyA031, TallyA032, TallyA033, TallyA034, TallyA035, TallyA036, TallyA037, TallyA038, TallyA039, TallyA040, TallyA041, TallyA042, TallyA043, TallyA044, TallyA045, TallyA046, TallyA047, TallyA048, TallyA049, TallyA050, TallyA051, TallyA052, TallyA053, TallyA054, TallyA055, TallyA056, TallyA057, TallyA058, TallyA059, TallyA060
+## SavedVariables: TallyDB, CogworksSharedDB
 ## SavedVariablesPerCharacter: TallyCharDB
 ## Dependencies: Syndicator
 ## X-Category: Miscellaneous
@@ -21,19 +21,11 @@ Libs/Cogworks-1.0/Cogworks-1.0.xml
 
 Util/Items.lua
 Util/Output.lua
-Util/Import.lua
 Util/Synthesis.lua
 Pricing/Sources.lua
 Inventory/Ownership.lua
 NetWorth/Calculator.lua
-Archive.lua
 Ledger.lua
-Sources/Native.lua
-Sources/Native/AHInvoice.lua
-Sources/Native/AHPosting.lua
-Sources/Native/Vendor.lua
-Sources/Native/Repair.lua
-Sources/Native/Mail.lua
 Sources/FlipQueue.lua
 Sources/TSM.lua
 Sources/Journalator.lua
@@ -49,15 +41,8 @@ UI/Chart.lua
 UI/ProgressBar.lua
 UI/ParseProgress.lua
 UI/MultiProgressBar.lua
-UI/ImportControl.lua
-UI/SynthButton.lua
 UI/MainFrame.lua
-UI/NetWorthPage.lua
 UI/InventoryPage.lua
-UI/ResearchPage.lua
-UI/LifecyclePage.lua
-UI/LedgerPage.lua
-UI/CompareLedgersPage.lua
 UI/SpinePage.lua
 UI/SettingsPage.lua
 UI/AppearancePage.lua

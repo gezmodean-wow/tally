@@ -55,29 +55,30 @@ TallyDB.netWorth = TallyDB.netWorth or { strategy = "DBRegionMarketAvg" }
 TallyDB.minimap = TallyDB.minimap or { hide = false }
 
 -- ============================================================================
--- alpha18 schema gate — one-shot wipe + structural reshape
+-- Schema gate — one-shot clean-break wipe (TLY-78)
 -- ============================================================================
 --
--- alpha18 splits the active blob into its own SV (TallyActive) so
--- TallyDB no longer holds anything that grows with row count — the
--- structural fix for the alpha13/alpha16 constant-pool overflow that
--- broke big-tester accounts.
+-- The projection-layer redesign (TLY-77/-78) retired the alpha18/19 store:
+-- the TallyActive active blob, the TallyA001..A060 archive slots, and the
+-- import/synthesis write paths are all gone. Tally now persists only what
+-- is bounded by something other than trade volume (net-worth snapshots,
+-- period aggregates, sparse overrides) and recomputes the ledger on parse.
+--
+-- This gate fires once per account to drop every retired structure so the
+-- first projection-layer login lands clean. Tester data is expendable in
+-- alpha (no migration). Settings, net-worth snapshots, strategy, minimap,
+-- and theme are preserved.
 --
 -- Two gates, deliberately separate:
 --   1. Account-wide gate (TallyDB.tally_schema_version): fires exactly
---      once per account. Wipes ledger substrate + per-account setup
---      flags + slot globals so the first alpha18 login lands in a clean
---      state. Account-wide so Char2's first alpha18 login doesn't
---      clobber rows Char1 captured between its wipe and Char2's first
---      session.
---   2. Per-character gate (TallyCharDB.tally_schema_version): fires
---      once per character. Clears TallyCharDB.tallyAcknowledged so
---      each character sees the alpha18 welcome wizard once if account-
---      wide setup hasn't been completed yet.
---
--- Tester data is expendable in alpha (no migration). Settings, history
--- snapshots, net-worth strategy, minimap, and theme are preserved.
-local TALLY_SCHEMA_VERSION = 18
+--      once per account. Wipes the retired ledger substrate + slot globals
+--      + per-account setup flags so Char2's first login doesn't reintroduce
+--      old shapes Char1 already cleared.
+--   2. Per-character gate (TallyCharDB.tally_schema_version): fires once
+--      per character. Clears TallyCharDB.tallyAcknowledged so each
+--      character sees the welcome wizard once if account-wide setup hasn't
+--      been completed yet.
+local TALLY_SCHEMA_VERSION = 19
 
 if (TallyDB.tally_schema_version or 0) < TALLY_SCHEMA_VERSION then
   TallyDB.ledger = nil  -- drops active, archives, archiveSlots, archiveIndex,
@@ -86,6 +87,7 @@ if (TallyDB.tally_schema_version or 0) < TALLY_SCHEMA_VERSION then
     _G[string.format("TallyA%03d", i)] = nil
   end
   _G.TallyActive = nil
+  TallyDB.import = nil          -- retired import-controller pending state
   TallyDB.setup = nil          -- welcome wizard re-fires so user opts in
   TallyDB.disabledSources = nil -- clean source-enable state
   TallyDB.tally_schema_version = TALLY_SCHEMA_VERSION
@@ -121,14 +123,11 @@ frame:SetScript("OnEvent", function(_, event, ...)
   if handler then handler(ns, ...) end
 end)
 
--- PLAYER_LOGOUT is the canonical "save the working memory back to disk"
--- point. WoW writes SavedVariables after every addon's PLAYER_LOGOUT
--- handler returns, so this is our chance to serialise the active set
--- before WoW persists the SV chunk.
+-- PLAYER_LOGOUT. The projection layer keeps no in-memory ledger to flush —
+-- everything persisted (net-worth snapshots, aggregates, overrides) is
+-- written eagerly when it changes — so there is nothing to do here. The
+-- handler is retained as a hook point for future logout-time work.
 function ns:PLAYER_LOGOUT()
-  if ns.Ledger and ns.Ledger.SaveToDisk then
-    pcall(ns.Ledger.SaveToDisk, ns.Ledger)
-  end
 end
 
 -- TLY-68: refresh this character's captured gold whenever the running
@@ -169,38 +168,15 @@ function ns:PLAYER_LOGIN()
   if ns.Inventory and ns.Inventory.CaptureCurrentCharGold then
     pcall(ns.Inventory.CaptureCurrentCharGold, ns.Inventory)
   end
-  -- TLY-45: open a session-window log entry. Pairs with the periodic
-  -- heartbeat ticker further down so DivergenceReport can categorize
-  -- ledger gaps as real (Tally was running, should have captured) vs
-  -- expected (Tally wasn't running, sibling backfill is the truth).
-  if ns.Ledger and ns.Ledger.StartSession then
-    local tocVer = (C_AddOns and C_AddOns.GetAddOnMetadata
-                    and C_AddOns.GetAddOnMetadata(addonName, "Version")) or "?"
-    pcall(ns.Ledger.StartSession, ns.Ledger, {
-      build   = (GetBuildInfo and select(4, GetBuildInfo())) or nil,
-      version = tostring(tocVer),
-      charKey = ns.Inventory and ns.Inventory.CurrentCharKey
-                and ns.Inventory:CurrentCharKey() or nil,
-    })
-  end
-  -- Register ledger source adapters. Each adapter registers itself with
-  -- ns.Ledger; we then run the available ones to backfill on login.
+  -- Register sibling source adapters. Each adapter registers its
+  -- getEntriesFn with ns.Ledger; the spine's ParseCache parses the
+  -- available ones lazily on first view open — no login-time parse, no
+  -- per-login work that scales with ledger size.
   if ns.Sources then
-    if ns.Sources.Native      then ns.Sources.Native:Register()      end
     if ns.Sources.FlipQueue   then ns.Sources.FlipQueue:Register()   end
     if ns.Sources.TSM         then ns.Sources.TSM:Register()         end
     if ns.Sources.Journalator then ns.Sources.Journalator:Register() end
   end
-  -- alpha18 active-only baseline: PLAYER_LOGIN registers Native event
-  -- capture (above) and that's it. No automatic sibling-source
-  -- import, no session-row dirty, no per-login work that scales with
-  -- total ledger size. The flipper loop's 60× login tax was the
-  -- driving objective for the rewrite — anything that grew with row
-  -- count had to leave PLAYER_LOGIN.
-  --
-  -- Sibling import returns in alpha19+ as a user-initiated, pausable,
-  -- resumable wizard flow with a per-cycle row budget — never as
-  -- silent login work.
 
   -- TLY-40 migration: pre-fix rollups (warband.items without bankItems /
   -- spillsByChar) may carry inflated counts from the old duplication bug.
@@ -225,31 +201,17 @@ function ns:PLAYER_LOGIN()
   -- Register UI pages with the main frame. Page bodies are lazy-created on
   -- first ShowPage so login cost is zero for users who never open the UI.
   if ns.UI and ns.UI.MainFrame then
-    if ns.UI.CreateNetWorthPage then
-      ns.UI.MainFrame:RegisterPage("Net Worth", ns.UI.CreateNetWorthPage)
-    end
     if ns.UI.CreateInventoryPage then
       ns.UI.MainFrame:RegisterPage("Inventory", ns.UI.CreateInventoryPage)
     end
-    if ns.UI.CreateResearchPage then
-      ns.UI.MainFrame:RegisterPage("Research", ns.UI.CreateResearchPage)
-    end
-    if ns.UI.CreateLifecyclePage then
-      ns.UI.MainFrame:RegisterPage("Lifecycle", ns.UI.CreateLifecyclePage)
-    end
-    if ns.UI.CreateLedgerPage then
-      ns.UI.MainFrame:RegisterPage("Ledger", ns.UI.CreateLedgerPage)
-    end
-    -- Compare tab is gated by a Settings toggle; default off so non-debug
-    -- users don't see it. Read TallyDB directly to avoid an order
-    -- dependency between this block and the Settings panel.
+    -- TLY-78: the alpha18/19 view pages (Net Worth, Research, Lifecycle,
+    -- Ledger, Compare) were removed in the projection-layer teardown. The
+    -- new Live/Historical navigation + Summary/Ledger/Research views land
+    -- in TLY-83..-87. Until then the data-spine verification tab is the
+    -- ledger surface; Inventory + Settings + Appearance remain.
     TallyDB.ui = TallyDB.ui or {}
-    if TallyDB.ui.showCompareTab and ns.UI.CreateCompareLedgersPage then
-      ns.UI.MainFrame:RegisterPage("Compare", ns.UI.CreateCompareLedgersPage)
-    end
-    -- TLY-77: data-spine verification tab — gated like Compare, default
-    -- off. Debug surface for diffing the spine's unified ledger against
-    -- the live LedgerPage during the projection-layer transition.
+    -- TLY-77: data-spine verification tab — gated, default off. Debug
+    -- surface for inspecting the spine's unified ledger.
     if TallyDB.ui.showSpineTab and ns.UI.CreateSpinePage then
       ns.UI.MainFrame:RegisterPage("Spine", ns.UI.CreateSpinePage)
     end
@@ -272,29 +234,6 @@ function ns:PLAYER_LOGIN()
     end)
   end
 
-  -- TLY-71: restore a paused/cancelled backfill from the previous session.
-  -- Always wakes in "paused" — testers Resume from the control widget (or
-  -- /tally import resume) when they want to spend frames on it again. A
-  -- toast nudges them so the pending state isn't invisible.
-  if C_Timer and C_Timer.After and ns.Import and ns.Import.HasPending then
-    C_Timer.After(7, function()
-      if ns.Import:HasPending() then
-        ns.Import:RestorePending()
-        if ns.Output then
-          local p = ns.Import:GetPending() or {}
-          local sourceList = (p.config and p.config.sources) or {}
-          ns.Output:Info(string.format(
-            "Backfill paused from previous session — %d source%s queued. Resume from the import widget or /tally import resume.",
-            #sourceList, #sourceList == 1 and "" or "s"))
-        end
-        -- Surface the control widget in its persisted mode (expanded or
-        -- minimised badge). Player Resume button + Cancel live there.
-        if ns.UI and ns.UI.ImportControl then
-          ns.UI.ImportControl:Show()
-        end
-      end
-    end)
-  end
   -- Invalidate research cache on inventory updates so consumers always see
   -- fresh ownership/valuation. Cogworks event bus is the broadcast channel.
   --
@@ -320,45 +259,6 @@ function ns:PLAYER_LOGIN()
     end)
   end
 
-  -- TLY-31 Phase B / TLY-45: the 5-minute periodic auto-import is gone.
-  -- Sibling adapters are now strictly backfill-only — the one-shot at
-  -- PLAYER_LOGIN above (line ~112) handles the catch-up; nothing reruns
-  -- on a ticker. Per the alpha10 strategy discussion, we replace the
-  -- auto-import cycle with two diagnostics:
-  --
-  --   1. Heartbeat ticker (60s) — extends the current session's
-  --      lastSeenAt so DivergenceReport can tell which ledger gaps
-  --      occurred while Tally was running (real-gap candidates) vs
-  --      while it wasn't (expected gap, what backfill is for).
-  --   2. One-shot divergence check (~60s after login) — runs
-  --      Ledger:DivergenceReport, logs a one-line summary to chat
-  --      ("Tally: divergence check — N real gaps. /tally diag
-  --      divergence to inspect."). Auto-fire is silent if zero real
-  --      gaps so it stays out of the way; full detail lives behind
-  --      the slash command.
-  --
-  -- Manual "Import from <source>" buttons in Settings keep working —
-  -- they're now framed as backfill, not periodic refresh, in the UI.
-  if ns.Ledger and ns.Ledger.HeartbeatSession and C_Timer and C_Timer.NewTicker then
-    C_Timer.NewTicker(60, function()
-      pcall(ns.Ledger.HeartbeatSession, ns.Ledger)
-    end)
-  end
-
-  if ns.Ledger and ns.Ledger.DivergenceReport and C_Timer and C_Timer.After then
-    C_Timer.After(60, function()
-      if not ns.Ledger:IsSetupComplete() then return end
-      local ok, report = pcall(ns.Ledger.DivergenceReport, ns.Ledger)
-      if not ok or not report then return end
-      local n = report.summary.realGapCount
-      if n and n > 0 and ns.Output then
-        ns.Output:Warn(
-          string.format("Divergence check found %d real gap%s — click to inspect.",
-                        n, n == 1 and "" or "s"),
-          { onClick = function() divergenceCopyDialog() end, duration = 8 })
-      end
-    end)
-  end
 end
 
 -- ============================================================================
@@ -387,7 +287,6 @@ _G.TallyAPI = {
     LedgerStats = function(filter) return ns.Ledger:Stats(filter) end,
     -- v1.5 (TLY-26 / TLY-27)
     GetItemLifecycle = function(itemID, opts) return ns.Lifecycle and ns.Lifecycle:GetRecord(itemID, opts) or nil end,
-    CompareLedgerSources = function(a, b, filter) return ns.Ledger:Compare(a, b, filter) end,
   },
 }
 
@@ -414,6 +313,8 @@ _G.TallyAPI = {
 local function resetData()
   if ns.Ledger and ns.Ledger.Clear then ns.Ledger:Clear() end
   if ns.Spine and ns.Spine.NetWorthStore then ns.Spine.NetWorthStore:Clear() end
+  TallyDB.aggregates = nil      -- recomputed from the spine on next parse
+  TallyDB.merge = nil           -- sparse manual dedup/merge overrides
   TallyDB.inventoryRollup = nil
   TallyDB.setup = nil          -- clear completed flag so wizard re-fires
   TallyDB.disabledSources = nil -- re-let the user pick sources in the wizard
@@ -427,8 +328,8 @@ local function resetData()
   end
 
   -- Hand off to the setup wizard. Defer slightly so the rebuild broadcast
-  -- + UI close races settle. The wizard's own onComplete drives the
-  -- chunked sibling-source backfill via Ledger:ImportFromAllSourcesChunked.
+  -- + UI close races settle. There is no longer any backfill to drive —
+  -- the spine recomputes from sibling sources on demand.
   if C_Timer and C_Timer.After then
     C_Timer.After(0.5, function()
       -- Close the main frame if it's open (likely is — user clicked the
@@ -447,364 +348,16 @@ local function resetData()
       if ns.UI and ns.UI.ShowSetupWizard then
         ns.UI.ShowSetupWizard()
         if ns.Output then
-          ns.Output:Success("Setup wizard reopened — your data will be re-imported when you finish it.")
+          ns.Output:Success("Setup wizard reopened — Tally will recompute from your sources when you finish it.")
         end
-      else
-        -- Wizard unavailable (no Cogworks v0.11.0?). Fall back to the old
-        -- behaviour: synchronous slurp. Better than leaving the user with
-        -- an empty ledger.
-        if ns.Output then
-          ns.Output:Warn("Setup wizard unavailable; running synchronous backfill instead.")
-        end
-        if ns.Ledger and ns.Ledger.ImportFromAllSources then
-          local results = ns.Ledger:ImportFromAllSources()
-          local total = 0
-          for _, r in ipairs(results) do total = total + (r.inserted or 0) end
-          if ns.Output then
-            ns.Output:Success(string.format("Reset complete — %d ledger entries re-imported.", total))
-          end
-        end
+      elseif ns.Output then
+        ns.Output:Warn("Setup wizard unavailable — re-open Tally to recompute from your sources.")
       end
     end)
   end
 end
 
 ns.Reset = resetData
-
--- ============================================================================
--- /tally seed — synthetic ledger generator for TLY-51 stress testing
--- ============================================================================
---
--- Two modes, both used to exercise the alpha16 storage paths without
--- needing a real tester's 438k-row account:
---
---   /tally seed N
---     Generates N synthetic entries spread across the last 12 months
---     and chunked-inserts them via the live route — current-month
---     rows go to active, prior-month rows go to staging buckets, then
---     FlushStaging writes archives. Exercises the routed-import +
---     archive-creation paths.
---
---   /tally seed legacy N
---     Generates N entries, packs them as an alpha14/15 single-blob
---     directly into TallyDB.ledger.blob, and clears the new-shape
---     fields. Run /reload after — Tally's loadFromDisk treats it like
---     a real legacy upgrader and kicks off the migration pass.
---     Exercises the migration path.
---
---   /tally seed clear
---     Removes every entry whose source == "__seed" from active and
---     archives. Use to clean up after stress testing.
---
--- Distribution is intentionally uniform over time + crude on item /
--- char / kind variety — enough to make Reconcile's clustering
--- realistic but not trying to model real trader behaviour. The
--- pseudo-source name "__seed" keeps these rows quarantined from real
--- ledger views (filter by source = "__seed" to inspect them; ClearSource
--- "__seed" wipes them).
-
-local SEED_SOURCE = "__seed"
-
-local SEED_KINDS = {
-  "sale", "purchase", "ah-cancel", "ah-expire",
-  "vendor-sell", "vendor-buy", "ah-fee",
-}
-
-local SEED_CHARS = {
-  "Stress1-StressTest", "Stress2-StressTest", "Stress3-StressTest",
-  "Stress4-StressTest", "Stress5-StressTest",
-}
-
-local function buildSeedEntry(i, now, rangeSec)
-  local atTime = now - math.random(1, rangeSec)
-  local kind = SEED_KINDS[((i - 1) % #SEED_KINDS) + 1]
-  local copper
-  if kind == "ah-cancel" or kind == "ah-expire" then
-    copper = 0
-  elseif kind == "ah-fee" then
-    copper = math.random(100, 500000)
-  else
-    copper = math.random(1000, 100000000)
-  end
-  return {
-    id       = SEED_SOURCE .. ":" .. tostring(i),
-    atTime   = atTime,
-    kind     = kind,
-    itemID   = 100000 + ((i * 17) % 5000),
-    itemKey  = tostring(100000 + ((i * 17) % 5000)),
-    charKey  = SEED_CHARS[((i - 1) % #SEED_CHARS) + 1],
-    copper   = copper,
-    count    = math.random(1, 5),
-    source   = SEED_SOURCE,
-    sourceId = tostring(i),
-    meta     = { name = "Stress test item " .. tostring((i % 200) + 1) },
-  }
-end
-
--- Synchronous generator — fine for small N. Used by tests + as a
--- fallback when C_Timer is unavailable.
-local function generateSeedEntries(count, monthsBack)
-  count = count or 100000
-  monthsBack = monthsBack or 12
-  local now = time()
-  local rangeSec = monthsBack * 30 * 86400
-  local entries = {}
-  for i = 1, count do
-    entries[i] = buildSeedEntry(i, now, rangeSec)
-  end
-  return entries
-end
-
--- Chunked generator. Builds the entry list across C_Timer ticks so a
--- 200k-row seed doesn't freeze the input thread before routing even
--- begins. Calls onComplete(entries) when done.
---
--- Default chunkSize 1500 keeps each tick under ~15ms on slower CPUs
--- (each entry build is ~9μs — 1500 entries ≈ 13ms = under one frame
--- at 60fps; 5000 entries was hitting ~45ms = ~23fps in tester reports).
-local function generateSeedEntriesChunked(count, monthsBack, opts)
-  count = count or 100000
-  monthsBack = monthsBack or 12
-  opts = opts or {}
-  local chunkSize = opts.chunkSize or 1500
-  local delaySec  = opts.delaySec or 0.005
-  local now = time()
-  local rangeSec = monthsBack * 30 * 86400
-
-  if not (C_Timer and C_Timer.After) then
-    if opts.onComplete then pcall(opts.onComplete, generateSeedEntries(count, monthsBack)) end
-    return
-  end
-
-  local entries = {}
-  local idx = 0
-
-  local function step()
-    local stop = math.min(idx + chunkSize, count)
-    while idx < stop do
-      idx = idx + 1
-      entries[idx] = buildSeedEntry(idx, now, rangeSec)
-    end
-    if opts.onProgress then pcall(opts.onProgress, idx, count) end
-    if idx < count then
-      C_Timer.After(delaySec, step)
-    else
-      if opts.onComplete then pcall(opts.onComplete, entries) end
-    end
-  end
-
-  step()
-end
-
-local function handleSeed(rest)
-  rest = rest or ""
-  local sub, arg = rest:match("^(%S*)%s*(.-)$")
-  sub = sub or ""
-
-  -- /tally seed clear
-  if sub == "clear" then
-    if not (ns.Ledger and ns.Ledger.ClearSourceAsync) then
-      if ns.Output then ns.Output:Error("Ledger unavailable.") end
-      return
-    end
-    if ns.Output then ns.Output:Info("Clearing seeded entries (chunked across archives)…") end
-    ns.Ledger:ClearSourceAsync(SEED_SOURCE, {
-      onProgress = function(idx, total, key, removedSoFar)
-        if ns.Output then
-          ns.Output:Debug(string.format("seed clear scanned %s (%d / %d), %d removed so far",
-            key or "?", idx, total, removedSoFar or 0))
-        end
-      end,
-      onComplete = function(totalRemoved)
-        if ns.Output then
-          ns.Output:Success(string.format("Cleared %d seeded entries from active + archives.",
-            totalRemoved or 0))
-        end
-        if ns.UI and ns.UI.MainFrame then
-          if ns.UI.MainFrame.UpdateHeaderNudge then
-            pcall(ns.UI.MainFrame.UpdateHeaderNudge, ns.UI.MainFrame)
-          end
-          if ns.UI.MainFrame.RefreshActivePage then
-            pcall(ns.UI.MainFrame.RefreshActivePage, ns.UI.MainFrame)
-          end
-        end
-      end,
-    })
-    return
-  end
-
-  -- /tally seed legacy N
-  if sub == "legacy" then
-    local n = tonumber(arg) or 100000
-    local LibSerialize = LibStub and LibStub("LibSerialize", true)
-    local LibDeflate   = LibStub and LibStub("LibDeflate", true)
-    if not (LibSerialize and LibDeflate) then
-      if ns.Output then ns.Output:Error("LibSerialize / LibDeflate unavailable.") end
-      return
-    end
-
-    if ns.Output then
-      ns.Output:Info(string.format("Generating %d synthetic entries (chunked)…", n))
-    end
-    generateSeedEntriesChunked(n, 12, {
-      onProgress = function(idx, total)
-        if ns.Output then
-          ns.Output:Debug(string.format("seed legacy generated %d / %d", idx, total))
-        end
-      end,
-      onComplete = function(entries)
-        local byId = {}
-        for _, e in ipairs(entries) do byId[e.id] = true end
-
-        -- Serialise async — synchronous serialise of 100k+ rows busts WoW's
-        -- ~10s script execution timer (LibSerialize is pure-Lua and walks
-        -- every entry in one pass). The async handler yields every 4096
-        -- items so the work spreads across ticks. After completion, run
-        -- the (smaller, faster) compress synchronously.
-        if ns.Output then
-          ns.Output:Info("Serialising async (yields every 4096 items)…")
-        end
-        local handler = LibSerialize:SerializeAsync({ entries = entries, byId = byId })
-        local function step()
-          local ok, completed, serialised = pcall(handler)
-          if not ok then
-            if ns.Output then
-              ns.Output:Error("Serialise failed: " .. tostring(completed))
-            end
-            return
-          end
-          if not completed then
-            if C_Timer and C_Timer.After then
-              C_Timer.After(0.005, step)
-            else
-              step()
-            end
-            return
-          end
-
-          if ns.Output then
-            ns.Output:Info(string.format("Serialise complete (%d bytes); compressing…", #serialised))
-          end
-          local compressed = LibDeflate:CompressDeflate(serialised, { level = 1 })
-
-          TallyDB = TallyDB or {}
-          -- Wipe slot-resident archives + archiveSlots + archiveIndex
-          -- so loadFromDisk routes cleanly through the legacy path
-          -- on /reload. Walk the slot table before nuking it so each
-          -- slot global is cleared and its SV file becomes empty.
-          if ns.Archive then
-            for _, k in ipairs(ns.Archive:List()) do ns.Archive:Delete(k) end
-            ns.Archive:UnloadAll()
-          end
-          TallyDB.ledger = TallyDB.ledger or {}
-          TallyDB.ledger.blob = compressed
-          TallyDB.ledger.blobMeta = {
-            count   = n,
-            savedAt = time(),
-            bytes   = #compressed,
-          }
-          -- Clear all new-shape fields so loadFromDisk routes through
-          -- the legacy alpha14/15 single-blob path.
-          TallyDB.ledger.active        = nil
-          TallyDB.ledger.activeMeta    = nil
-          TallyDB.ledger.archives      = nil
-          TallyDB.ledger.archiveIndex  = nil
-          TallyDB.ledger.archiveSlots  = nil
-          TallyDB.ledger.nextSlot      = nil
-
-          -- IMPORTANT: also wipe in-memory ledger state. Without this,
-          -- the in-memory active set persists; PLAYER_LOGOUT's
-          -- SaveToDisk would re-serialise it back to
-          -- TallyDB.ledger.active AND clear the legacy blob we just
-          -- wrote (the migration-completion clear in SaveToDisk).
-          -- Result on next /reload: legacy blob gone, no migration
-          -- exercised.
-          --
-          -- This is destructive — the caller's real ledger goes away.
-          -- Acceptable for stress-testing; document in the slash help.
-          if ns.Ledger and ns.Ledger.WipeForLegacySeed then
-            ns.Ledger:WipeForLegacySeed()
-          end
-
-          if ns.Output then
-            ns.Output:Success(string.format(
-              "Wrote %d entries to legacy blob (%d bytes compressed, %d serialised). In-memory active wiped — legacy blob is the only ledger now. Run /reload to detect the legacy blob and start migration.",
-              n, #compressed, #serialised))
-          end
-        end
-        step()
-      end,
-    })
-    return
-  end
-
-  -- /tally seed N (default)
-  local n = tonumber(sub) or tonumber(rest) or 100000
-  if n < 1 then n = 100000 end
-
-  if not (ns.Ledger and ns.Ledger.InsertManyChunkedRouted) then
-    if ns.Output then
-      ns.Output:Error("Tiered storage unavailable — InsertManyChunkedRouted missing.")
-    end
-    return
-  end
-
-  if ns.Output then
-    ns.Output:Info(string.format("Generating %d synthetic entries (chunked)…", n))
-  end
-  generateSeedEntriesChunked(n, 12, {
-    onProgress = function(idx, total)
-      if ns.Output then
-        ns.Output:Debug(string.format("seed generated %d / %d", idx, total))
-      end
-    end,
-    onComplete = function(entries)
-      if ns.Output then ns.Output:Info("Routing into active + staging…") end
-      ns.Ledger:InsertManyChunkedRouted(entries, {
-        chunkSize = 500,
-        delaySec  = 0.005,
-        onProgress = function(inserted, total)
-          if ns.Output then
-            ns.Output:Debug(string.format("seed routed %d / %d (%d%%)",
-              inserted, total, math.floor(100 * inserted / total)))
-          end
-        end,
-        onDone = function(inserted, skipped, insertedActive, insertedStaging)
-          if ns.Output then
-            ns.Output:Success(string.format(
-              "Seeded %d entries — %d to active, %d to staging buckets (%d skipped).",
-              inserted, insertedActive or 0, insertedStaging or 0, skipped or 0))
-          end
-          if ns.Ledger.GetStagingRowCount and ns.Ledger:GetStagingRowCount() > 0 then
-            if ns.Output then ns.Output:Info("Flushing staging buckets to archives…") end
-            ns.Ledger:FlushStaging({
-              delaySec = 0.005,
-              onProgress = function(idx, total, key)
-                if ns.Output then
-                  ns.Output:Debug(string.format("seed flush %s (%d / %d)", key or "?", idx, total))
-                end
-              end,
-              onComplete = function(archivesWritten, rowsArchived)
-                if ns.Output then
-                  ns.Output:Success(string.format(
-                    "Flush complete — %d archives, %d archived rows.",
-                    archivesWritten, rowsArchived))
-                end
-                if ns.UI and ns.UI.MainFrame and ns.UI.MainFrame.UpdateHeaderNudge then
-                  pcall(ns.UI.MainFrame.UpdateHeaderNudge, ns.UI.MainFrame)
-                end
-              end,
-            })
-          else
-            if ns.UI and ns.UI.MainFrame and ns.UI.MainFrame.UpdateHeaderNudge then
-              pcall(ns.UI.MainFrame.UpdateHeaderNudge, ns.UI.MainFrame)
-            end
-          end
-        end,
-      })
-    end,
-  })
-end
 
 -- ============================================================================
 -- /tally diag — one-shot diagnostic dump
@@ -1099,16 +652,7 @@ end
 local function inspectLedger()
   if not (ns.Ledger and ns.Ledger.Stats) then return nil end
   local stats = ns.Ledger:Stats({})
-  return { rowCount = stats.count, bySource = stats.bySource }
-end
-
--- Storage inspector. Surfaces the tiered active set + archive cohort:
--- LibSerialize + LibDeflate availability, lazy-load + dirty state,
--- active row count + on-disk active blob size, archive count + total
--- archive bytes, and the LRU cache state.
-local function inspectStorage()
-  if not (ns.Ledger and ns.Ledger.StorageInfo) then return nil end
-  return ns.Ledger:StorageInfo()
+  return { rowCount = stats.count, bySource = stats.sources }
 end
 
 -- Per-source skip counters (TLY-29 capture-layer rigor). Each adapter
@@ -1132,7 +676,6 @@ local function inspectSkipCounters()
     dump("TSM",         ns.Sources.TSM)
     dump("FlipQueue",   ns.Sources.FlipQueue)
     dump("Journalator", ns.Sources.Journalator)
-    dump("Native",      ns.Sources.Native)
   end
   return out
 end
@@ -1179,7 +722,6 @@ local DIAG_INSPECTORS = {
   { name = "WarbandProbe",    fn = inspectWarbandProbe },
   { name = "Gold",            fn = inspectGold },
   { name = "Ledger",          fn = inspectLedger },
-  { name = "Storage",         fn = inspectStorage },
   { name = "SkipCounters",    fn = inspectSkipCounters },
   { name = "NetWorthSnapshots", fn = inspectNetWorthSnapshots },
   { name = "DisabledSources", fn = inspectDisabledSources },
@@ -1285,58 +827,6 @@ local function diagFormatPretty()
         emit(string.format("  %s: %d", src, n))
       end
     end
-  end
-
-  local st = inspectStorage()
-  if st then
-    emit(string.format("Storage: libs=%s loaded=%s dirty=%s schema=v%d%s",
-      st.libsAvailable and "yes" or "NO",
-      st.loaded and "yes" or "no",
-      st.dirty and "yes" or "no",
-      st.schemaVer or 0,
-      st.legacyPresent and " [legacy blob still on disk]" or ""))
-    if st.pendingLegacyLoad then
-      emit(string.format("  Legacy load pending: %d rows in legacy blob (%d bytes compressed) — async deserialise in flight",
-        st.pendingLegacyRows or 0, st.pendingLegacyBytes or 0))
-    end
-    if st.pendingMigration then
-      emit(string.format("  Migration pending: %d rows in pendingMigration buffer", st.pendingRows or 0))
-    end
-    if st.stagingRows and st.stagingRows > 0 then
-      emit(string.format("  Staging: %d rows across %d buckets — flush on import completion",
-        st.stagingRows, st.stagingKeys and #st.stagingKeys or 0))
-    end
-    emit(string.format("  Active: %d rows, %d bytes", st.activeRows or 0, st.activeBytes or 0))
-    if st.activeSavedAt and st.activeSavedAt > 0 then
-      emit(string.format("    saved %s  (serialise %dms + compress %dms; serialised %d bytes)",
-        date("%Y-%m-%d %H:%M:%S", st.activeSavedAt),
-        st.serialiseMs or 0, st.compressMs or 0, st.serialisedBytes or 0))
-    end
-    if (st.archiveCount or 0) > 0 then
-      if (st.archiveBytes or 0) > 0 then
-        emit(string.format("  Archives: %d archives, %d rows, %d bytes",
-          st.archiveCount, st.archiveRows or 0, st.archiveBytes))
-      else
-        emit(string.format("  Archives: %d archives, %d rows (slot-resident, raw)",
-          st.archiveCount, st.archiveRows or 0))
-      end
-      local cached = st.cachedArchives or {}
-      if #cached > 0 then
-        emit(string.format("    Cache: %d/%d loaded — %s",
-          #cached, st.cacheCap or 3, table.concat(cached, ", ")))
-      end
-      if ns.Archive and ns.Archive.DiagInfo then
-        local info = ns.Archive:DiagInfo()
-        if info then
-          emit(string.format("    Slots: %d / %d allocated", info.nextSlot or 0, info.slotCount or 0))
-          if (info.legacyCount or 0) > 0 then
-            emit(string.format("    %d unmigrated legacy archive(s) — will migrate on next access",
-              info.legacyCount))
-          end
-        end
-      end
-    end
-    emit(string.format("  Total rows: %d (active + archives)", st.totalRows or st.activeRows or 0))
   end
 
   local sk = inspectSkipCounters()
@@ -1499,162 +989,6 @@ local function spineCopyDialog()
       "Tally data-spine status — paste into a GitHub issue.")
   end
 end
-
--- ============================================================================
--- /tally diag divergence — multi-source coverage analysis (TLY-45)
--- ============================================================================
---
--- Walks Ledger:DivergenceReport and renders it as a paste-friendly text
--- block: source counts, real gaps (Tally was running, sibling has the
--- event but Native doesn't), expected gaps (Tally wasn't running),
--- field disagreements (clusters where multiple sources captured the
--- event but disagree on copper / atTime / etc).
---
--- The check is the diagnostic complement of Reconcile: Reconcile picks
--- field values when sources agree on existence; this surfaces where
--- they disagree on existence so the user can act ("install Native /
--- check why TSM rows aren't getting paired" etc.).
---
--- Truncation: real gaps are listed in full (always actionable), but
--- expected gaps and field disagreements truncate to MAX_DETAIL each
--- so the dialog doesn't balloon to thousands of lines on a power user's
--- ledger. The summary header carries the full counts for context.
-
-local DIVERGENCE_MAX_DETAIL = 25
-
-local function formatDivergenceReport()
-  if not (ns.Ledger and ns.Ledger.DivergenceReport) then
-    return "Divergence report unavailable — Ledger:DivergenceReport missing."
-  end
-  local report = ns.Ledger:DivergenceReport()
-  local lines = {}
-  local function emit(s) lines[#lines + 1] = s end
-
-  emit("Tally divergence report — generated " .. date("%Y-%m-%d %H:%M"))
-  emit("")
-
-  -- Session coverage header. Pulls a 7-day window for a quick "how
-  -- much of last week was Tally observing" headline; the full session
-  -- list is in the regular /tally diag dump for power users.
-  if ns.Ledger.SessionCoverage then
-    local weekAgo = time() - 7 * 86400
-    local total, overlapping, coveredSec = ns.Ledger:SessionCoverage(weekAgo, time())
-    local hours = coveredSec / 3600
-    emit(string.format(
-      "Sessions logged: %d (last 7d: %d sessions, %.1fh of observation)",
-      total, overlapping, hours))
-  end
-  emit(string.format(
-    "Total clusters: %d  |  multi-source: %d  |  field-disagreement: %d  |  real-gap: %d  |  expected-gap: %d",
-    report.summary.clusters,
-    report.summary.multiSourceClusters,
-    report.summary.fieldDisagreementCount,
-    report.summary.realGapCount,
-    report.summary.expectedGapCount))
-  emit("")
-
-  -- Source contribution counts. Stable order so cross-tester diffs read
-  -- consistently — alphabetical by source name.
-  local sourceNames = {}
-  for k in pairs(report.summary.sourceCounts) do sourceNames[#sourceNames + 1] = k end
-  table.sort(sourceNames)
-  emit("SOURCE CONTRIBUTIONS (rows seen, before reconciliation)")
-  for _, name in ipairs(sourceNames) do
-    emit(string.format("  %-16s %d", name, report.summary.sourceCounts[name]))
-  end
-  emit("")
-
-  -- Real gaps — Tally was running, sibling has the event, Native didn't
-  -- capture. These are the bugs we care about.
-  emit("REAL GAPS — events sibling sources observed while Tally was running")
-  if #report.realGap == 0 then
-    emit("  (none — Native captured every event observed during a session)")
-  else
-    for _, item in ipairs(report.realGap) do
-      local c = item.cluster
-      local first = c[1]
-      local sources = {}
-      for _, e in ipairs(c) do sources[#sources + 1] = e.source or "?" end
-      table.sort(sources)
-      local itemDesc = (first.meta and first.meta.name)
-                    or (first.itemID and ("item:" .. first.itemID))
-                    or "(no item)"
-      emit(string.format("  %s | %s | %s | %s | sources=%s | session=%s",
-        date("%Y-%m-%d %H:%M:%S", first.atTime or 0),
-        first.kind or "?",
-        first.charKey or "?",
-        itemDesc,
-        table.concat(sources, "+"),
-        date("%Y-%m-%d %H:%M", item.sessionRef.startedAt or 0)))
-    end
-  end
-  emit("")
-
-  -- Expected gaps — Tally wasn't running. Truncated.
-  emit(string.format("EXPECTED GAPS — events while Tally wasn't running (showing first %d of %d)",
-    math.min(#report.expectedGap, DIVERGENCE_MAX_DETAIL), #report.expectedGap))
-  for i = 1, math.min(#report.expectedGap, DIVERGENCE_MAX_DETAIL) do
-    local c = report.expectedGap[i].cluster
-    local first = c[1]
-    local sources = {}
-    for _, e in ipairs(c) do sources[#sources + 1] = e.source or "?" end
-    table.sort(sources)
-    local itemDesc = (first.meta and first.meta.name)
-                  or (first.itemID and ("item:" .. first.itemID))
-                  or "(no item)"
-    emit(string.format("  %s | %s | %s | %s | sources=%s",
-      date("%Y-%m-%d %H:%M:%S", first.atTime or 0),
-      first.kind or "?",
-      first.charKey or "?",
-      itemDesc,
-      table.concat(sources, "+")))
-  end
-  emit("")
-
-  -- Field disagreements — same event captured by 2+ sources but they
-  -- disagree on values. Reconcile picks the priority winner; this
-  -- shows where the picks happen.
-  emit(string.format("FIELD DISAGREEMENTS — multi-source clusters with conflicting values (showing first %d of %d)",
-    math.min(#report.fieldDisagreement, DIVERGENCE_MAX_DETAIL),
-    #report.fieldDisagreement))
-  for i = 1, math.min(#report.fieldDisagreement, DIVERGENCE_MAX_DETAIL) do
-    local entry = report.fieldDisagreement[i]
-    local c = entry.cluster
-    local first = c[1]
-    local itemDesc = (first.meta and first.meta.name)
-                  or (first.itemID and ("item:" .. first.itemID))
-                  or "(no item)"
-    local fieldDetails = {}
-    for _, field in ipairs(entry.fields) do
-      local pieces = {}
-      for _, e in ipairs(c) do
-        if e[field] ~= nil then
-          pieces[#pieces + 1] = string.format("%s=%s",
-            e.source or "?", tostring(e[field]))
-        end
-      end
-      fieldDetails[#fieldDetails + 1] = field .. "[" .. table.concat(pieces, ", ") .. "]"
-    end
-    emit(string.format("  %s | %s | %s | %s | %s",
-      date("%Y-%m-%d %H:%M:%S", first.atTime or 0),
-      first.kind or "?",
-      first.charKey or "?",
-      itemDesc,
-      table.concat(fieldDetails, "; ")))
-  end
-
-  return table.concat(lines, "\n")
-end
-
-local function divergenceCopyDialog()
-  local text = formatDivergenceReport()
-  if ns.Output then
-    ns.Output:Inspect(text, "Tally divergence report — paste into a GitHub issue or external tool.")
-  end
-end
-
-ns.DivergenceReportText = formatDivergenceReport
-ns.DivergenceCopyDialog = divergenceCopyDialog
 
 -- Focused gold-accounting report. Columnar per-character listing of
 -- Syndicator-reported money vs Tally rollup gold, with summary totals
@@ -2104,316 +1438,6 @@ local function handleHistory(args)
   end
 end
 
--- ============================================================================
--- /tally import — manage the chunked backfill controller (TLY-71)
--- ============================================================================
---
--- The control widget (UI/ImportControl.lua) is the primary surface — bare
--- `/tally import` opens it. Subcommands keep working as a keyboard-only path:
--- `status` renders the paste-ready copy-dialog (paste into issue reports);
--- pause/resume/cancel/budget/delay flip state and emit a brief toast so the
--- player knows the action took.
-
-local function formatImportStatus()
-  if not (ns.Import and ns.Import.GetState) then
-    return "Import controller unavailable."
-  end
-  local state = ns.Import:GetState()
-  local lines = {}
-  local push = function(s) lines[#lines + 1] = s end
-  local fmt  = function(n) return BreakUpLargeNumbers and BreakUpLargeNumbers(n or 0) or tostring(n or 0) end
-
-  push("=== Tally — backfill status ===")
-  push("Phase: " .. (state.phase or "idle"))
-
-  if state.phase == "idle" then
-    push("")
-    push("No backfill in progress. Run /tally setup to configure one.")
-    return table.concat(lines, "\n")
-  end
-
-  if state.startedAt then
-    push("Started: " .. date("%Y-%m-%d %H:%M:%S", state.startedAt))
-  end
-  if state.pausedAt then
-    push("Paused:  " .. date("%Y-%m-%d %H:%M:%S", state.pausedAt))
-  end
-  if state.config then
-    local windowText = "all history"
-    if (state.config.windowMonths or 0) > 0 then
-      windowText = string.format("last %d month%s",
-        state.config.windowMonths, state.config.windowMonths == 1 and "" or "s")
-    end
-    push(string.format("Window: %s", windowText))
-    push(string.format("Budget: %s rows / cycle, %.1fs delay",
-      fmt(state.config.budgetRows or 0), state.config.delaySec or 0))
-  end
-  push(string.format("Total imported so far: %s", fmt(ns.Import:GetTotalImported())))
-
-  if state.lastError then
-    push("")
-    push("ERROR: " .. tostring(state.lastError))
-  end
-
-  push("")
-  push("Sources:")
-  for _, r in ipairs(state.results or {}) do
-    if r.skippedSource then
-      push(string.format("  · %-20s skipped (%s)", r.label or r.source, r.reason or "?"))
-    else
-      push(string.format("  ✓ %-20s done — %s imported, %d skipped",
-        r.label or r.source, fmt(r.inserted or 0), r.skipped or 0))
-    end
-  end
-  if state.current then
-    local c = state.current
-    if c.total > 0 then
-      push(string.format("  ▶ %-20s %s / %s (%d%%)",
-        c.label or c.name, fmt(c.idx or 0), fmt(c.total),
-        math.floor(100 * (c.idx or 0) / math.max(c.total, 1))))
-    else
-      push(string.format("  ▶ %-20s parsing…", c.label or c.name))
-    end
-  end
-  for _, name in ipairs(state.sourceQueue or {}) do
-    push(string.format("  · %-20s queued", name))
-  end
-
-  if state.phase == "flushing" then
-    push("")
-    push(string.format("Flushing staging buckets to archives: %d / %d",
-      state.flushIdx or 0, state.flushTotal or 0))
-  elseif state.phase == "done" then
-    push("")
-    push(string.format("Complete — %d archives written, %s rows archived.",
-      state.archivesWritten or 0, fmt(state.rowsArchived or 0)))
-  end
-
-  return table.concat(lines, "\n")
-end
-
-local function handleImport(args)
-  if not (ns.Import and ns.Import.GetState) then
-    if ns.Output then ns.Output:Error("Import controller unavailable.") end
-    return
-  end
-  local sub, rest = (args or ""):match("^(%S*)%s*(.*)$")
-  sub = (sub or ""):lower()
-
-  if sub == "" then
-    -- Default: surface the persistent control widget. Falls back to the
-    -- copy-dialog status if a controller doesn't exist yet (idle state) or
-    -- the widget module didn't load.
-    local state = ns.Import:GetState()
-    if state.phase ~= "idle" and ns.UI and ns.UI.ImportControl then
-      ns.UI.ImportControl:Show()
-      return
-    end
-    if ns.Output then
-      ns.Output:Inspect(formatImportStatus(), "Tally backfill status.")
-    end
-    return
-  end
-
-  if sub == "status" then
-    if ns.Output then
-      ns.Output:Inspect(formatImportStatus(), "Tally backfill status.")
-    end
-    return
-  end
-
-  if sub == "pause" then
-    if ns.Import:Pause() then
-      if ns.Output then ns.Output:Info("Backfill paused.") end
-    elseif ns.Output then
-      ns.Output:Warn("Nothing to pause — backfill is not running.")
-    end
-    return
-  end
-
-  if sub == "resume" then
-    if ns.Import:Resume() then
-      if ns.Output then ns.Output:Info("Backfill resumed.") end
-      -- Re-surface the widget so testers see live progress after resume.
-      if ns.UI and ns.UI.ImportControl then
-        ns.UI.ImportControl:Show()
-      end
-    elseif ns.Output then
-      ns.Output:Warn("Nothing to resume — no paused backfill.")
-    end
-    return
-  end
-
-  if sub == "cancel" then
-    if ns.Import:Cancel() then
-      if ns.Output then
-        ns.Output:Info("Backfill cancelled. Pending state preserved — /tally import resume to pick back up.")
-      end
-    elseif ns.Output then
-      ns.Output:Warn("Nothing to cancel.")
-    end
-    return
-  end
-
-  if sub == "budget" then
-    local n = tonumber(rest)
-    if not n or n <= 0 then
-      if ns.Output then ns.Output:Error("Usage: /tally import budget <rows>") end
-      return
-    end
-    if ns.Import:UpdateBudget(n, nil) then
-      if ns.Output then
-        ns.Output:Info(string.format("Budget set to %d rows / cycle (takes effect next cycle).", math.floor(n)))
-      end
-    elseif ns.Output then
-      ns.Output:Warn("No active backfill to tune.")
-    end
-    return
-  end
-
-  if sub == "delay" then
-    local n = tonumber(rest)
-    if not n or n <= 0 then
-      if ns.Output then ns.Output:Error("Usage: /tally import delay <seconds>") end
-      return
-    end
-    if ns.Import:UpdateBudget(nil, n) then
-      if ns.Output then
-        ns.Output:Info(string.format("Delay set to %.1fs between cycles (takes effect next cycle).", n))
-      end
-    elseif ns.Output then
-      ns.Output:Warn("No active backfill to tune.")
-    end
-    return
-  end
-
-  if ns.Output then
-    ns.Output:Error("Unknown import subcommand '" .. sub .. "'. Try /tally import status.")
-  end
-end
-
--- ============================================================================
--- /tally synth — manage on-demand period synthesis (TLY-71 Flow B)
--- ============================================================================
---
--- Synthesises historical archives from sibling adapters' month coverage.
--- Run by itself, fills every period siblings cover that doesn't already
--- have a Tally archive. Subcommands: status, cancel, pause, resume.
-
-local function formatSynthStatus()
-  if not (ns.Synthesis and ns.Synthesis.GetState) then
-    return "Synthesis engine unavailable."
-  end
-  local state = ns.Synthesis:GetState()
-  local lines = {}
-  local push = function(s) lines[#lines + 1] = s end
-  local fmt = function(n) return BreakUpLargeNumbers and BreakUpLargeNumbers(n or 0) or tostring(n or 0) end
-  push("=== Tally — synthesis status ===")
-  push("Phase: " .. (state.phase or "idle"))
-  if state.phase == "idle" then
-    push("")
-    push("No synthesis running. Run /tally synth to fill missing archives.")
-    local cands = ns.Synthesis:GetCandidates({})
-    if cands then
-      push("")
-      push(string.format("Coverage probe — %d missing, %d already archived, %d current-month (active).",
-        #cands.missing, #cands.existing, #cands.skippedCurrent))
-      if #cands.missing > 0 then
-        push("")
-        push("Missing periods (would be synthesised):")
-        for _, m in ipairs(cands.missing) do
-          push(string.format("  · %s — ~%s rows across siblings", m.key, fmt(m.rows or 0)))
-        end
-      end
-    end
-    return table.concat(lines, "\n")
-  end
-  push(string.format("Sources: %s", table.concat(state.config.sources, ", ")))
-  if state.currentKey then
-    push("Currently synthesising: " .. state.currentKey)
-  end
-  push(string.format("Queue: %d remaining", #state.queue))
-  push("")
-  push("Completed:")
-  for _, r in ipairs(state.results or {}) do
-    if r.skipped then
-      push(string.format("  · %s — skipped (%s)", r.key, r.skipped))
-    else
-      push(string.format("  ✓ %s — %s rows", r.key, fmt(r.rows or 0)))
-    end
-  end
-  if state.lastError then
-    push("")
-    push("ERROR: " .. tostring(state.lastError))
-  end
-  return table.concat(lines, "\n")
-end
-
-local function handleSynth(args)
-  if not (ns.Synthesis and ns.Synthesis.GetState) then
-    if ns.Output then ns.Output:Error("Synthesis engine unavailable.") end
-    return
-  end
-  local sub = ((args or ""):match("^(%S*)") or ""):lower()
-
-  if sub == "status" then
-    if ns.Output then ns.Output:Inspect(formatSynthStatus(), "Tally synthesis status.") end
-    return
-  end
-
-  if sub == "cancel" then
-    if ns.Synthesis:Cancel() then
-      if ns.Output then ns.Output:Info("Synthesis cancelled.") end
-    elseif ns.Output then
-      ns.Output:Warn("Nothing to cancel.")
-    end
-    return
-  end
-
-  if sub == "pause" then
-    if ns.Synthesis:Pause() then
-      if ns.Output then ns.Output:Info("Synthesis paused.") end
-    elseif ns.Output then
-      ns.Output:Warn("Nothing to pause — synthesis is not running.")
-    end
-    return
-  end
-
-  if sub == "resume" then
-    if ns.Synthesis:Resume() then
-      if ns.Output then ns.Output:Info("Synthesis resumed.") end
-    elseif ns.Output then
-      ns.Output:Warn("Nothing to resume — no paused synthesis.")
-    end
-    return
-  end
-
-  if sub == "" or sub == "start" then
-    local cands = ns.Synthesis:GetCandidates({})
-    local missing = {}
-    for _, m in ipairs(cands.missing) do missing[#missing + 1] = m.key end
-    if #missing == 0 then
-      if ns.Output then
-        ns.Output:Info("Nothing to synthesise — all periods siblings cover already have Tally archives.")
-      end
-      return
-    end
-    if ns.Synthesis:EnsurePeriods(missing, {}) then
-      if ns.Output then
-        ns.Output:Info(string.format("Synthesising %d period%s in the background.",
-          #missing, #missing == 1 and "" or "s"))
-      end
-    elseif ns.Output then
-      ns.Output:Warn("Synthesis didn't start — check /tally synth status.")
-    end
-    return
-  end
-
-  if ns.Output then
-    ns.Output:Error("Unknown synth subcommand '" .. sub .. "'. Try /tally synth status.")
-  end
-end
-
 if Cogworks and Cogworks.RegisterSlashCommands then
   Cogworks:RegisterSlashCommands("Tally", {
     globals   = { "/tally", "/tly" },
@@ -2535,30 +1559,6 @@ if Cogworks and Cogworks.RegisterSlashCommands then
         end,
       },
       {
-        name = "import",
-        args = "[status|pause|resume|cancel|budget <rows>|delay <sec>]",
-        help = "Open the backfill control widget; subcommands manage the controller",
-        run = function(rest) handleImport(rest) end,
-      },
-      {
-        name = "synth",
-        args = "[start|status|pause|resume|cancel]",
-        help = "Fill missing historical archives from siblings (TLY-71 Flow B)",
-        run = function(rest) handleSynth(rest) end,
-      },
-      {
-        name = "lifecycle", aliases = { "lc" },
-        args = "<itemlink-or-id>",
-        help = "Open per-item lifecycle drill-down",
-        run = function(rest)
-          if ns.UI and ns.UI.ShowLifecycle then
-            ns.UI.ShowLifecycle(rest)
-          elseif ns.Output then
-            ns.Output:Error("Lifecycle UI unavailable.")
-          end
-        end,
-      },
-      {
         name = "inventory", aliases = { "inv" },
         args = "[charKey]",
         help = "Open the per-character inventory drill-down",
@@ -2571,120 +1571,17 @@ if Cogworks and Cogworks.RegisterSlashCommands then
         end,
       },
       {
-        name = "compare",
-        help = "Open the multi-source ledger comparison view",
-        run = function()
-          if ns.UI and ns.UI.MainFrame and ns.UI.CreateCompareLedgersPage then
-            TallyDB.ui = TallyDB.ui or {}
-            if not TallyDB.ui.showCompareTab then
-              TallyDB.ui.showCompareTab = true
-              ns.UI.MainFrame:RegisterPage("Compare", ns.UI.CreateCompareLedgersPage)
-            end
-            ns.UI.MainFrame:Show()
-            ns.UI.MainFrame:ShowPage("Compare")
-          elseif ns.Output then
-            ns.Output:Error("Compare view unavailable.")
-          end
-        end,
-      },
-      {
-        name = "seed",
-        args = "[N | legacy N | clear]",
-        help = "Generate synthetic ledger entries for stress-testing (debug only)",
-        run = function(rest) handleSeed(rest) end,
-      },
-      {
-        name = "seal",
-        args = "[preview|confirm]",
-        help = "Move ledger rows older than 60 days into monthly archives",
-        run = function(rest)
-          if not (ns.Ledger and ns.Ledger.Seal) then
-            if ns.Output then ns.Output:Error("Seal unavailable.") end
-            return
-          end
-          if ns.Ledger:IsMigrationRunning() then
-            if ns.Output then
-              ns.Output:Warn("Migration in progress — wait for it to finish before sealing.")
-            end
-            return
-          end
-          if ns.Ledger:IsSealRunning() then
-            if ns.Output then ns.Output:Warn("Seal already running.") end
-            return
-          end
-
-          local sub = rest and rest:lower() or ""
-          local preview = ns.Ledger:SealPreview()
-
-          if sub == "preview" or (sub ~= "confirm" and preview.sealCount > 5000) then
-            local lines = {
-              string.format("Tally seal preview: %d active rows  →  keep %d, archive %d",
-                preview.activeCount, preview.keepCount, preview.sealCount),
-            }
-            if preview.cutTime then
-              lines[#lines + 1] = string.format("Cut: rows older than %s; max active rows %d.",
-                date("%Y-%m-%d", preview.cutTime), preview.maxRows)
-            end
-            if sub ~= "preview" then
-              lines[#lines + 1] = "Large cut — run `/tally seal confirm` to proceed."
-            end
-            if ns.Output then
-              ns.Output:Inspect(table.concat(lines, "\n"), "Tally seal preview.")
-            end
-            return
-          end
-
-          if preview.sealCount == 0 then
-            if ns.Output then
-              ns.Output:Info("Nothing to seal — active set is within the soft cap.")
-            end
-            return
-          end
-
-          if ns.Output then
-            ns.Output:Info(string.format("Sealing %d rows into archives…", preview.sealCount))
-          end
-          ns.Ledger:Seal({
-            onProgress = function(phase, idx, total, key)
-              if phase == "bucket" and total > 0 and idx % 5000 == 0 and ns.Output then
-                ns.Output:Debug(string.format("seal bucketing %d / %d", idx, total))
-              elseif phase == "flush" and ns.Output then
-                ns.Output:Debug(string.format("seal flush archive %s (%d / %d)",
-                  key or "?", idx, total))
-              end
-            end,
-            onComplete = function(sealed, archivesWritten)
-              if ns.Output then
-                ns.Output:Success(string.format(
-                  "Sealed %d rows into %d archives. Logout will save the slimmed active set.",
-                  sealed, archivesWritten))
-              end
-              if ns.UI and ns.UI.MainFrame then
-                if ns.UI.MainFrame.UpdateHeaderNudge then
-                  pcall(ns.UI.MainFrame.UpdateHeaderNudge, ns.UI.MainFrame)
-                end
-                if ns.UI.MainFrame.RefreshActivePage then
-                  pcall(ns.UI.MainFrame.RefreshActivePage, ns.UI.MainFrame)
-                end
-              end
-            end,
-          })
-        end,
-      },
-      {
         name = "diag", aliases = { "diagnostic" },
-        args = "[divergence|gold|chat]",
-        -- TLY-45 + alpha10 debug-UX: default opens the structured copy
+        args = "[gold|sources|chat]",
         -- TLY-70: every diag subcommand routes through CreateCopyDialog.
         -- `pretty` (also alias `chat` for muscle-memory) opens the human-
         -- readable formatted variant; default opens the structured
         -- DumpDebugState (Lua-table) variant. Both are paste-ready into
         -- a GitHub issue; pick whichever reads more cleanly to the eye.
-        help = "Open diagnostic dump as a copy dialog. `divergence` for source-coverage report; `gold` for per-character gold accounting; `sources` for sibling-source row counts + monthly distribution (alpha18 simulated-import readout — runs a multi-second blocking pass on big TSM CSVs); `pretty` (or `chat`) for the human-readable formatted variant.",
+        help = "Open diagnostic dump as a copy dialog. `gold` for per-character gold accounting; `sources` for sibling-source row counts + monthly distribution (runs a multi-second blocking parse on big TSM CSVs); `pretty` (or `chat`) for the human-readable formatted variant.",
         run = function(rest)
           local sub = rest and rest:lower() or ""
-          if sub == "divergence" then divergenceCopyDialog()
-          elseif sub == "gold" then goldCopyDialog()
+          if sub == "gold" then goldCopyDialog()
           elseif sub == "sources" then sourcesCopyDialog()
           elseif sub == "pretty" or sub == "chat" then diagPrettyCopyDialog()
           else diagOpenCopyDialog() end

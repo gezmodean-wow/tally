@@ -236,11 +236,6 @@ local function getEntries()
   return entries, 0
 end
 
-local function importAll()
-  local entries = getEntries()
-  return ns.Ledger:InsertMany(entries)
-end
-
 -- ============================================================================
 -- Registration
 -- ============================================================================
@@ -250,7 +245,6 @@ function FQ:Register()
   for k in pairs(self.skipCounters) do self.skipCounters[k] = 0 end
   ns.Ledger:RegisterSource(SOURCE_NAME, {
     label = "FlipQueue",
-    importFn = importAll,
     getEntriesFn = getEntries,
     isAvailable = isAvailable,
   })

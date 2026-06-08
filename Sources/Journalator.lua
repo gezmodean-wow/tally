@@ -829,12 +829,6 @@ local function getEntries()
   return entries, skipped
 end
 
-local function importAll()
-  local entries, parseSkipped = getEntries()
-  local inserted, insertSkipped = ns.Ledger:InsertMany(entries)
-  return inserted, (insertSkipped or 0) + (parseSkipped or 0)
-end
-
 -- ============================================================================
 -- Registration
 -- ============================================================================
@@ -844,7 +838,6 @@ function Journalator:Register()
   for k in pairs(self.skipCounters) do self.skipCounters[k] = 0 end
   ns.Ledger:RegisterSource(SOURCE_NAME, {
     label = "Journalator",
-    importFn = importAll,
     getEntriesFn = getEntries,
     isAvailable = isAvailable,
   })

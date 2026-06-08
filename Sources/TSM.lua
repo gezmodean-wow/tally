@@ -239,10 +239,8 @@ end
 
 local CSV_NAMES = { "csvSales", "csvBuys", "csvExpired", "csvCancelled" }
 
--- Parse phase only — returns the entries that would be inserted. Used by
--- the chunked driver (Ledger:ImportFromAllSourcesChunked) so the bulk insert
--- can be sliced into framerate-friendly batches. The synchronous importAll
--- below is a thin wrapper that calls this and InsertMany.
+-- Parse phase — returns the entries the spine's ParseCache merges. Pure
+-- read of TSM's CSV-encoded saved-variables; no ledger writes.
 local function getEntries()
   if not isAvailable() then return {}, 0 end
   local entries = {}
@@ -265,11 +263,6 @@ local function getEntries()
   return entries, 0
 end
 
-local function importAll()
-  local entries = getEntries()
-  return ns.Ledger:InsertMany(entries)
-end
-
 -- ============================================================================
 -- Registration
 -- ============================================================================
@@ -281,7 +274,6 @@ function TSMSrc:Register()
   for k in pairs(self.skipCounters) do self.skipCounters[k] = 0 end
   ns.Ledger:RegisterSource(SOURCE_NAME, {
     label = "TSM Accounting",
-    importFn = importAll,
     getEntriesFn = getEntries,
     isAvailable = isAvailable,
   })

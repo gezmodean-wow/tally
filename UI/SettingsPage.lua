@@ -370,19 +370,17 @@ function ns.UI.CreateSettingsPage(parent)
 
   local sourcesHdr = makeSectionHeader(page, actionRow, "BOTTOMLEFT", 18, "DATA SOURCES")
 
-  -- TLY-31 Phase B: Tally now treats sibling adapters as backfill sources,
-  -- not periodic auto-importers. The Import now button stays per source
-  -- for manual top-up; the recurring 5-min ticker is gone. This note
-  -- frames the section so users don't expect their TSM rows to update
-  -- live without clicking through.
+  -- TLY-78: the projection-layer redesign parses sibling sources into the
+  -- session spine cache on demand; Tally stores no ledger of its own. The
+  -- per-source "Re-parse" button discards the cache and re-reads sources.
   local sourcesNote = page:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
   sourcesNote:SetPoint("TOPLEFT", sourcesHdr, "BOTTOMLEFT", 0, -4)
   sourcesNote:SetPoint("RIGHT", page, "RIGHT", -4, 0)
   sourcesNote:SetJustifyH("LEFT")
   sourcesNote:SetSpacing(2)
-  sourcesNote:SetText("Sibling adapters (TSM, FlipQueue, Journalator) are backfill-only — "
-    .. "imported once on first setup and on the buttons below. Tally's native source "
-    .. "captures new events live (mailbox / vendor / repair / posting) — no manual refresh.")
+  sourcesNote:SetText("Tally reads your ledger from sibling addons (TSM, FlipQueue, Journalator) — "
+    .. "it stores no transactions of its own. Sources are parsed into the session cache "
+    .. "the first time you open a detailed view; Re-parse re-reads them after a sibling updates.")
 
   local sourcesContainer = CreateFrame("Frame", nil, page)
   sourcesContainer:SetPoint("TOPLEFT", sourcesNote, "BOTTOMLEFT", 0, -8)
@@ -414,7 +412,7 @@ function ns.UI.CreateSettingsPage(parent)
       row.count:SetWidth(120)
       row.count:SetJustifyH("LEFT")
 
-      row.btn = makeButton(row, "Import now", 100, function() end)
+      row.btn = makeButton(row, "Re-parse", 100, function() end)
       row.btn:SetPoint("RIGHT", row, "RIGHT", 0, 0)
 
       sourceRows[i] = row
@@ -440,14 +438,18 @@ function ns.UI.CreateSettingsPage(parent)
       local count = #(ns.Ledger:Query({ source = s.name }))
       row.count:SetText(string.format("%d entries", count))
 
+      -- The projection layer parses sibling sources into the session
+      -- spine cache rather than importing into a stored ledger. "Re-parse"
+      -- discards the cache and re-reads all sources; the per-source entry
+      -- count above reflects the freshly recomputed unified ledger.
       row.btn:SetEnabled(available)
       row.btn:SetScript("OnClick", function()
-        local inserted, skipped, err = ns.Ledger:ImportFromSource(s.name)
-        if err and ns.Output then
-          ns.Output:Error("Import failed for " .. s.name .. " — " .. tostring(err))
+        local PC = ns.Spine and ns.Spine.ParseCache
+        if PC and PC.Refresh then
+          if ns.Output then ns.Output:Info("Re-parsing sibling sources…") end
+          PC:Refresh()
         elseif ns.Output then
-          ns.Output:Success(string.format("Imported %d new entries from %s (%d skipped as duplicates).",
-            inserted or 0, s.name, skipped or 0))
+          ns.Output:Error("Data spine unavailable.")
         end
         loadSources()
       end)
@@ -482,44 +484,11 @@ function ns.UI.CreateSettingsPage(parent)
   rerunNote:SetPoint("LEFT", rerunBtn, "RIGHT", 12, 0)
   rerunNote:SetPoint("RIGHT", setupRow, "RIGHT", 0, 0)
   rerunNote:SetJustifyH("LEFT")
-  rerunNote:SetText("Walk through source detection, strategy, history config, and chunked backfill again.")
-
-  -- Compare-tab toggle
-  local compareRow = CreateFrame("Frame", nil, page)
-  compareRow:SetPoint("TOPLEFT", setupRow, "BOTTOMLEFT", 0, -6)
-  compareRow:SetPoint("RIGHT", page, "RIGHT", 0, 0)
-  compareRow:SetHeight(22)
-
-  local compareCB = CreateFrame("CheckButton", nil, compareRow, "UICheckButtonTemplate")
-  compareCB:SetSize(20, 20)
-  compareCB:SetPoint("LEFT", compareRow, "LEFT", 0, 0)
-  TallyDB.ui = TallyDB.ui or {}
-  compareCB:SetChecked(TallyDB.ui.showCompareTab and true or false)
-
-  local compareLabel = compareRow:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-  compareLabel:SetPoint("LEFT", compareCB, "RIGHT", 4, 0)
-  compareLabel:SetText("Show ledger comparison tab")
-
-  local compareNote = compareRow:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
-  compareNote:SetPoint("LEFT", compareLabel, "RIGHT", 12, 0)
-  compareNote:SetPoint("RIGHT", compareRow, "RIGHT", 0, 0)
-  compareNote:SetJustifyH("LEFT")
-  compareNote:SetText("Debug-oriented side-by-side diff between two ledger sources. Reload required for tab to appear/disappear.")
-
-  compareCB:SetScript("OnClick", function(self)
-    TallyDB.ui = TallyDB.ui or {}
-    TallyDB.ui.showCompareTab = self:GetChecked() and true or nil
-    -- Live-register the page on enable so users don't strictly need a reload
-    -- to use it — only to remove the tab visually.
-    if TallyDB.ui.showCompareTab and ns.UI and ns.UI.MainFrame and ns.UI.CreateCompareLedgersPage
-       and ns.UI.MainFrame.RegisterPage and not ns.UI.MainFrame:GetPage("Compare") then
-      ns.UI.MainFrame:RegisterPage("Compare", ns.UI.CreateCompareLedgersPage)
-    end
-  end)
+  rerunNote:SetText("Walk through source detection and strategy again.")
 
   -- Data-spine-tab toggle (TLY-77 projection-layer redesign)
   local spineRow = CreateFrame("Frame", nil, page)
-  spineRow:SetPoint("TOPLEFT", compareRow, "BOTTOMLEFT", 0, -6)
+  spineRow:SetPoint("TOPLEFT", setupRow, "BOTTOMLEFT", 0, -6)
   spineRow:SetPoint("RIGHT", page, "RIGHT", 0, 0)
   spineRow:SetHeight(22)
 
@@ -550,97 +519,10 @@ function ns.UI.CreateSettingsPage(parent)
   end)
 
   -- ============================================================================
-  -- SECTION 6: Maintenance — seal old ledger rows into archives
+  -- SECTION 6: Danger zone — full data reset (testing aid + recovery path)
   -- ============================================================================
 
-  local maintHdr = makeSectionHeader(page, spineRow, "BOTTOMLEFT", 18, "MAINTENANCE")
-
-  local sealRow = CreateFrame("Frame", nil, page)
-  sealRow:SetPoint("TOPLEFT", maintHdr, "BOTTOMLEFT", 0, -10)
-  sealRow:SetPoint("RIGHT", page, "RIGHT", 0, 0)
-  sealRow:SetHeight(24)
-
-  local sealStatus = sealRow:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-
-  local sealBtn = makeButton(sealRow, "Seal old data into archives", 220, function()
-    if not (ns.Ledger and ns.Ledger.Seal) then
-      if ns.Output then ns.Output:Error("Seal unavailable.") end
-      return
-    end
-    if ns.Ledger:IsMigrationRunning() then
-      if ns.Output then ns.Output:Warn("Migration in progress — wait for it to finish before sealing.") end
-      return
-    end
-    if ns.Ledger:IsSealRunning() then
-      if ns.Output then ns.Output:Warn("Seal already running.") end
-      return
-    end
-
-    local preview = ns.Ledger:SealPreview()
-    if preview.sealCount == 0 then
-      if ns.Output then ns.Output:Info("Nothing to seal — active set is within the soft cap.") end
-      return
-    end
-
-    StaticPopupDialogs["TALLY_SEAL_CONFIRM"] = StaticPopupDialogs["TALLY_SEAL_CONFIRM"] or {
-      text = "Seal %d ledger rows older than %s into monthly archives?\n\nKeeps the %d newest rows in the active set. Archives are read-only and lazy-loaded by Compare and Lifecycle when you ask for full-history scope. Logout-time saves stay fast after.",
-      button1 = ACCEPT or "Accept",
-      button2 = CANCEL or "Cancel",
-      timeout = 0,
-      whileDead = true,
-      hideOnEscape = true,
-    }
-    StaticPopupDialogs["TALLY_SEAL_CONFIRM"].OnAccept = function()
-      if ns.Output then
-        ns.Output:Info(string.format("Sealing %d rows into archives…", preview.sealCount))
-      end
-      ns.Ledger:Seal({
-        onProgress = function(phase, idx, total, key)
-          if phase == "flush" and ns.Output then
-            ns.Output:Debug(string.format("seal flush archive %s (%d / %d)", key or "?", idx, total))
-          end
-        end,
-        onComplete = function(sealed, archivesWritten)
-          if ns.Output then
-            ns.Output:Success(string.format(
-              "Sealed %d rows into %d archives. Logout will save the slimmed active set.",
-              sealed, archivesWritten))
-          end
-          if outer.Refresh then pcall(outer.Refresh, outer) end
-          if ns.UI and ns.UI.MainFrame and ns.UI.MainFrame.UpdateHeaderNudge then
-            pcall(ns.UI.MainFrame.UpdateHeaderNudge, ns.UI.MainFrame)
-          end
-        end,
-      })
-    end
-    StaticPopup_Show("TALLY_SEAL_CONFIRM",
-      preview.sealCount,
-      date("%Y-%m-%d", preview.cutTime or time()),
-      preview.keepCount)
-  end)
-  sealBtn:SetPoint("LEFT", sealRow, "LEFT", 0, 0)
-
-  sealStatus:SetPoint("LEFT", sealBtn, "RIGHT", 12, 0)
-  sealStatus:SetPoint("RIGHT", sealRow, "RIGHT", 0, 0)
-  sealStatus:SetJustifyH("LEFT")
-  sealStatus:SetText("")
-
-  refreshFns[#refreshFns + 1] = function()
-    if not (ns.Ledger and ns.Ledger.SealPreview) then return end
-    local p = ns.Ledger:SealPreview()
-    if p.sealCount > 0 then
-      sealStatus:SetText(string.format("Active: %d rows — sealing would archive %d (older than %s).",
-        p.activeCount, p.sealCount, date("%Y-%m-%d", p.cutTime or time())))
-    else
-      sealStatus:SetText(string.format("Active: %d rows — within soft cap, no seal needed.", p.activeCount))
-    end
-  end
-
-  -- ============================================================================
-  -- SECTION 7: Danger zone — full data reset (testing aid + recovery path)
-  -- ============================================================================
-
-  local dangerHdr = makeSectionHeader(page, sealRow, "BOTTOMLEFT", 18, "DANGER ZONE")
+  local dangerHdr = makeSectionHeader(page, spineRow, "BOTTOMLEFT", 18, "DANGER ZONE")
 
   local resetRow = CreateFrame("Frame", nil, page)
   resetRow:SetPoint("TOPLEFT", dangerHdr, "BOTTOMLEFT", 0, -10)
@@ -649,7 +531,7 @@ function ns.UI.CreateSettingsPage(parent)
 
   local resetBtn = makeButton(resetRow, "Reset all Tally data", 200, function()
     StaticPopupDialogs["TALLY_RESET_DATA"] = StaticPopupDialogs["TALLY_RESET_DATA"] or {
-      text = "Wipe Tally's ledger, history, inventory rollup, and setup state?\n\nConfig (strategy, cadence, minimap, UI position) is preserved. The setup wizard will reopen so you can re-pick sources, strategy, and pace; the chunked backfill kicks off when you finish the wizard.\n\nThis cannot be undone.",
+      text = "Wipe Tally's net-worth snapshots, aggregates, overrides, inventory rollup, and setup state?\n\nConfig (strategy, retention, minimap, UI position) is preserved. The setup wizard will reopen so you can re-pick sources and strategy; Tally recomputes from your sibling sources on demand.\n\nThis cannot be undone.",
       button1 = ACCEPT or "Accept",
       button2 = CANCEL or "Cancel",
       timeout = 0,

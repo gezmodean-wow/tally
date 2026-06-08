@@ -138,10 +138,23 @@ function Ownership:PreferredCharGold(charKey)
   return preferredCharGold(charKey)
 end
 
+-- Current character's "Name-Realm" key. Prefers Cogworks's suite-wide
+-- helper so the keyspace matches every sibling cog; falls back to the
+-- WoW API. (Replaces the retired Sources.Native.CurrentCharKey.)
+local function currentCharKey()
+  local cw = LibStub and LibStub("Cogworks-1.0", true)
+  if cw and cw.GetCharacterKey then
+    local ok, key = pcall(cw.GetCharacterKey, cw)
+    if ok and key and key ~= "" then return key end
+  end
+  local name = UnitName and UnitName("player") or ""
+  local realm = GetRealmName and GetRealmName() or ""
+  return name .. "-" .. realm
+end
+
 function Ownership:CaptureCurrentCharGold()
   if not GetMoney then return end
-  local key = ns.Sources and ns.Sources.Native and ns.Sources.Native.CurrentCharKey
-              and ns.Sources.Native.CurrentCharKey()
+  local key = currentCharKey()
   if not key or key == "-" then return end
   TallyDB.charGold = TallyDB.charGold or {}
   TallyDB.charGold[key] = { money = GetMoney(), moneyAt = time() }
