@@ -198,30 +198,9 @@ function ns:PLAYER_LOGIN()
   -- /tally diag prints to chat.
   if ns.RegisterDiagInspectors then ns.RegisterDiagInspectors() end
 
-  -- Register UI pages with the main frame. Page bodies are lazy-created on
-  -- first ShowPage so login cost is zero for users who never open the UI.
-  if ns.UI and ns.UI.MainFrame then
-    if ns.UI.CreateInventoryPage then
-      ns.UI.MainFrame:RegisterPage("Inventory", ns.UI.CreateInventoryPage)
-    end
-    -- TLY-78: the alpha18/19 view pages (Net Worth, Research, Lifecycle,
-    -- Ledger, Compare) were removed in the projection-layer teardown. The
-    -- new Live/Historical navigation + Summary/Ledger/Research views land
-    -- in TLY-83..-87. Until then the data-spine verification tab is the
-    -- ledger surface; Inventory + Settings + Appearance remain.
-    TallyDB.ui = TallyDB.ui or {}
-    -- TLY-77: data-spine verification tab — gated, default off. Debug
-    -- surface for inspecting the spine's unified ledger.
-    if TallyDB.ui.showSpineTab and ns.UI.CreateSpinePage then
-      ns.UI.MainFrame:RegisterPage("Spine", ns.UI.CreateSpinePage)
-    end
-    if ns.UI.CreateSettingsPage then
-      ns.UI.MainFrame:RegisterPage("Settings", ns.UI.CreateSettingsPage)
-    end
-    if ns.UI.CreateAppearancePage then
-      ns.UI.MainFrame:RegisterPage("Appearance", ns.UI.CreateAppearancePage)
-    end
-  end
+  -- TLY-83: the main frame owns its own navigation now (left-bar shell:
+  -- Live / Historical / Tools / Settings / Appearance). Sections build
+  -- lazily on first open, so there is nothing to register here.
 
   -- TLY-25: auto-show the setup wizard for fresh installs with detected
   -- sibling sources. Deferred 6s after login (1s past the source-import

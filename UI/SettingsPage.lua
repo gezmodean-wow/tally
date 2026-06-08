@@ -486,43 +486,11 @@ function ns.UI.CreateSettingsPage(parent)
   rerunNote:SetJustifyH("LEFT")
   rerunNote:SetText("Walk through source detection and strategy again.")
 
-  -- Data-spine-tab toggle (TLY-77 projection-layer redesign)
-  local spineRow = CreateFrame("Frame", nil, page)
-  spineRow:SetPoint("TOPLEFT", setupRow, "BOTTOMLEFT", 0, -6)
-  spineRow:SetPoint("RIGHT", page, "RIGHT", 0, 0)
-  spineRow:SetHeight(22)
-
-  local spineCB = CreateFrame("CheckButton", nil, spineRow, "UICheckButtonTemplate")
-  spineCB:SetSize(20, 20)
-  spineCB:SetPoint("LEFT", spineRow, "LEFT", 0, 0)
-  TallyDB.ui = TallyDB.ui or {}
-  spineCB:SetChecked(TallyDB.ui.showSpineTab and true or false)
-
-  local spineLabel = spineRow:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-  spineLabel:SetPoint("LEFT", spineCB, "RIGHT", 4, 0)
-  spineLabel:SetText("Show data-spine tab")
-
-  local spineNote = spineRow:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
-  spineNote:SetPoint("LEFT", spineLabel, "RIGHT", 12, 0)
-  spineNote:SetPoint("RIGHT", spineRow, "RIGHT", 0, 0)
-  spineNote:SetJustifyH("LEFT")
-  spineNote:SetText("Verification view for the projection-layer redesign — the unified ledger computed from sibling sources. Reload required for tab to appear/disappear.")
-
-  spineCB:SetScript("OnClick", function(self)
-    TallyDB.ui = TallyDB.ui or {}
-    TallyDB.ui.showSpineTab = self:GetChecked() and true or nil
-    -- Live-register on enable so a reload is only needed to remove it.
-    if TallyDB.ui.showSpineTab and ns.UI and ns.UI.MainFrame and ns.UI.CreateSpinePage
-       and ns.UI.MainFrame.RegisterPage and not ns.UI.MainFrame:GetPage("Spine") then
-      ns.UI.MainFrame:RegisterPage("Spine", ns.UI.CreateSpinePage)
-    end
-  end)
-
   -- ============================================================================
   -- SECTION 6: Danger zone — full data reset (testing aid + recovery path)
   -- ============================================================================
 
-  local dangerHdr = makeSectionHeader(page, spineRow, "BOTTOMLEFT", 18, "DANGER ZONE")
+  local dangerHdr = makeSectionHeader(page, setupRow, "BOTTOMLEFT", 18, "DANGER ZONE")
 
   local resetRow = CreateFrame("Frame", nil, page)
   resetRow:SetPoint("TOPLEFT", dangerHdr, "BOTTOMLEFT", 0, -10)

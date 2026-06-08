@@ -316,11 +316,13 @@ function ns.UI.CreateInventoryPage(parent)
   return page
 end
 
--- Convenience: open the main frame, switch to Inventory tab, apply filter.
+-- Convenience: open the main frame, navigate to Live → Inventory, apply
+-- the character filter. Inventory lives as a sub-tab under the Live section
+-- in the projection-layer nav shell (TLY-83).
 function ns.UI.ShowInventory(charKey)
-  if not (ns.UI.MainFrame and ns.UI.MainFrame.ShowPage) then return end
-  ns.UI.MainFrame:Show()
-  ns.UI.MainFrame:ShowPage("Inventory")
-  local page = ns.UI.MainFrame.GetPage and ns.UI.MainFrame:GetPage("Inventory")
+  if not (ns.UI.MainFrame and ns.UI.MainFrame.ShowSection) then return end
+  ns.UI.MainFrame:ShowSection("live", "inventory")
+  local page = ns.UI.MainFrame.GetSubtabView
+           and ns.UI.MainFrame:GetSubtabView("live", "inventory")
   if page and page.FilterCharacter then page:FilterCharacter(charKey or "__all") end
 end
