@@ -88,11 +88,6 @@ local function subtabSpecs()
   if ns.UI.CreateLedgerView then
     specs[#specs + 1] = { key = "ledger", label = "Ledger",
                           create = function(p) return ns.UI.CreateLedgerView(p) end }
-  elseif ns.UI.CreateSpinePage then
-    -- Interim: the data-spine verification view stands in as the Ledger
-    -- sub-tab until the polished window-aware Ledger view (TLY-86) lands.
-    specs[#specs + 1] = { key = "ledger", label = "Ledger",
-                          create = function(p) return ns.UI.CreateSpinePage(p) end }
   end
   if ns.UI.CreateInventoryPage then
     specs[#specs + 1] = { key = "inventory", label = "Inventory",

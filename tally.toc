@@ -44,7 +44,7 @@ UI/MultiProgressBar.lua
 UI/MainFrame.lua
 UI/InventoryPage.lua
 UI/SummaryView.lua
-UI/SpinePage.lua
+UI/LedgerView.lua
 UI/SettingsPage.lua
 UI/AppearancePage.lua
 UI/SetupWizard.lua
