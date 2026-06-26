@@ -1,4 +1,4 @@
-## Interface: 120001
+## Interface: 120007
 ## Title: Tally
 ## Notes: Personal Capital for WoW — ledger, net-worth, and per-item research across all your characters and accounts.
 ## Author: Gezmodean
