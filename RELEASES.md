@@ -6,11 +6,35 @@ The engineering-detail companion lives in `CHANGELOG.md` (commit-readerese — f
 
 ---
 
-## Unreleased
+## v0.1.0-alpha20
+
+A new direction for Tally, and the biggest change since the rewrite began. Instead of recording your sales and purchases itself, Tally now builds its whole picture by **reading the addons you already run** — TSM Accounting, FlipQueue, and Journalator — and combining them into one clean, de-duplicated view. That shift powers a brand-new look: a left-hand menu with **Live** and **Historical** sections, a **Summary** dashboard, and a unified **Ledger**.
+
+This is an early, hands-on alpha. It was solid in our own testing, but the whole thing is new — we want your real-world usage to tell us where it bends. Please report anything that looks wrong, especially numbers that don't match what your other addons show.
+
+### Your Tally data resets again — and that's the last big reset
+
+As part of this change your Tally ledger is wiped one more time. This is intentional, not a bug. From here on Tally doesn't keep its own copy of your transactions at all — it rebuilds the ledger fresh from your other addons each session, behind a quick loading bar the first time you open a detailed view. The upside: **no more login or logout delay**, and no import flow to babysit. The setup wizard is now just two quick steps (welcome + pricing strategy).
+
+### A new look — Live and Historical
+
+Tally's window has a new left-hand menu: **Live · Historical · Tools · Settings · Appearance**.
+
+- **Summary** gives you a net-worth chart, your headline numbers, and breakdowns of operating costs and your top products at a glance.
+- **Ledger** shows every sale and purchase as one merged, reconciled list — your addons' overlapping records combined into a single row each, with conflicts flagged rather than silently picked.
+- **Historical** lets you pick any past date range and see the same Summary and Ledger for that window, with a back-arrow to return.
+
+### Works with whatever you run
+
+Because Tally now reads your other addons directly, it works with whatever combination you have — TSM plus FlipQueue, FlipQueue plus Journalator with no TSM at all, or any mix. Each sale and purchase is matched across sources so the same flip logged in two places counts once, and trades are tracked across all your realms.
 
 ### New Appearance tab
 
-Tally's window has a new **Appearance** tab. It carries the standard Cogworks appearance controls — UI scale, theme, and font — so you can tune how Tally looks. UI scale and theme are shared across every Cogworks addon you run; font scale and font family can be set just for Tally. They're the same controls the other Cogworks addons use.
+Tally's window has a new **Appearance** tab. It carries the standard Cogworks appearance controls — UI scale, theme, and font — so you can tune how Tally looks. UI scale and theme are shared across every Cogworks addon you run; font scale and font family can be set just for Tally.
+
+### Updated for the latest WoW client
+
+Tally is updated for the current game version.
 
 ## v0.1.0-alpha19
 

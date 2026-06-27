@@ -2,7 +2,23 @@
 
 All notable changes to Tally will be documented in this file.
 
-## [Unreleased]
+## [v0.1.0-alpha20]
+
+The projection-layer redesign ([#77](https://github.com/gezmodean-wow/tally/issues/77)) ships. Tally stops being a *store* of transactions and becomes a *projection layer* over sibling sources — no native capture, no stored ledger, recompute-on-parse dedup/merge, persisting only net-worth snapshots, period aggregates, and sparse manual overrides. The alpha18/19 store is torn down ([#78](https://github.com/gezmodean-wow/tally/issues/78)); a new left-bar Live/Historical navigation projects Summary and Ledger views over the spine. Also ships `## Interface: 120007` for the new WoW client build (CF-12), and moves the Cogworks pin to `v0.16.0`.
+
+- **[TLY-86](https://github.com/gezmodean-wow/tally/issues/86) — Ledger view.** `UI/LedgerView.lua` — windowed unified ledger over `Spine/UnifiedLedger:Query`, rendered through `cw:CreateScrollTable` with per-window reconciliation. Absorbs [#24](https://github.com/gezmodean-wow/tally/issues/24) (TSM-divergence reframed as a source-reconciliation facet) and consumes the [#90](https://github.com/gezmodean-wow/tally/issues/90) realm dimension. Live and Historical share the rendering; they differ only in how the time window is set.
+
+- **[TLY-85](https://github.com/gezmodean-wow/tally/issues/85) — Summary view.** `UI/SummaryView.lua` — net-worth chart (over `Spine/NetWorthStore:GetSeries`), headline metrics, and operating-cost + product breakdowns (over `Spine/Aggregates`), all projections over the spine. No new persistence.
+
+- **[TLY-83](https://github.com/gezmodean-wow/tally/issues/83) / [TLY-84](https://github.com/gezmodean-wow/tally/issues/84) — left-bar nav shell + Historical date-range picker.** `UI/MainFrame.lua` reworked to the REDESIGN §4 left-bar shell — `Live · Historical · Tools · Settings · Appearance`. Live and Historical share subtab rendering (Summary/Ledger); they differ only in the window set. Historical adds a date-range picker + back-arrow flow.
+
+- **[TLY-82](https://github.com/gezmodean-wow/tally/issues/82) — aggregates / summaries store.** `Spine/Aggregates.lua` — period-keyed (`YYYY-MM`) rollups (per-item P&L, per-realm buy/sell, operating-cost buckets) recomputed wholesale from `UnifiedLedger:Query({})` via a hook in `ParseCache.finish()`. Bounded by period × item × realm; reported by `/tally spine`.
+
+- **[TLY-78](https://github.com/gezmodean-wow/tally/issues/78) — retire the alpha18/19 store.** Maximal, user-directed teardown. Removed `TallyActive` + `TallyA001..A060`, `Archive.lua`, `Util/Import.lua` + `UI/ImportControl.lua` + `UI/SynthButton.lua`, the synthesis write-path (parser kept), **native capture** (`Sources/Native*`), and the old view pages (NetWorth/Research/Lifecycle/Ledger/Compare) + their seal UI. `Ledger.lua` reduced ~2900→~530 lines to a lean core (Kinds/Schema/BuildUnknownEntry/Authority/GetAuthority + source registry + `IsSetupComplete`/`Clear`); `Reconcile`/`Query`/`Stats` are now thin shims over `Spine/UnifiedLedger` so the Cogworks public API + Research keep working on spine data. Schema bump **v18→v19 = clean-break wipe**. SetupWizard reduced to Welcome+Strategy; Settings "Import now"→"Re-parse". `InventoryPage` (Syndicator-based) kept as the one standalone content tab through the rewrite.
+
+- **chore — Interface 120007 (CF-12).** `tally.toc` `## Interface: 120001` → `120007` for the new WoW client build. Suite-wide bump coordinated from chronoforge#12.
+
+- **chore — Cogworks pin `v0.14.2` → `v0.16.0`.** `.pkgmeta` external bumped. Clears the `CreateAppearanceTab` empty-tab bug ([cogworks COG-75](https://github.com/gezmodean-wow/cogworks/issues/76), fixed v0.14.3) that left [#72](https://github.com/gezmodean-wow/tally/issues/72) on the fallback path, and brings the v0.16.0 widget batch (ScrollTable horizontal-scroll/column-reorder, ThemedMainFrame scrollable sidebar, Appearance color editor, AnchoredPopup, `cw:CreateDebug`) into reach.
 
 - **[TLY-81](https://github.com/gezmodean-wow/tally/issues/81) — retire History.lua.** Second of the two #81 commits — completes the cutover from `History.lua` to `Spine/NetWorthStore.lua`. `History.lua` is deleted (removed from `tally.toc`); its net-worth-series role is `NetWorthStore`'s, and its per-item × per-character inventory snapshots — the row-growing structure REDESIGN.md §3.2 forbids, which its own code warned could pass 1GB — are gone.
   - **Orphaned `TallyDB.history` / `TallyDB.pricingHistory` dropped** via a targeted nil at the schema-gate site in `Core.lua` — deliberately *not* a `TALLY_SCHEMA_VERSION` bump, since bumping the master gate would re-wipe the still-live alpha18/19 ledger (that is #78's job, not #81's). The nil is idempotent; nothing recreates the keys once `History.lua` is gone.
