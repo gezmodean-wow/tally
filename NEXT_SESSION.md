@@ -4,12 +4,12 @@ alpha19 shipped 2026-05-14. The active workstream is the **projection-layer rede
 
 ## State
 
-- **Branch:** `main`. **9 commits ahead of `origin/main`, unpushed.** Push needs explicit approval.
-- **Latest tag:** `v0.1.0-alpha19`, shipped 2026-05-14. alpha20 not yet tagged.
-- **Interface:** `tally.toc` bumped **`120001` → `120007`** (CF-12 suite-wide bump for the new WoW client build, commit `4add4a4`). Held at the human release gate — not pushed/tagged. CF-12 lives in the **chronoforge** repo (#12) and was never mirrored into Tally's tracker.
+- **Branch:** `main`, **in sync with `origin/main`** (alpha20 pushed 2026-06-27).
+- **Latest tag:** **`v0.1.0-alpha20`, shipped 2026-06-27** — release workflow green (verify + release), live on CurseForge + Wago. Now awaiting alpha-tester usage feedback.
+- **Interface:** `tally.toc` at **`120007`** (CF-12 suite-wide bump for the new WoW client build) — shipped in alpha20. CF-12 lives in the **chronoforge** repo (#12) and was never mirrored into Tally's tracker.
 - **Cogworks pin:** `.pkgmeta` external bumped **`v0.14.2` → `v0.16.0`** (commit `e8cc14c`). Local `Libs/Cogworks-1.0/` (gitignored/package-time) **re-extracted to v0.16.0** for in-game testing. The bump clears the `CreateAppearanceTab` empty-tab bug (COG-75, fixed v0.14.3) that left #72 on the fallback path.
 - **Standards acknowledgments:** runbooks `2026-05-05a`, scribe player-facing `2026-04-30f`. The player-facing doc was WebFetched 2026-05-17 — top changelog entry still `2026-04-30f`, no update needed.
-- **⚠️ Nothing since the spine is smoke-tested in-game.** The whole spine + #81 + #82 + the #78 teardown + the #83–#86 views are syntax-checked only (`luac -p`). The teardown is large and destructive, and the new views/interface/lib bumps are all unverified — an in-game pass is the most urgent next step before any further build-out (see Loose ends).
+- **Shipped to testers (alpha20).** The projection rewrite was confirmed largely functional in-game and tagged for real-usage feedback. The spine + #78 teardown + #83–#86 views are now in testers' hands — watch for divergence reports (numbers vs TSM/FlipQueue/Journalator) and load errors on the `120007` client.
 
 ## Done 2026-06-07 — #82 aggregates + #78 teardown
 
@@ -59,7 +59,7 @@ Per the #77 order, persistence (#81/#82), the teardown (#78), and the nav + Summ
 
 ## Loose ends
 
-- **🔴 In-game smoke test is now the top priority.** The #78 teardown plus the #83–#86 views, the `120007` interface bump, and the Cogworks v0.16.0 lib bump are all unverified in-game. First checks: addon loads without Lua error on a `120007` client; `/tally` opens the new left-bar shell (**Live → Summary/Ledger**, **Historical**, Inventory, Settings, Appearance); enable the Spine tab → `/tally spine parse` shows the loading bar + non-zero record count + aggregates line; the setup wizard (Welcome+Strategy) completes; `/tally reset confirm` works; `/tally diag` dumps cleanly. The schema bump (v19) wipes the old store on first login — expected.
+- **🟡 Now awaiting alpha-tester feedback.** alpha20 shipped after an in-game pass confirmed it largely functional. Next session's first job is triaging tester reports against the new projection model — especially numbers that diverge from TSM/FlipQueue/Journalator (the dedup/merge tuning constants in `Spine/Dedup.lua` are still flagged for validation against real data) and any load errors on the `120007` client. The schema bump (v19) wipes the old store on first login — expected, mention it if a tester flags an empty ledger.
 - **#72 should now render for real** — the local lib is v0.16.0, so the Appearance tab exercises the fixed `CreateAppearanceTab` (COG-75) + the full color editor (COG-73), not the empty-tab fallback. Verify in the smoke test.
 - **CF-12 not mirrored into Tally's tracker** — the interface bump came from chronoforge#12; no `TLY` issue exists for it. File one (or close-loop on the umbrella) if you want it tracked locally.
 - **Check `- [x] #72` and `- [x] #78` on the #77 umbrella checklist** — need `gh` remote writes (approval).
