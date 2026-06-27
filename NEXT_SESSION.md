@@ -61,8 +61,8 @@ Per the #77 order, persistence (#81/#82), the teardown (#78), and the nav + Summ
 
 - **🟡 Now awaiting alpha-tester feedback.** alpha20 shipped after an in-game pass confirmed it largely functional. Next session's first job is triaging tester reports against the new projection model — especially numbers that diverge from TSM/FlipQueue/Journalator (the dedup/merge tuning constants in `Spine/Dedup.lua` are still flagged for validation against real data) and any load errors on the `120007` client. The schema bump (v19) wipes the old store on first login — expected, mention it if a tester flags an empty ledger.
 - **#72 should now render for real** — the local lib is v0.16.0, so the Appearance tab exercises the fixed `CreateAppearanceTab` (COG-75) + the full color editor (COG-73), not the empty-tab fallback. Verify in the smoke test.
-- **CF-12 not mirrored into Tally's tracker** — the interface bump came from chronoforge#12; no `TLY` issue exists for it. File one (or close-loop on the umbrella) if you want it tracked locally.
-- **Check `- [x] #72` and `- [x] #78` on the #77 umbrella checklist** — need `gh` remote writes (approval).
+- **CF-12 mirror filed + closed** — #92 (labels `from-chronoforge` / `cross-repo-inbound`) records the `120007` bump locally, closed as shipped in alpha20; canonical item is chronoforge#12.
+- **#77 umbrella checklist updated** — #78–#86 + #72 ticked (shipped in alpha20). Remaining open: #87, #88, #89, #90. The individual task issues (#78–#86, #72) are **still open** — closing the player-visible ones needs a `## Player summary` per the scribe conventions; close them as a batch when convenient.
 - **Stale doc references** — `CLAUDE.md` repo-layout and `docs/REDESIGN.md` still describe `Sources/Native`, `Archive.lua`, etc. as present. Cosmetic; refresh when convenient.
 
 ## Tester feedback (#76)
@@ -87,7 +87,7 @@ Two testers, not three — **zong and _zpectre_ are the same person**.
 
 ## Open issues snapshot
 
-- **#77** umbrella · **#76** feedback · **#87, #88, #89, #72** remaining tasks. **#78–#86 are code-complete** (spine core, persistence, aggregates, teardown, nav shell, Summary/Ledger views); **#79–#86 can be closed** once an in-game smoke test passes. #72 (Appearance tab) is code-complete and unblocked by the v0.16.0 bump.
+- **#77** umbrella (checklist updated — #78–#86 + #72 ticked) · **#76** feedback · **#87, #88, #89, #90** remaining tasks. **#78–#86 + #72 shipped in alpha20** — the task issues are still open and can be batch-closed (Player summaries needed for the player-visible ones). **#92** (CF-12 interface mirror) filed + closed.
 - **#73** tab rework — close (superseded by #77).
 - **#24** → reframed into #86 · **#66** → reframed into #89 · **#65** zpectre divergence — was native-vs-sibling; **moot under projection** (no native capture). Revisit as a source-reconciliation facet of the Ledger view (#86) or close.
 - **#69 / #70 / #71 / #68** — alpha19 shipped fixes; close after tester confirmation. **Note #71** (manual import controller) is **superseded by #78** — the import controller it built was removed; close as superseded.
