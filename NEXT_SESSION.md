@@ -1,14 +1,15 @@
 # Tally — next session handoff
 
-alpha19 shipped 2026-05-14. The active workstream is the **projection-layer redesign** (umbrella #77). The data spine + persistence are complete, and **the alpha18/19 store has been torn down (#78)** — Tally is now a projection layer with no native capture and no stored ledger. Next is the new navigation + views (#83–#89).
+alpha19 shipped 2026-05-14. The active workstream is the **projection-layer redesign** (umbrella #77). The data spine + persistence are complete, **the alpha18/19 store has been torn down (#78)**, and the **new navigation + Summary/Ledger views (#83–#86) have landed**. Remaining on the #77 critical path: **#87 (Research view), #88 (minimap), #89 (Tools/CSV export)**.
 
 ## State
 
-- **Branch:** `main`. **~10 commits ahead of `origin/main`, unpushed.** Push needs explicit approval.
+- **Branch:** `main`. **9 commits ahead of `origin/main`, unpushed.** Push needs explicit approval.
 - **Latest tag:** `v0.1.0-alpha19`, shipped 2026-05-14. alpha20 not yet tagged.
-- **Cogworks pin:** `.pkgmeta` external at **`v0.14.2`**. Local `Libs/Cogworks-1.0/` is gitignored/package-time — still v0.14.1 until re-fetched.
+- **Interface:** `tally.toc` bumped **`120001` → `120007`** (CF-12 suite-wide bump for the new WoW client build, commit `4add4a4`). Held at the human release gate — not pushed/tagged. CF-12 lives in the **chronoforge** repo (#12) and was never mirrored into Tally's tracker.
+- **Cogworks pin:** `.pkgmeta` external bumped **`v0.14.2` → `v0.16.0`** (commit `e8cc14c`). Local `Libs/Cogworks-1.0/` (gitignored/package-time) **re-extracted to v0.16.0** for in-game testing. The bump clears the `CreateAppearanceTab` empty-tab bug (COG-75, fixed v0.14.3) that left #72 on the fallback path.
 - **Standards acknowledgments:** runbooks `2026-05-05a`, scribe player-facing `2026-04-30f`. The player-facing doc was WebFetched 2026-05-17 — top changelog entry still `2026-04-30f`, no update needed.
-- **⚠️ Nothing since the spine is smoke-tested in-game.** The whole spine + #81 + #82 + the #78 teardown are syntax-checked only (`luac -p`). The teardown is large and destructive — an in-game pass is the most urgent next step before any further build-out (see Loose ends).
+- **⚠️ Nothing since the spine is smoke-tested in-game.** The whole spine + #81 + #82 + the #78 teardown + the #83–#86 views are syntax-checked only (`luac -p`). The teardown is large and destructive, and the new views/interface/lib bumps are all unverified — an in-game pass is the most urgent next step before any further build-out (see Loose ends).
 
 ## Done 2026-06-07 — #82 aggregates + #78 teardown
 
@@ -42,19 +43,26 @@ The architecture was planned first (Plan agent), then built as **additive** modu
 - **`f83531d` feat(TLY-81)** — `Spine/NetWorthStore.lua` (`ns.Spine.NetWorthStore`): net-worth time series in `TallyDB.networth_snapshots`, one bounded row per calendar day (180-day retention), `capture()` runs net + owned valuations, `byRealm` fold. Cadence wired into `InventoryChanged`; `GetSeries` repointed the net-worth chart. `History.lua` still loaded.
 - **`64c5094` refactor(TLY-81)** — `History.lua` deleted. Orphaned `TallyDB.history`/`pricingHistory` dropped via a targeted nil (not a schema bump — that would re-wipe the live ledger, #78's job). `Core.lua` `GetNetWorthAt` consumers repointed to `NetWorthStore:GetAt`; `/tally history` reworked; `SettingsPage` "History cadence" → retention-only; `SetupWizard` history step removed. `Research/Aggregator`'s per-item price/inventory-history calls are `ns.History`-guarded — they no-op cleanly; Research's value-over-time returns with **[#91](https://github.com/gezmodean-wow/tally/issues/91)** (filed this session — bounded `Spine/PriceHistory.lua`).
 
-## Next work — the new navigation + views
+## Done 2026-06-26 — the new navigation + views (#83–#86)
 
-Per the #77 order, persistence (#81/#82) and the teardown (#78) are done. What remains: **#83/#84 (Live/Historical nav shell + date-range picker)** → **#85/#86/#87 (Summary/Ledger/Research views)** → **#88 minimap, #89 tools/CSV export**. After #78 the addon is intentionally mid-rewrite: the only content tab is **Inventory**, plus the gated **Spine** verification tab, **Settings**, **Appearance**. The new Live/Historical shell (#83/#84) is what reconnects the spine data to a real UI.
+- **`4c5ffa3` feat(TLY-83/84)** — left-bar `Live · Historical · Tools · Settings · Appearance` nav shell (REDESIGN §4) + Historical date-range picker. Live + Historical share subtab rendering; they differ only in how the window is set.
+- **`5238be4` feat(TLY-85)** — Summary view: net-worth chart, headline metrics, operating-cost + product breakdowns, projected over the `UnifiedLedger`/`Aggregates`/`NetWorthStore` spine APIs.
+- **`b92b619` feat(TLY-86)** — Ledger view: windowed unified ledger + reconciliation over `UnifiedLedger:Query`. Absorbs #24 (TSM-divergence reframe) and the #90 realm dimension.
 
-- **#83/#84 first** — build the left-bar `Live · Historical · Tools · Settings · Appearance` shell (REDESIGN §4). Live + Historical share subtab rendering; they differ only in how the window is set. The Spine page already proves `UnifiedLedger:Query` reads cleanly — the Summary/Ledger/Research views (#85–87) are projections over the same API.
+## Next work — Research view + minimap + tools
+
+Per the #77 order, persistence (#81/#82), the teardown (#78), and the nav + Summary/Ledger views (#83–#86) are done. What remains: **#87 (Research view)** → **#88 (minimap rework)** → **#89 (Tools/CSV export)**. Content tabs now live: **Live** (Summary/Ledger) + **Historical**, plus **Inventory**, the gated **Spine** verification tab, **Settings**, **Appearance**.
+
+- **#87 next** — the Research view is the last major projection. `Research/Aggregator` + `Research/Lifecycle` already read spine data via `Ledger:Reconcile` → `UnifiedLedger:Query`; #87 gives them in-game UI. Per-item value-over-time lands with **#91** (bounded `Spine/PriceHistory.lua`). Cross-toon flip P&L (toeknee Q4) is a Research-view capability the unified ledger can support.
 - **#90 (multi-realm)** is partly delivered (the `realm` dimension on every unified record); the remainder — per-source realm accuracy (FlipQueue `targetRealm`), connected-realm `group` rollup — threads through #86.
 - **Research return** — `Research/Aggregator` + `Research/Lifecycle` now read spine data via `Ledger:Reconcile` → `UnifiedLedger:Query`. They're wired to the Cogworks API but have **no in-game UI** until #87. Per-item value-over-time returns with **#91** (bounded `Spine/PriceHistory.lua`).
 
 ## Loose ends
 
-- **🔴 In-game smoke test is now the top priority.** The #78 teardown is large and destructive and entirely unverified in-game. First checks: addon loads without Lua error; `/tally` opens (Inventory/Settings/Appearance tabs); enable the Spine tab → `/tally spine parse` shows the loading bar + non-zero record count + aggregates line; the setup wizard (Welcome+Strategy) completes; `/tally reset confirm` works; `/tally diag` dumps cleanly. The schema bump (v19) wipes the old store on first login — expected.
+- **🔴 In-game smoke test is now the top priority.** The #78 teardown plus the #83–#86 views, the `120007` interface bump, and the Cogworks v0.16.0 lib bump are all unverified in-game. First checks: addon loads without Lua error on a `120007` client; `/tally` opens the new left-bar shell (**Live → Summary/Ledger**, **Historical**, Inventory, Settings, Appearance); enable the Spine tab → `/tally spine parse` shows the loading bar + non-zero record count + aggregates line; the setup wizard (Welcome+Strategy) completes; `/tally reset confirm` works; `/tally diag` dumps cleanly. The schema bump (v19) wipes the old store on first login — expected.
+- **#72 should now render for real** — the local lib is v0.16.0, so the Appearance tab exercises the fixed `CreateAppearanceTab` (COG-75) + the full color editor (COG-73), not the empty-tab fallback. Verify in the smoke test.
+- **CF-12 not mirrored into Tally's tracker** — the interface bump came from chronoforge#12; no `TLY` issue exists for it. File one (or close-loop on the umbrella) if you want it tracked locally.
 - **Check `- [x] #72` and `- [x] #78` on the #77 umbrella checklist** — need `gh` remote writes (approval).
-- **#72 not smoke-tested in-game** — renders on the fallback path on stale v0.14.1; re-fetch the `.pkgmeta` external at v0.14.2 to exercise the real `CreateAppearanceTab`.
 - **Stale doc references** — `CLAUDE.md` repo-layout and `docs/REDESIGN.md` still describe `Sources/Native`, `Archive.lua`, etc. as present. Cosmetic; refresh when convenient.
 
 ## Tester feedback (#76)
@@ -79,7 +87,7 @@ Two testers, not three — **zong and _zpectre_ are the same person**.
 
 ## Open issues snapshot
 
-- **#77** umbrella · **#76** feedback · **#83–#90, #72** remaining tasks. **#78–#82 are code-complete** (spine core, persistence, aggregates, teardown); **#79/#80/#81/#82 can be closed** once an in-game smoke test passes.
+- **#77** umbrella · **#76** feedback · **#87, #88, #89, #72** remaining tasks. **#78–#86 are code-complete** (spine core, persistence, aggregates, teardown, nav shell, Summary/Ledger views); **#79–#86 can be closed** once an in-game smoke test passes. #72 (Appearance tab) is code-complete and unblocked by the v0.16.0 bump.
 - **#73** tab rework — close (superseded by #77).
 - **#24** → reframed into #86 · **#66** → reframed into #89 · **#65** zpectre divergence — was native-vs-sibling; **moot under projection** (no native capture). Revisit as a source-reconciliation facet of the Ledger view (#86) or close.
 - **#69 / #70 / #71 / #68** — alpha19 shipped fixes; close after tester confirmation. **Note #71** (manual import controller) is **superseded by #78** — the import controller it built was removed; close as superseded.
